@@ -1,0 +1,271 @@
+name: Build Java Lib
+on:
+  workflow_dispatch:
+    inputs:
+      precompiledRunId:
+        description: "Run ID of the precompiled-bin job whose artifacts should be used"
+        required: true
+        type: string
+      linuxBuilderImage:
+        description: "Ubuntu 22.04 image with GCC 13 for Linux builds"
+        required: false
+        default: "ghcr.io/ladybugdb/ubuntu-22.04-gcc13:latest"
+        type: string
+  workflow_call:
+    inputs:
+      isNightly:
+        type: boolean
+        required: true
+        default: false
+      precompiledRunId:
+        type: string
+        required: true
+      linuxBuilderImage:
+        type: string
+        required: false
+        default: "ghcr.io/ladybugdb/ubuntu-22.04-gcc13:latest"
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: 1
+
+jobs:
+  build-linux-java-x86_64:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: ${{ inputs.linuxBuilderImage }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      LBUG_LINUX_VARIANT: compat
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set precompiled lib path
+        run: |
+          echo "LBUG_JAVA_PRECOMPILED_DIR=${GITHUB_WORKSPACE}/precompiled-liblbug" >> "$GITHUB_ENV"
+          echo "LBUG_JAVA_PRECOMPILED_LIB_PATH=${GITHUB_WORKSPACE}/precompiled-liblbug/liblbug.a" >> "$GITHUB_ENV"
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/java_api
+
+      - name: Download precompiled liblbug
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LBUG_LIB_KIND: static
+          LBUG_PRECOMPILED_RUN_ID: ${{ inputs.precompiledRunId }}
+        run: |
+          export LBUG_TARGET_DIR="$LBUG_JAVA_PRECOMPILED_DIR"
+          rm -rf "$LBUG_TARGET_DIR"
+          ./scripts/download-liblbug.sh
+
+      - name: Install uv
+        run: python3 -m pip install uv
+
+      - name: Update nightly version
+        if: ${{ inputs.isNightly == true }}
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      - name: Build Java lib for Linux
+        env:
+          CC: gcc-13
+          CXX: g++-13
+          LDFLAGS: "-static-libstdc++"
+        run: |
+          export EXTRA_CMAKE_FLAGS="-DBUILD_LBUG=FALSE -DBUILD_SHELL=FALSE -DLBUG_API_USE_PRECOMPILED_LIB=TRUE -DLBUG_API_PRECOMPILED_LIB_PATH=${LBUG_JAVA_PRECOMPILED_LIB_PATH}"
+          make GEN=Ninja java
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: java-lib-linux-x86_64
+          path: tools/java_api/build/liblbug_java_native*
+
+  build-linux-java-aarch64:
+    runs-on: ubuntu-22.04-arm
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: ${{ inputs.linuxBuilderImage }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      LBUG_LINUX_VARIANT: compat
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set precompiled lib path
+        run: |
+          echo "LBUG_JAVA_PRECOMPILED_DIR=${GITHUB_WORKSPACE}/precompiled-liblbug" >> "$GITHUB_ENV"
+          echo "LBUG_JAVA_PRECOMPILED_LIB_PATH=${GITHUB_WORKSPACE}/precompiled-liblbug/liblbug.a" >> "$GITHUB_ENV"
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/java_api
+
+      - name: Download precompiled liblbug
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LBUG_LIB_KIND: static
+          LBUG_PRECOMPILED_RUN_ID: ${{ inputs.precompiledRunId }}
+        run: |
+          export LBUG_TARGET_DIR="$LBUG_JAVA_PRECOMPILED_DIR"
+          rm -rf "$LBUG_TARGET_DIR"
+          ./scripts/download-liblbug.sh
+
+      - name: Install uv
+        run: python3 -m pip install uv
+
+      - name: Update nightly version
+        if: ${{ inputs.isNightly == true }}
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      - name: Build Java lib for Linux
+        env:
+          CC: gcc-13
+          CXX: g++-13
+          LDFLAGS: "-static-libstdc++"
+        run: |
+          export EXTRA_CMAKE_FLAGS="-DBUILD_LBUG=FALSE -DBUILD_SHELL=FALSE -DLBUG_API_USE_PRECOMPILED_LIB=TRUE -DLBUG_API_PRECOMPILED_LIB_PATH=${LBUG_JAVA_PRECOMPILED_LIB_PATH}"
+          make GEN=Ninja java
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: java-lib-linux-aarch64
+          path: tools/java_api/build/liblbug_java_native*
+
+  build-mac-java-arm:
+    runs-on: macos-latest
+    env:
+      LBUG_JAVA_PRECOMPILED_DIR: ${{ github.workspace }}/precompiled-liblbug
+      LBUG_JAVA_PRECOMPILED_LIB_PATH: ${{ github.workspace }}/precompiled-liblbug/liblbug.a
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/java_api
+
+      - name: Download precompiled liblbug
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LBUG_LIB_KIND: static
+          LBUG_PRECOMPILED_RUN_ID: ${{ inputs.precompiledRunId }}
+          LBUG_TARGET_DIR: ${{ env.LBUG_JAVA_PRECOMPILED_DIR }}
+        run: |
+          rm -rf "$LBUG_TARGET_DIR"
+          ./scripts/download-liblbug.sh
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Update nightly version
+        if: ${{ inputs.isNightly == true }}
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      - name: Build Java lib for Apple Silicon
+        env:
+          EXTRA_CMAKE_FLAGS: -DBUILD_LBUG=FALSE -DBUILD_SHELL=FALSE -DLBUG_API_USE_PRECOMPILED_LIB=TRUE -DLBUG_API_PRECOMPILED_LIB_PATH=${{ env.LBUG_JAVA_PRECOMPILED_LIB_PATH }}
+          MACOSX_DEPLOYMENT_TARGET: 13.3
+          ARCHFLAGS: "-arch arm64"
+        run: |
+          arch -arm64 make GEN=Ninja java
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: java-lib-osx-arm64
+          path: tools/java_api/build/liblbug_java_native*
+
+  build-windows-java:
+    runs-on: windows-2022
+    env:
+      LBUG_JAVA_PRECOMPILED_DIR: ${{ github.workspace }}/precompiled-liblbug
+      LBUG_JAVA_PRECOMPILED_LIB_PATH: ${{ github.workspace }}/precompiled-liblbug/lbug.lib
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/java_api
+
+      - name: Download precompiled liblbug
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LBUG_LIB_KIND: static
+          LBUG_PRECOMPILED_RUN_ID: ${{ inputs.precompiledRunId }}
+          LBUG_TARGET_DIR: ${{ env.LBUG_JAVA_PRECOMPILED_DIR }}
+        run: |
+          rm -rf "$LBUG_TARGET_DIR"
+          ./scripts/download-liblbug.sh
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Update nightly version
+        if: ${{ inputs.isNightly == true }}
+        shell: bash
+        run: |
+          uv venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            source .venv/Scripts/activate
+          else
+            source .venv/bin/activate
+          fi
+          python3 update-nightly-build-version.py
+        working-directory: ./scripts
+
+      - name: Build Java lib for Windows
+        shell: cmd
+        env:
+          EXTRA_CMAKE_FLAGS: -DBUILD_LBUG=FALSE -DBUILD_SHELL=FALSE -DLBUG_API_USE_PRECOMPILED_LIB=TRUE -DLBUG_API_PRECOMPILED_LIB_PATH=${{ env.LBUG_JAVA_PRECOMPILED_LIB_PATH }}
+        run: |
+          powershell.exe -Command "Add-MpPreference -ExclusionPath '${{ github.workspace }}'"
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          make GEN=Ninja java
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: java-lib-win-x86_64
+          path: tools/java_api/build/liblbug_java_native*

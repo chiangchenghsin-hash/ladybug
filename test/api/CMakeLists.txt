@@ -1,0 +1,20 @@
+add_lbug_api_test(api_test
+        api_test.cpp
+        file_search_path_test.cpp
+        partition_routing_test.cpp
+        system_config_test.cpp
+        arrow_test.cpp
+        arrow_node_table_test.cpp
+        arrow_rel_table_test.cpp
+        arrow_complex_queries_test.cpp
+        arrow_csr_rel_table_test.cpp
+        arrow_error_scenarios_test.cpp
+        arrow_drop_table_test.cpp
+        drop_index_test.cpp
+        arrow_table_function_test.cpp
+        prepare_test.cpp
+        project_graph_csr_test.cpp
+        result_value_test.cpp
+        storage_driver_test.cpp
+        udf_test.cpp
+        read_only_test.cpp)

@@ -1,0 +1,174 @@
+name: Build WebAssembly module
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      isNightly:
+        type: boolean
+        required: true
+        default: false
+
+jobs:
+  build-and-test-wasm:
+    runs-on: ubuntu-latest
+    env:
+      TEST_JOBS: 16
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/wasm dataset extension
+
+      - name: Check if Sunday
+        id: check-sunday
+        run: |
+          day_of_week=$(date +%u)
+          if [ "$day_of_week" -eq 7 ]; then
+            echo "is_sunday=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_sunday=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install uv
+        run: python3 -m pip install uv
+
+      - name: Install CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Update nightly version
+        if: ${{ inputs.isNightly == true }}
+        env:
+          PIP_BREAK_SYSTEM_PACKAGES: 1
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+      
+      - name: Install dependencies
+        working-directory: tools/wasm
+        run: npm ci
+
+      - name: Setup Emscripten
+        run: |
+          if [ ! -d /home/runner/emsdk ]; then
+            git clone https://github.com/emscripten-core/emsdk.git /home/runner/emsdk
+          fi
+          cd /home/runner/emsdk
+          ./emsdk install latest
+          ./emsdk activate latest
+
+      - name: Verify Emscripten
+        run: |
+          source /home/runner/emsdk/emsdk_env.sh
+          emcc -v
+
+      - name: Install ccache
+        run: |
+          sudo apt-get install -y ccache
+
+      - name: Setup ccache (package)
+        if: ${{ inputs.isNightly != true }}
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: wasm-package-${{ runner.os }}-v2
+          max-size: 5G
+          restore-keys: |
+            wasm-package-${{ runner.os }}-
+
+      - name: Setup ccache (test)
+        if: ${{ inputs.isNightly == true }}
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: wasm-test-${{ runner.os }}-v2
+          max-size: 5G
+          restore-keys: |
+            wasm-test-${{ runner.os }}-
+
+      - name: Configure ccache for Emscripten
+        run: |
+          ccache --set-config=compiler_check=content
+          ccache --set-config=hash_dir=false
+          ccache --set-config=base_dir=${{ github.workspace }}
+          ccache --zero-stats
+
+      - name: Build WebAssembly package
+        working-directory: tools/wasm
+        env:
+          GEN: Ninja
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          EXTRA_CMAKE_FLAGS: -DBUILD_EXTENSIONS=httpfs -DEXTENSION_STATIC_LINK_LIST=httpfs
+        run: |
+          source /home/runner/emsdk/emsdk_env.sh
+          npm run build
+          ccache -s
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lbug-deploy-wasm
+          path: tools/wasm/lbug-wasm.tar.gz
+
+      - name: API test
+        working-directory: tools/wasm
+        run: npm run test
+
+      - name: Kernel build
+        if: ${{ inputs.isNightly == true }}
+        env:
+          GEN: Ninja
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: |
+          source /home/runner/emsdk/emsdk_env.sh
+          make wasmtest-build
+
+      - name: Generate dictionary-bug fixtures
+        if: ${{ inputs.isNightly == true }}
+        run: uv run --with pyarrow python3 scripts/generate-dictionary-bug-fixture.py
+
+      - name: Kernel test
+        if: ${{ inputs.isNightly == true }}
+        run: ctest --test-dir build/wasm/test/ --output-on-failure -j ${TEST_JOBS} --timeout 600 -E 'hash_leak\.LargeAggregateLeakTest|CopyTest\.GracefulBMExceptionHandlingManyThreads|lsqb_queries\.LSQBTest|lsqb_queries_parquet\.LSQBTestParquet'
+
+      - name: Kernel test (in memory)
+        if: ${{ inputs.isNightly == true }}
+        env:
+          IN_MEM_MODE: true
+        run: ctest --test-dir build/wasm/test/ --output-on-failure -j ${TEST_JOBS} --timeout 600 -E 'hash_leak\.LargeAggregateLeakTest|CopyTest\.GracefulBMExceptionHandlingManyThreads|lsqb_queries\.LSQBTest|lsqb_queries_parquet\.LSQBTestParquet'
+
+      - name: Clean up for single-threaded build
+        if: ${{ inputs.isNightly == true && steps.check-sunday.outputs.is_sunday == 'true' }}
+        run: make clean CMAKE=/usr/bin/cmake
+
+      - name: Setup ccache (single-threaded)
+        if: ${{ inputs.isNightly == true && steps.check-sunday.outputs.is_sunday == 'true' }}
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: wasm-test-single-${{ runner.os }}-v2
+          max-size: 5G
+          restore-keys: |
+            wasm-test-single-${{ runner.os }}-
+
+      - name: Configure ccache for single-threaded build
+        if: ${{ inputs.isNightly == true && steps.check-sunday.outputs.is_sunday == 'true' }}
+        run: |
+          ccache --set-config=compiler_check=content
+          ccache --set-config=hash_dir=false
+          ccache --set-config=base_dir=${{ github.workspace }}
+          ccache --zero-stats
+
+      - name: Kernel build & test (single-threaded)
+        if: ${{ inputs.isNightly == true && steps.check-sunday.outputs.is_sunday == 'true' }}
+        env:
+          GEN: Ninja
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          SINGLE_THREADED: true
+          TEST_FILTER: 'hash_leak\.LargeAggregateLeakTest|CopyTest\.GracefulBMExceptionHandlingManyThreads|lsqb_queries\.LSQBTest|lsqb_queries_parquet\.LSQBTestParquet'
+        run: |
+          source /home/runner/emsdk/emsdk_env.sh
+          make wasmtest

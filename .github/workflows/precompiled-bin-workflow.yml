@@ -1,0 +1,394 @@
+name: Build Precompiled Binaries
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      isNightly:
+        type: boolean
+        required: true
+        default: false
+
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: 1
+
+jobs:
+  build-precompiled-bin:
+    strategy:
+      matrix:
+        include:
+          # Linux compat: broad glibc compatibility via manylinux_2_28 containers,
+          # gcc-toolset-13 with -static-libstdc++. Produces shared + static + CLI.
+          - os: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            variant: compat
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            variant: compat
+            arch: aarch64
+          # Linux perf: LLVM 21 on a modern runner. Static library only (for
+          # use by language bindings such as Node.js and Java).
+          - os: ubuntu-24.04
+            variant: perf
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            variant: perf
+            arch: aarch64
+          # macOS Intel (x86_64). Produces shared + static + CLI.
+          - os: macos-15-intel
+            arch: x86_64
+          # macOS Apple Silicon (arm64). Produces shared + static + CLI.
+          - os: macos-latest
+            arch: arm64
+          # Windows x86_64. Produces shared + static + CLI.
+          - os: windows-2022
+            arch: x86_64
+            msvc_arch: x64
+            openssl_exe: Win64OpenSSL_Light-3_5_9.exe
+          # Windows ARM64. Produces shared + static + CLI.
+          - os: windows-11-arm
+            arch: arm64
+            msvc_arch: arm64
+            openssl_exe: Win64ARMOpenSSL_Light-3_5_9.exe
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Dependency installation ----
+
+      - name: Install build dependencies (Linux compat)
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        run: |
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled powertools
+          dnf install -y cmake ninja-build python3 python3-pip git ccache gcc-toolset-13 openssl3 openssl3-devel pkg-config
+
+      - name: Install build dependencies (Linux perf)
+        if: runner.os == 'Linux' && matrix.variant == 'perf'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y cmake ninja-build python3 python3-pip git ccache curl libssl-dev pkg-config
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
+
+      - name: Install uv (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install uv (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: python3 -m pip install uv
+
+      # ---- ccache ----
+
+      - name: Setup ccache (Linux)
+        if: runner.os == 'Linux'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: precompiled-bin-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            precompiled-bin-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-refs/heads/main
+            precompiled-bin-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-
+
+      - name: Setup ccache (macOS)
+        if: runner.os == 'macOS'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: precompiled-bin-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            precompiled-bin-${{ runner.os }}-${{ matrix.arch }}-refs/heads/main
+            precompiled-bin-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Setup ccache (Windows)
+        if: runner.os == 'Windows'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: precompiled-bin-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            precompiled-bin-${{ runner.os }}-${{ matrix.arch }}-refs/heads/main
+            precompiled-bin-${{ runner.os }}-${{ matrix.arch }}-
+
+      # ---- Optional nightly version bump ----
+
+      - name: Update nightly version
+        if: ${{ inputs.isNightly == true }}
+        shell: bash
+        run: |
+          uv venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            source .venv/Scripts/activate
+          else
+            source .venv/bin/activate
+          fi
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      # ---- Build ----
+
+      - name: Build (Linux compat)
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: |
+          source /opt/rh/gcc-toolset-13/enable
+          export CC=gcc
+          export CXX=g++
+          export LDFLAGS="-static-libstdc++"
+          # Ensure CMake finds OpenSSL 3 installed by openssl3 packages inside the manylinux container
+          export EXTRA_CMAKE_FLAGS="-DOPENSSL_ROOT_DIR=/usr/lib64/openssl3 -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so"
+          make GEN=Ninja
+          make install
+
+      - name: Build (Linux perf)
+        if: runner.os == 'Linux' && matrix.variant == 'perf'
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CC: clang-21
+          CXX: clang++-21
+        run: |
+          make GEN=Ninja
+          make install
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          MACOSX_DEPLOYMENT_TARGET: 13.3
+        run: |
+          make GEN=Ninja
+          make install
+
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+
+      - name: Install OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Recent Windows images no longer ship C:/Program Files/OpenSSL,
+          # so download the Shining Light Productions installer directly
+          # (Inno Setup, silent). winget is not available on windows-11-arm.
+          $url = "https://slproweb.com/download/${{ matrix.openssl_exe }}"
+          $dst = "$env:RUNNER_TEMP\slp_openssl.exe"
+          Invoke-WebRequest -Uri $url -OutFile $dst
+          Start-Process -FilePath $dst -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            Write-Error "OpenSSL install not found at C:\Program Files\OpenSSL"
+            exit 1
+          }
+          "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
+
+      - name: Setup MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: |
+          powershell.exe -Command "Add-MpPreference -ExclusionPath '${{ github.workspace }}'"
+          make GEN=Ninja
+          make install
+
+      # ---- Collect artifacts ----
+
+      - name: Collect artifacts (Linux compat)
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        run: |
+          cp install/include/lbug.h .
+          cp install/include/lbug.hpp .
+          # Preserve the versioned SONAME symlink chain so that consumers
+          # linking against liblbug.so can resolve the SONAME (liblbug.so.0)
+          # at load time. See precompiled-bin-workflow.yml SONAME check below.
+          cp -P install/lib*/liblbug.so install/lib*/liblbug.so.* .
+          cp -L install/lib*/liblbug.a .
+          cp install/bin/lbug .
+
+      - name: Collect artifacts (Linux perf)
+        if: runner.os == 'Linux' && matrix.variant == 'perf'
+        run: |
+          cp install/include/lbug.h .
+          cp install/include/lbug.hpp .
+          cp -L install/lib*/liblbug.a .
+
+      - name: Collect artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cp install/include/lbug.h .
+          cp install/include/lbug.hpp .
+          # Preserve the versioned install_name symlink chain so that consumers
+          # linking against liblbug.dylib can resolve @rpath/liblbug.0.dylib
+          # at load time. See precompiled-bin-workflow.yml install_name check below.
+          cp -P install/lib/liblbug.dylib install/lib/liblbug.*.dylib .
+          cp -L install/lib/liblbug.a .
+          cp install/bin/lbug .
+
+      - name: Verify binary information (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          file -b lbug
+          otool -l lbug | grep minos
+          file -b liblbug.dylib
+          otool -l liblbug.dylib | grep minos
+
+      - name: Collect artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item install\include\lbug.h .
+          Copy-Item install\include\lbug.hpp .
+          Copy-Item install\bin\lbug_shared.dll .
+          Copy-Item install\lib\lbug_shared.lib .
+          Copy-Item install\lib\lbug.lib .
+          Copy-Item install\bin\lbug_shell.exe lbug.exe
+
+      # ---- Create archives ----
+
+      - name: Create tarballs (Linux compat)
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        run: |
+          # liblbug.so, liblbug.so.0, liblbug.so.0.15.3: unversioned link-time
+          # name, SONAME, and real file. The latter two are symlinks preserved
+          # by tar so that DT_NEEDED resolution works at load time.
+          tar -czvf liblbug-linux-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.so liblbug.so.*
+          tar -czvf liblbug-static-linux-${{ matrix.arch }}-compat.tar.gz lbug.h lbug.hpp liblbug.a
+          tar -czvf lbug_cli-linux-${{ matrix.arch }}.tar.gz lbug
+
+      - name: Create tarballs (Linux perf)
+        if: runner.os == 'Linux' && matrix.variant == 'perf'
+        run: |
+          tar -czvf liblbug-static-linux-${{ matrix.arch }}-perf.tar.gz lbug.h lbug.hpp liblbug.a
+
+      - name: Create tarballs (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # liblbug.dylib, liblbug.0.dylib, liblbug.0.15.3.dylib: unversioned
+          # link-time name, install_name, and real file. The latter two are
+          # symlinks preserved by tar so that LC_LOAD_DYLIB resolution works
+          # at load time.
+          tar -czvf liblbug-osx-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.dylib liblbug.*.dylib
+          tar -czvf liblbug-static-osx-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.a
+          tar -czvf lbug_cli-osx-${{ matrix.arch }}.tar.gz lbug
+
+      - name: Create zip files (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path lbug.h, lbug.hpp, lbug_shared.dll, lbug_shared.lib -DestinationPath liblbug-windows-${{ matrix.arch }}.zip
+          Compress-Archive -Path lbug.h, lbug.hpp, lbug.lib -DestinationPath liblbug-static-windows-${{ matrix.arch }}.zip
+          Compress-Archive -Path lbug.exe -DestinationPath lbug_cli-windows-${{ matrix.arch }}.zip
+
+      # ---- Verify shared-library tarball self-consistency ----
+      # Guards against the class of bug where the tarball's on-disk filenames
+      # don't match the SONAME / install_name embedded in the shared library.
+      # A consumer linking -llbug resolves the link-time name (liblbug.so /
+      # liblbug.dylib) and stamps the SONAME / install_name into its own
+      # binary; that stamped name is what the dynamic loader then looks up at
+      # runtime, so it has to be present in the tarball too.
+
+      - name: Verify tarball SONAME consistency (Linux compat)
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        run: |
+          set -euo pipefail
+          tarball=liblbug-linux-${{ matrix.arch }}.tar.gz
+          soname=$(readelf -d liblbug.so | awk '/\(SONAME\)/ {gsub(/[][]/,"",$NF); print $NF}')
+          entries=$(tar -tzf "$tarball" | sort)
+          printf 'SONAME: %s\n%s entries:\n%s\n' "$soname" "$tarball" "$entries"
+          if ! grep -Fxq "$soname" <<<"$entries"; then
+            echo "::error::SONAME '$soname' is not present as an entry in $tarball"
+            exit 1
+          fi
+
+      - name: Verify tarball install_name consistency (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          tarball=liblbug-osx-${{ matrix.arch }}.tar.gz
+          install_name=$(otool -D liblbug.dylib | awk 'NR==2')
+          base=$(basename "$install_name")
+          entries=$(tar -tzf "$tarball" | sort)
+          printf 'install_name: %s\nbasename: %s\n%s entries:\n%s\n' "$install_name" "$base" "$tarball" "$entries"
+          if ! grep -Fxq "$base" <<<"$entries"; then
+            echo "::error::install_name '$install_name' (basename '$base') is not present as an entry in $tarball"
+            exit 1
+          fi
+
+      # ---- Upload artifacts ----
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        with:
+          name: liblbug-linux-${{ matrix.arch }}
+          path: liblbug-linux-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        with:
+          name: liblbug-static-linux-${{ matrix.arch }}-compat
+          path: liblbug-static-linux-${{ matrix.arch }}-compat.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux' && matrix.variant == 'compat'
+        with:
+          name: lbug_cli-linux-${{ matrix.arch }}
+          path: lbug_cli-linux-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux' && matrix.variant == 'perf'
+        with:
+          name: liblbug-static-linux-${{ matrix.arch }}-perf
+          path: liblbug-static-linux-${{ matrix.arch }}-perf.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: liblbug-osx-${{ matrix.arch }}
+          path: liblbug-osx-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: liblbug-static-osx-${{ matrix.arch }}
+          path: liblbug-static-osx-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: lbug_cli-osx-${{ matrix.arch }}
+          path: lbug_cli-osx-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: liblbug-windows-${{ matrix.arch }}
+          path: liblbug-windows-${{ matrix.arch }}.zip
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: liblbug-static-windows-${{ matrix.arch }}
+          path: liblbug-static-windows-${{ matrix.arch }}.zip
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: lbug_cli-windows-${{ matrix.arch }}
+          path: lbug_cli-windows-${{ matrix.arch }}.zip

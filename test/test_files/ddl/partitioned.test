@@ -1,0 +1,321 @@
+-DATASET CSV empty
+--
+
+-CASE PartitionedCreateHash
+-STATEMENT CREATE NODE TABLE Orders (id INT64 PRIMARY KEY, region STRING, amount INT64) PARTITION BY HASH (region) PARTITIONS 4;
+---- 1
+Table Orders has been created.
+# The parent owns no storage; its records live in the partition subgraphs Orders_p0..p3.
+-STATEMENT CALL show_tables() RETURN name ORDER BY name;
+---- 5
+Orders
+Orders_p0
+Orders_p1
+Orders_p2
+Orders_p3
+-STATEMENT CREATE (:Orders_p0 {id: 1, region: 'east', amount: 10});
+---- ok
+-STATEMENT CREATE (:Orders_p0 {id: 2, region: 'east', amount: 20});
+---- ok
+-STATEMENT CREATE (:Orders_p1 {id: 3, region: 'west', amount: 30});
+---- ok
+-STATEMENT CREATE (:Orders_p3 {id: 4, region: 'north', amount: 40});
+---- ok
+# Querying the parent unions over every partition subgraph.
+-STATEMENT MATCH (o:Orders) RETURN o.id, o.region, o.amount ORDER BY o.id;
+---- 4
+1|east|10
+2|east|20
+3|west|30
+4|north|40
+-STATEMENT MATCH (o:Orders) RETURN count(*) AS total;
+---- 1
+4
+# A specific partition can be queried directly too.
+-STATEMENT MATCH (o:Orders_p0) RETURN o.id ORDER BY o.id;
+---- 2
+1
+2
+
+-CASE PartitionedCreateRange
+# RANGE partitioning is blocked until dynamic, distribution-aware splitting exists: refuse the
+# DDL instead of silently falling back to hash routing.
+-STATEMENT CREATE NODE TABLE Events (id INT64 PRIMARY KEY, ts TIMESTAMP, value DOUBLE) PARTITION BY RANGE (ts) PARTITIONS 5;
+---- error
+Binder exception: RANGE partitioning is not implemented yet. RANGE requires partition bounds derived from the actual value distribution, which is future work. Use PARTITION BY HASH instead.
+
+-CASE PartitionedWriteRouting
+-STATEMENT CREATE NODE TABLE T (id INT64 PRIMARY KEY, k STRING) PARTITION BY HASH (k) PARTITIONS 3;
+---- 1
+Table T has been created.
+# Every node table is backed by a subgraph: the parent and its partition subgraphs are all visible.
+-STATEMENT CALL show_graphs() RETURN *;
+---- 4
+T|STANDARD
+T_p0|STANDARD
+T_p1|STANDARD
+T_p2|STANDARD
+# Single-row CREATE into the parent is routed into the partition matching the key.
+-STATEMENT CREATE (:T {id: 100, k: 'a'});
+---- ok
+-STATEMENT CREATE (:T {id: 101, k: 'b'});
+---- ok
+# Batched COPY into the parent routes every row into the correct partition subgraph.
+-STATEMENT COPY T FROM '${LBUG_ROOT_DIRECTORY}/test/test_files/ddl/partitioned.csv';
+---- 1
+5 tuples have been copied to the T table.|0|[]
+-STATEMENT MATCH (n:T) RETURN n.id, n.k ORDER BY n.id;
+---- 7
+1|east
+2|west
+3|north
+4|south
+5|east
+100|a
+101|b
+
+-CASE PartitionedValidation
+-STATEMENT CREATE NODE TABLE Bad1 (id INT64 PRIMARY KEY, data STRING[]) PARTITION BY HASH (data) PARTITIONS 2;
+---- error
+Binder exception: Partition column data has type STRING[] which is not eligible for partitioning. Partition columns must be an integral, temporal or textual type.
+-STATEMENT CREATE NODE TABLE Bad2 (id INT64 PRIMARY KEY, k STRING, PARTITION_MISSING INT64) PARTITION BY HASH (nope) PARTITIONS 2;
+---- error
+Binder exception: Partition column nope does not exist. A partition column must be an existing column of the table.
+-STATEMENT CREATE NODE TABLE Bad3 (id INT64 PRIMARY KEY, k STRING) PARTITION BY HASH (k) PARTITIONS 0;
+---- error
+Binder exception: Number of partitions must be greater than 0.
+
+-CASE PartitionedDropCascades
+-STATEMENT CREATE NODE TABLE P (id INT64 PRIMARY KEY, k STRING) PARTITION BY HASH (id) PARTITIONS 2;
+---- 1
+Table P has been created.
+-STATEMENT CREATE (:P_p0 {id: 1, k: 'a'});
+---- ok
+-STATEMENT CREATE (:P_p1 {id: 2, k: 'b'});
+---- ok
+-STATEMENT MATCH (n:P) RETURN count(*);
+---- 1
+2
+-STATEMENT DROP TABLE P;
+---- ok
+# Dropping the parent cascades to its partition subgraphs, which also removes their subgraphs.
+-STATEMENT CALL show_graphs() RETURN *;
+---- 0
+-STATEMENT CALL show_tables() RETURN count(*);
+---- 1
+0
+
+-CASE PartitionedDropProtection
+-STATEMENT CREATE NODE TABLE P (id INT64 PRIMARY KEY, k STRING) PARTITION BY HASH (k) PARTITIONS 2;
+---- 1
+Table P has been created.
+# A partition subgraph is owned by its table: DROP GRAPH refuses it (and the parent, which is
+# also a node-table subgraph).
+-STATEMENT DROP GRAPH P_p0;
+---- error
+Binder exception: Cannot drop graph P_p0: it is a node-table subgraph. Drop the node table instead.
+-STATEMENT DROP GRAPH P;
+---- error
+Binder exception: Cannot drop graph P: it is a node-table subgraph. Drop the node table instead.
+# Dropping a partition directly would leave the parent pointing at a missing table.
+-STATEMENT DROP TABLE P_p0;
+---- error
+Binder exception: Cannot drop table P_p0 because it is a partition of partitioned table P. Drop P instead.
+
+-CASE PartitionedAlterRestrictions
+-STATEMENT CREATE NODE TABLE P (id INT64 PRIMARY KEY, k STRING) PARTITION BY HASH (k) PARTITIONS 2;
+---- 1
+Table P has been created.
+# Partitions are managed by their parent and cannot be altered directly.
+-STATEMENT ALTER TABLE P_p0 RENAME TO P_zero;
+---- error
+Binder exception: Cannot ALTER partition P_p0: it is managed by partitioned table P.
+-STATEMENT ALTER TABLE P_p0 ADD extra INT64 DEFAULT 0;
+---- error
+Binder exception: Cannot ALTER partition P_p0: it is managed by partitioned table P.
+# Until ALTER propagation lands only RENAME is accepted on the parent.
+-STATEMENT ALTER TABLE P ADD extra INT64 DEFAULT 0;
+---- error
+Binder exception: Cannot ALTER partitioned table P: ALTER on a partitioned table is not supported yet. Drop and recreate the table instead.
+-STATEMENT ALTER TABLE P RENAME TO Q;
+---- 1
+Table P renamed to Q.
+# Renaming the parent keeps the <parent>_p<i> naming of its partitions in step.
+-STATEMENT CALL show_tables() RETURN name ORDER BY name;
+---- 3
+Q
+Q_p0
+Q_p1
+-STATEMENT CREATE (:Q {id: 1, k: 'a'});
+---- ok
+-STATEMENT MATCH (n:Q) RETURN n.id, n.k;
+---- 1
+1|a
+
+-CASE PartitionedUpdateKey
+-STATEMENT CREATE NODE TABLE T (id INT64 PRIMARY KEY, k STRING) PARTITION BY HASH (k) PARTITIONS 2;
+---- 1
+Table T has been created.
+-STATEMENT CREATE (:T {id: 1, k: 'a'});
+---- ok
+# Updating the partition column would require moving rows between partitions, which is not
+# supported: refuse rather than leave the row in a partition that no longer matches its key.
+-STATEMENT MATCH (t:T) SET t.k = 'b';
+---- error
+Binder exception: Cannot set property k in table T_p0 because it is the partition column of partitioned table T. Updating the partition key would move the row to another partition, which is not supported. Try delete and then insert with the new value.
+-STATEMENT MATCH (t:T_p1) SET t.k = 'b';
+---- error
+Binder exception: Cannot set property k in table T_p1 because it is the partition column of partitioned table T. Updating the partition key would move the row to another partition, which is not supported. Try delete and then insert with the new value.
+# MERGE ... ON MATCH SET hits the same restriction.
+-STATEMENT MERGE (t:T {id: 1}) ON MATCH SET t.k = 'c';
+---- error
+Binder exception: Cannot set property k in table T_p0 because it is the partition column of partitioned table T. Updating the partition key would move the row to another partition, which is not supported. Try delete and then insert with the new value.
+# The primary-key restriction still takes precedence for the key column.
+-STATEMENT MATCH (t:T {id: 1}) SET t.id = 2;
+---- error
+Binder exception: Cannot set property id in table T_p0 because it is used as primary key. Try delete and then insert.
+# The delete + re-insert workaround routes the row by its new key value.
+-STATEMENT MATCH (t:T {id: 1}) DELETE t;
+---- ok
+-STATEMENT CREATE (:T {id: 1, k: 'b'});
+---- ok
+-STATEMENT MATCH (t:T) RETURN t.id, t.k;
+---- 1
+1|b
+
+-CASE PartitionedRelTables
+-STATEMENT CREATE NODE TABLE Item (id INT64 PRIMARY KEY);
+---- 1
+Table Item has been created.
+-STATEMENT CREATE NODE TABLE Orders (id INT64 PRIMARY KEY, region STRING) PARTITION BY HASH (region) PARTITIONS 2;
+---- 1
+Table Orders has been created.
+# FROM/TO against a partitioned parent resolves to one pair per partition subgraph.
+-STATEMENT CREATE REL TABLE R (FROM Orders TO Item);
+---- 1
+Table R has been created.
+-STATEMENT CREATE (:Item {id: 100});
+---- ok
+-STATEMENT CREATE (:Orders_p0 {id: 1, region: 'a'});
+---- ok
+-STATEMENT MATCH (o:Orders_p0), (i:Item {id:100}) CREATE (o)-[:R]->(i);
+---- ok
+# Reads through the parent see relationships attached to its partitions.
+-STATEMENT MATCH (o:Orders)-[r:R]->(i:Item) RETURN o.id, i.id ORDER BY o.id;
+---- 1
+1|100
+# Creating a rel pattern against the parent itself is not supported yet: rel writes must go
+# through a specific partition.
+-STATEMENT MATCH (o:Orders), (i:Item) CREATE (o)-[:R]->(i);
+---- error(regex)
+Binder exception: Create rel .* bound by multiple node labels is not supported\. Node table Orders is partitioned; create the relationship against one of its partitions \(Orders_<i>\) instead\.
+# A rel referencing a partition blocks dropping the parent: nothing is detached silently.
+-STATEMENT DROP TABLE Orders;
+---- error
+Binder exception: Cannot delete node table Orders_p0 because it is referenced by relationship table R.
+-STATEMENT MATCH (o:Orders_p0 {id: 1}) DETACH DELETE o;
+---- ok
+-STATEMENT MATCH (:Orders)-[r:R]->(:Item) RETURN count(*);
+---- 1
+0
+-STATEMENT DROP TABLE R;
+---- 1
+Table R has been dropped.
+-STATEMENT DROP TABLE Orders;
+---- 1
+Table Orders has been dropped.
+-STATEMENT CALL show_tables() RETURN name ORDER BY name;
+---- 1
+Item
+
+-CASE PartitionedSelfRelCrossPartitionEdges
+-STATEMENT CREATE NODE TABLE Orders (id INT64 PRIMARY KEY, region STRING) PARTITION BY HASH (region) PARTITIONS 3;
+---- 1
+Table Orders has been created.
+# A self-rel expands to one pair per (source partition, destination partition), so edges within
+# a partition and across partitions are both expressible.
+-STATEMENT CREATE REL TABLE R (FROM Orders TO Orders, w INT64 DEFAULT 0);
+---- 1
+Table R has been created.
+-STATEMENT CREATE (:Orders_p0 {id: 1, region: 'a'});
+---- ok
+-STATEMENT CREATE (:Orders_p1 {id: 2, region: 'b'});
+---- ok
+-STATEMENT CREATE (:Orders_p2 {id: 3, region: 'c'});
+---- ok
+# Cross-partition edges in both directions, plus a same-partition edge.
+-STATEMENT MATCH (a:Orders_p0 {id:1}), (b:Orders_p1 {id:2}) CREATE (a)-[:R {w: 10}]->(b);
+---- ok
+-STATEMENT MATCH (a:Orders_p1 {id:2}), (b:Orders_p2 {id:3}) CREATE (a)-[:R {w: 20}]->(b);
+---- ok
+-STATEMENT MATCH (a:Orders_p2 {id:3}), (b:Orders_p0 {id:1}) CREATE (a)-[:R {w: 30}]->(b);
+---- ok
+-STATEMENT MATCH (a:Orders_p0 {id:1}), (b:Orders_p0 {id:1}) CREATE (b)-[:R {w: 40}]->(a);
+---- ok
+# Reads through the parent see every edge regardless of which partitions it spans.
+-STATEMENT MATCH (a:Orders)-[r:R]->(b:Orders) RETURN a.id, b.id, r.w ORDER BY r.w;
+---- 4
+1|2|10
+2|3|20
+3|1|30
+1|1|40
+-STATEMENT MATCH (a:Orders_p1)-[r:R]->(b:Orders_p2) RETURN a.id, b.id, r.w;
+---- 1
+2|3|20
+# DETACH DELETE removes the node and its cross-partition edges in both directions.
+-STATEMENT MATCH (o:Orders_p0 {id: 1}) DETACH DELETE o;
+---- ok
+-STATEMENT MATCH (a:Orders)-[r:R]->(b:Orders) RETURN a.id, b.id, r.w ORDER BY r.w;
+---- 1
+2|3|20
+-CASE PartitionedListDynamic
+-STATEMENT CREATE NODE TABLE L (id INT64, cluster INT64, PRIMARY KEY(id)) PARTITION BY LIST (cluster);
+---- ok
+-STATEMENT CREATE (:L {id: 1, cluster: 100});
+---- ok
+-STATEMENT CREATE (:L {id: 2, cluster: 200});
+---- ok
+-STATEMENT CREATE (:L {id: 3, cluster: 100});
+---- ok
+-STATEMENT CREATE (:L {id: 4, cluster: 300});
+---- ok
+-STATEMENT CALL show_tables() RETURN name ORDER BY name;
+---- 5
+L
+L_p0
+L_p1
+L_p2
+L_p3
+# Every distinct value got its own partition; rows are findable through the parent.
+-STATEMENT MATCH (n:L) RETURN n.id ORDER BY n.id;
+---- 4
+1
+2
+3
+4
+# Same value reuses its partition.
+-STATEMENT MATCH (n:L_p1) RETURN n.id ORDER BY n.id;
+---- 2
+1
+3
+# Routing survives reopen (catalog persistence + WAL replay).
+-RELOADDB
+-STATEMENT CALL show_tables() RETURN name ORDER BY name;
+---- 5
+L
+L_p0
+L_p1
+L_p2
+L_p3
+-STATEMENT CREATE (:L {id: 5, cluster: 200});
+---- ok
+-STATEMENT MATCH (n:L_p2) RETURN n.id;
+---- 2
+2
+5
+# Drop the parent explicitly: cascades remove every partition (the FSM leak
+# checker otherwise iterates tables in reopened-catalog order and would try to
+# drop a partition child directly).
+-STATEMENT DROP TABLE L;
+---- 1
+Table L has been dropped.

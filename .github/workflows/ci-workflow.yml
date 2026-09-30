@@ -1,0 +1,460 @@
+name: CI Workflow
+
+on:
+  schedule:
+    # GitHub schedules use UTC.
+    - cron: '0 3 * * *'
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to run minimal test on'
+        required: false
+        default: linux
+        type: choice
+        options:
+          - linux
+          - macos
+          - windows
+          - all
+
+      auto_checkpoint:
+        description: 'Database config - auto checkpoint'
+        required: false
+        default: true
+        type: boolean
+
+      buffer_pool_size:
+        description: 'Database config - buffer pool size'
+        required: false
+        type: number
+
+      max_num_threads:
+        description: 'Database config - max number of threads'
+        required: false
+        default: 2
+        type: number
+
+      enable_compression:
+        description: 'Database config - enable compression'
+        required: false
+        default: true
+        type: boolean
+
+      checkpoint_threshold:
+        description: 'Database config - checkpoint threshold'
+        required: false
+        default: 16777216
+        type: number
+
+      force_checkpoint_on_close:
+        description: "Database config - force checkpoint on close"
+        required: false
+        default: true
+        type: boolean
+env:
+  RUNTIME_CHECKS: 1
+  USE_EXISTING_BINARY_DATASET: 1
+  AUTO_CHECKPOINT: ${{ github.event.inputs.auto_checkpoint }}
+  BUFFER_POOL_SIZE: ${{ github.event.inputs.buffer_pool_size }}
+  MAX_NUM_THREADS: ${{ github.event.inputs.max_num_threads }}
+  ENABLE_COMPRESSION: ${{ github.event.inputs.enable_compression }}
+  CHECKPOINT_THRESHOLD: ${{ github.event.inputs.checkpoint_threshold }}
+  FORCE_CHECKPOINT_ON_CLOSE: ${{ github.event.inputs.force_checkpoint_on_close }}
+  WERROR: 1
+  RUSTFLAGS: --deny warnings
+  PIP_BREAK_SYSTEM_PACKAGES: 1
+
+# Only allow one run in this group to run at a time, and cancel any runs in progress in this group.
+# We use the workflow name and then add the pull request number, or (if it's a push to main), we use the name of the branch.
+# See github's docs[1] and a relevant stack overflow answer[2]
+#   [1]: https://docs.github.com/en/actions/using-jobs/using-concurrency
+#   [2]: https://stackoverflow.com/questions/66335225/how-to-cancel-previous-runs-in-the-pr-when-you-push-new-commitsupdate-the-curre
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanity-checks:
+    name: sanity checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check source headers for include guards
+        run: ./scripts/check-include-guards.sh src/include
+          ./scripts/check-include-guards.sh test/include
+
+      - name: Check extension headers for include guards
+        run: |
+          for dir in extension/*/src/include ;do
+            ./scripts/check-include-guards.sh "$dir"
+          done
+
+      - name: Checks source files for std::assert
+        run: ./scripts/check-no-std-assert.sh src
+
+      - name: Check extension files for std::assert
+        run: ./scripts/check-no-std-assert.sh extension
+
+      - name: Ensure generated grammar files are up to date
+        run: |
+          python3 scripts/antlr4/hash.py src/antlr4/keywords.txt src/antlr4/Cypher.g4 > tmphashfile
+          cmp tmphashfile scripts/antlr4/hash.md5
+          rm tmphashfile
+
+      - name: Install WAL codegen dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+          pip3 install uv
+
+      - name: Ensure generated WAL record files are up to date
+        run: |
+          export CLANG_FORMAT=clang-format-18
+          python3 scripts/generate_wal_typespec.py
+          git diff --exit-code -- src/include/storage/wal/record src/storage/wal/records
+
+  clang-format:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+    steps:
+      - name: Install clang-format dependencies
+        run: apk add --no-cache git python3 clang18-extra-tools
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Clang Format
+        run: python3 scripts/run-clang-format.py --clang-format-executable /usr/lib/llvm18/bin/clang-format -r src/ test/ tools/ extension/
+
+  minimal-test:
+    name: minimal test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    needs: [ sanity-checks ]
+    # NOTE: `matrix` is not available in a job-level `if`, so platform
+    # selection is done via a dynamic matrix. schedule / dispatch `all` ->
+    # all platforms; dispatch `<platform>` -> that platform;
+    # pull_request / push / dispatch `linux` (default) -> linux only.
+    strategy:
+      fail-fast: false
+      # One line per case; the last line is the default (linux only).
+      matrix: >-
+        ${{ fromJSON(
+          (github.event_name == 'schedule' &&
+            '{"include": [{"platform": "linux", "runner": "ubuntu-latest"}, {"platform": "macos", "runner": "macos-latest"}, {"platform": "windows", "runner": "windows-2022"}]}') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'all' &&
+            '{"include": [{"platform": "linux", "runner": "ubuntu-latest"}, {"platform": "macos", "runner": "macos-latest"}, {"platform": "windows", "runner": "windows-2022"}]}') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'macos' &&
+            '{"include": [{"platform": "macos", "runner": "macos-latest"}]}') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'windows' &&
+            '{"include": [{"platform": "windows", "runner": "windows-2022"}]}') ||
+          '{"include": [{"platform": "linux", "runner": "ubuntu-latest"}]}') }}
+    env:
+      GEN: Ninja
+      TEST_JOBS: 4
+      NUM_THREADS: 4
+      WERROR: ${{ matrix.platform == 'windows' && '0' || '1' }}
+      EXTRA_CMAKE_FLAGS: ${{ matrix.platform == 'windows' && '-DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded -DBUILD_STATIC_LBUG=FALSE' || '' }}
+    steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.platform == 'windows'
+
+      - uses: actions/checkout@v4
+
+      - name: Checkout dataset and benchmarks
+        run: |
+          git submodule update --init dataset benchmark # needed for demo db
+
+      - name: Setup ccache
+        if: matrix.platform != 'windows'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: minimal-test-${{ runner.os }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            minimal-test-${{ runner.os }}-refs/heads/main
+            minimal-test-${{ runner.os }}-
+
+      - name: Setup ccache (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          choco install ccache -y
+          echo CMAKE_C_COMPILER_LAUNCHER=ccache>> %GITHUB_ENV%
+          echo CMAKE_CXX_COMPILER_LAUNCHER=ccache>> %GITHUB_ENV%
+          echo CCACHE_DIR=D:\c>> %GITHUB_ENV%
+          echo CCACHE_TEMPDIR=D:\t>> %GITHUB_ENV%
+          if not exist D:\c mkdir D:\c
+          if not exist D:\t mkdir D:\t
+          ccache --set-config=max_size=2G
+          ccache --set-config=compression=true
+          ccache --set-config=cache_dir=D:\c
+          ccache --set-config=temporary_dir=D:\t
+
+      - name: Restore ccache directory (Windows)
+        if: matrix.platform == 'windows'
+        uses: actions/cache/restore@v4
+        with:
+          path: D:\c
+          key: minimal-test-${{ runner.os }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            minimal-test-${{ runner.os }}-${{ github.ref }}-
+            minimal-test-${{ runner.os }}-refs/heads/main-
+            minimal-test-${{ runner.os }}-
+
+      - name: Enable long paths (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+
+      - name: Configure Windows Defender exclusions (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "D:\c"
+          Add-MpPreference -ExclusionPath "D:\t"
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Build
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ccache -s
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # The bundled static lbug.lib exceeds MSVC's 4GB COFF archive limit in this job.
+            # EXTRA_CMAKE_FLAGS disables that archive for Windows minimal CI only.
+            make release
+          else
+            # Probe system for libssl.so.3 (various distro layouts) and set EXTRA_CMAKE_FLAGS so CMake finds OpenSSL 3
+            LIBSSL_PATH=""
+            if command -v ldconfig >/dev/null 2>&1; then
+              LIBSSL_PATH=$(ldconfig -p | awk '/libssl.so.3/ {print $4; exit}')
+            fi
+            if [ -z "$LIBSSL_PATH" ]; then
+              # fallback candidate locations
+              for p in /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/libssl.so.3 /usr/lib64/openssl3/libssl.so.3 /usr/lib/openssl3/libssl.so; do
+                if [ -f "$p" ]; then
+                  LIBSSL_PATH="$p"
+                  break
+                fi
+              done
+            fi
+            if [ -n "$LIBSSL_PATH" ]; then
+              LIBCRYPTO_PATH=$(dirname "$LIBSSL_PATH")/libcrypto.so.3
+              echo "Found OpenSSL libssl at $LIBSSL_PATH, libcrypto at $LIBCRYPTO_PATH"
+              export EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DOPENSSL_ROOT_DIR=/usr -DOPENSSL_INCLUDE_DIR=/usr/include -DOPENSSL_CRYPTO_LIBRARY=$LIBCRYPTO_PATH -DOPENSSL_SSL_LIBRARY=$LIBSSL_PATH"
+            else
+              echo "Warning: libssl.so.3 not found by probe; relying on existing EXTRA_CMAKE_FLAGS"
+            fi
+            make relwithdebinfo
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ccache -s
+          fi
+
+      - name: Generate datasets
+        if: matrix.platform != 'windows'
+        run: |
+          bash scripts/generate_binary_demo.sh --lbug-shell-mode relwithdebinfo
+          uv run --with pyarrow python3 scripts/generate-dictionary-bug-fixture.py
+
+      - name: Generate datasets (Windows)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          LBUG_SHELL="$(find build -path '*/src/lbug_shell.exe' -print -quit)"
+          test -n "$LBUG_SHELL"
+          bash scripts/generate_binary_demo.sh --lbug-shell "$LBUG_SHELL"
+          uv run --with pyarrow python scripts/generate-dictionary-bug-fixture.py
+
+      - name: Test
+        shell: bash
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Keep Windows tests on the same static-archive-free Release build.
+            make test-build-release
+            ctest --test-dir build/release/test --output-on-failure -j "${TEST_JOBS}"
+            exit
+          fi
+          uv venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            source .venv/Scripts/activate
+          else
+            source .venv/bin/activate
+          fi
+          uv pip install pytest pexpect
+          make shell-test test
+
+      - name: Save ccache directory (Windows)
+        if: always() && matrix.platform == 'windows'
+        uses: actions/cache/save@v4
+        with:
+          path: D:\c
+          key: minimal-test-${{ runner.os }}-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  minimal-linux-extension-test:
+    name: minimal linux extension test
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.platform == 'linux' || github.event.inputs.platform == 'all' }}
+    env:
+      GEN: Ninja
+      UW_S3_ACCESS_KEY_ID: ${{ secrets.UW_S3_ACCESS_KEY_ID }}
+      UW_S3_SECRET_ACCESS_KEY: ${{ secrets.UW_S3_SECRET_ACCESS_KEY }}
+      AWS_S3_ACCESS_KEY_ID: ${{ secrets.AWS_S3_ACCESS_KEY_ID }}
+      AWS_S3_SECRET_ACCESS_KEY: ${{ secrets.AWS_S3_SECRET_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_S3_SECRET_ACCESS_KEY }}
+      GCS_ACCESS_KEY_ID: ${{ secrets.GCS_ACCESS_KEY_ID }}
+      GCS_SECRET_ACCESS_KEY: ${{ secrets.GCS_SECRET_ACCESS_KEY }}
+      AZURE_CONNECTION_STRING: ${{ format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', secrets.AZURE_ACCOUNT_NAME, secrets.AZURE_ACCOUNT_KEY) }}
+      AZURE_ACCOUNT_NAME: ${{ secrets.AZURE_ACCOUNT_NAME }}
+      AZURE_PUBLIC_CONTAINER: ${{ secrets.AZURE_PUBLIC_CONTAINER }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout extensions
+        run: |
+          git submodule update --init extension dataset benchmark
+
+      - name: Free disk space on Ubuntu runner
+        uses: kfir4444/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.68.1
+          cache: false
+          activate-environment: true
+
+      - name: Configure ADBC runtime
+        run: |
+          curl -LsSf https://dbc.columnar.tech/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          "$HOME/.local/bin/dbc" install --level user duckdb
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: minimal-extension-test-${{ runner.os }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            minimal-extension-test-${{ runner.os }}-refs/heads/main
+            minimal-extension-test-${{ runner.os }}-
+
+      - name: Update PostgreSQL host
+        working-directory: extension/postgres/test/test_files
+        env:
+          PG_FNAME: postgres.test
+          SQL_FNAME: sql_query.test
+          FIND: "localhost"
+        run: |
+          node -e 'fs=require("fs");fs.readFile(process.env.PG_FNAME,"utf8",(err,data)=>{if(err!=null)throw err;fs.writeFile(process.env.PG_FNAME,data.replaceAll(process.env.FIND,process.env.PG_HOST),"utf8",e=>{if(e!=null)throw e;});});'
+          node -e 'fs=require("fs");fs.readFile(process.env.SQL_FNAME,"utf8",(err,data)=>{if(err!=null)throw err;fs.writeFile(process.env.SQL_FNAME,data.replaceAll(process.env.FIND,process.env.PG_HOST),"utf8",e=>{if(e!=null)throw e;});});'
+
+      - name: Install DuckDB (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ runner.arch }}" = "X64" ]; then
+            wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-amd64.zip
+            unzip libduckdb-linux-amd64.zip -d duckdb
+          else
+            wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-arm64.zip
+            unzip libduckdb-linux-arm64.zip -d duckdb
+          fi
+          sudo cp duckdb/duckdb.h /usr/local/include/
+          sudo cp duckdb/duckdb.hpp /usr/local/include/
+          sudo cp duckdb/libduckdb.so /usr/local/lib/
+          sudo ldconfig
+          # Create CMake config files
+          sudo mkdir -p /usr/local/lib/cmake/DuckDB
+          sudo tee /usr/local/lib/cmake/DuckDB/DuckDBConfig.cmake > /dev/null << 'EOF'
+          # DuckDB CMake configuration file
+
+          if(NOT TARGET DuckDB::duckdb)
+            add_library(DuckDB::duckdb SHARED IMPORTED)
+            set_target_properties(DuckDB::duckdb PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
+              IMPORTED_LOCATION "/usr/local/lib/libduckdb.so"
+            )
+          endif()
+
+          set(DuckDB_LIBRARIES DuckDB::duckdb)
+          set(DuckDB_INCLUDE_DIRS "/usr/local/include")
+          set(DuckDB_FOUND TRUE)
+          EOF
+
+      - name: Install uv
+        run: |
+          pip3 install uv
+          uv venv
+
+      - name: Install dependencies
+        run: uv pip install duckdb rangehttpserver requests
+
+      - name: Create ADBC DuckDB fixture
+        run: |
+          uv run python - <<'PY'
+          import duckdb
+
+          con = duckdb.connect("extension/adbc/test/adbc.duckdb")
+          con.execute("CREATE OR REPLACE TABLE games(id BIGINT, title VARCHAR, score BIGINT)")
+          con.execute("""
+              INSERT INTO games VALUES
+              (1, 'Portal', 95),
+              (2, 'Celeste', 94),
+              (3, 'Hades', 93)
+          """)
+          con.close()
+          PY
+
+      # shell needs to be built first to generate the dataset provided by the server
+      - name: Extension test build
+        run: |
+          make relwithdebinfo
+          cp build/relwithdebinfo/tools/shell/lbug lbug.prod
+          make extension-test-build
+          cp lbug.prod build/relwithdebinfo/tools/shell/lbug
+
+      - name: Test dynamic extension loading
+        run: |
+          cd tools/shell/test
+          uv venv
+          source .venv/bin/activate
+          uv pip install pytest pexpect
+          pytest test_dynamic_extension_loading.py -v
+
+      - name: Extension test
+        run: |
+          uv run scripts/generate-tinysnb.py
+          uv run scripts/setup-extension-repo.py &
+          make extension-test

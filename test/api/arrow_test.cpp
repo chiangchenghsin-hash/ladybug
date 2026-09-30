@@ -1,0 +1,803 @@
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "api_test/api_test.h"
+#include "arrow_test_utils.h"
+#include "common/arrow/arrow_converter.h"
+#include "common/arrow/arrow_schema_metadata.h"
+#include "common/exception/runtime.h"
+#include "common/types/types.h"
+#include "common/vector/value_vector.h"
+#include "main/query_result/arrow_query_result.h"
+
+using namespace lbug::common;
+using namespace lbug::main;
+using namespace lbug::testing;
+
+namespace {
+
+std::vector<char> serializeArrowMetadata(
+    const std::vector<std::pair<std::string, std::string>>& entries) {
+    auto size = sizeof(int32_t);
+    for (const auto& [key, value] : entries) {
+        size += sizeof(int32_t) + key.size() + sizeof(int32_t) + value.size();
+    }
+    std::vector<char> bytes(size);
+    auto* ptr = bytes.data();
+    const auto numEntries = static_cast<int32_t>(entries.size());
+    memcpy(ptr, &numEntries, sizeof(int32_t));
+    ptr += sizeof(int32_t);
+    for (const auto& [key, value] : entries) {
+        const auto keySize = static_cast<int32_t>(key.size());
+        memcpy(ptr, &keySize, sizeof(int32_t));
+        ptr += sizeof(int32_t);
+        memcpy(ptr, key.data(), key.size());
+        ptr += key.size();
+        const auto valueSize = static_cast<int32_t>(value.size());
+        memcpy(ptr, &valueSize, sizeof(int32_t));
+        ptr += sizeof(int32_t);
+        memcpy(ptr, value.data(), value.size());
+        ptr += value.size();
+    }
+    return bytes;
+}
+
+void appendInt32(std::vector<char>& bytes, int32_t value) {
+    const auto* ptr = reinterpret_cast<const char*>(&value);
+    bytes.insert(bytes.end(), ptr, ptr + sizeof(int32_t));
+}
+
+void appendString(std::vector<char>& bytes, const std::string& value) {
+    appendInt32(bytes, static_cast<int32_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+} // namespace
+
+class ArrowTest : public ApiTest {};
+
+static void releaseCSRArrowArray(ArrowQueryResult::CSRArrowArray& array) {
+    array.release();
+}
+
+TEST(ArrowQueryResultTest, exportsCSRMetadataAsZeroCopyArrowArrays) {
+    ArrowQueryResult::CSRMetadata metadata;
+    metadata.indptr = {0, 2, 3};
+    metadata.indices = {4, 5, 6};
+    metadata.edgeIDs = {10, 11, 12};
+    metadata.hasEdgeIDs = true;
+    std::vector<ArrowQueryResult::CSRMetadata> csrChunks;
+    csrChunks.push_back(std::move(metadata));
+
+    ArrowQueryResult result{{}, 8, std::move(csrChunks)};
+    const auto& storedMetadata = result.getCSRMetadata();
+    auto csrArrays = result.getCSRArrowArrays();
+
+    ASSERT_STREQ(csrArrays.indptr.schema.format, "l");
+    ASSERT_STREQ(csrArrays.indices.schema.format, "l");
+    ASSERT_TRUE(csrArrays.edgeIDs.has_value());
+    ASSERT_STREQ(csrArrays.edgeIDs->schema.format, "l");
+    ASSERT_EQ(csrArrays.indptr.array.length, static_cast<int64_t>(storedMetadata.indptr.size()));
+    ASSERT_EQ(csrArrays.indices.array.length, static_cast<int64_t>(storedMetadata.indices.size()));
+    ASSERT_EQ(csrArrays.edgeIDs->array.length, static_cast<int64_t>(storedMetadata.edgeIDs.size()));
+    // No validity bitmap (the array is non-nullable).
+    ASSERT_EQ(csrArrays.indptr.array.buffers[0], nullptr);
+    ASSERT_EQ(csrArrays.indices.array.buffers[0], nullptr);
+    ASSERT_EQ(csrArrays.edgeIDs->array.buffers[0], nullptr);
+    // Value-equivalence: the exported Arrow data buffers hold the merged
+    // CSR values. We check the contents rather than the backing pointer,
+    // so the test does not break if the merge path changes whether it moves
+    // or copies the per-batch vectors.
+    const auto* indptrData = static_cast<const int64_t*>(csrArrays.indptr.array.buffers[1]);
+    const auto* indicesData = static_cast<const int64_t*>(csrArrays.indices.array.buffers[1]);
+    const auto* edgeIDsData = static_cast<const int64_t*>(csrArrays.edgeIDs->array.buffers[1]);
+    ASSERT_NE(indptrData, nullptr);
+    ASSERT_NE(indicesData, nullptr);
+    ASSERT_NE(edgeIDsData, nullptr);
+    ASSERT_EQ(std::vector<int64_t>(indptrData, indptrData + storedMetadata.indptr.size()),
+        (std::vector<int64_t>{0, 2, 3}));
+    ASSERT_EQ(std::vector<int64_t>(indicesData, indicesData + storedMetadata.indices.size()),
+        (std::vector<int64_t>{4, 5, 6}));
+    ASSERT_EQ(std::vector<int64_t>(edgeIDsData, edgeIDsData + storedMetadata.edgeIDs.size()),
+        (std::vector<int64_t>{10, 11, 12}));
+}
+
+// Builds an ArrowQueryResult from a raw CSR (indptr, indices) and returns its
+// symmetrized CSRArrowArrays, with sortedByDest controlling the fast/slow path.
+static ArrowQueryResult::CSRArrowArrays symmetrizeCSR(std::vector<int64_t> indptr,
+    std::vector<int64_t> indices, bool sortedByDest) {
+    ArrowQueryResult::CSRMetadata metadata;
+    metadata.indptr = std::move(indptr);
+    metadata.indices = std::move(indices);
+    metadata.sortedByDest = sortedByDest;
+    std::vector<ArrowQueryResult::CSRMetadata> csrChunks;
+    csrChunks.push_back(std::move(metadata));
+    ArrowQueryResult result{{}, 8, std::move(csrChunks)};
+    auto csrArrays = result.getCSRArrowArrays();
+    EXPECT_EQ(csrArrays.sortedByDest, sortedByDest);
+    return csrArrays.symmetrize();
+}
+
+static std::vector<int64_t> csrArrowValues(const ArrowQueryResult::CSRArrowArray& arr) {
+    const auto* data = static_cast<const int64_t*>(arr.array.buffers[1]);
+    return {data, data + arr.array.length};
+}
+
+// A = {(0,1),(0,2),(1,0)} over 3 nodes. Symmetrized (A + Aᵀ, reciprocal
+// pairs coalesced):
+//   row 0: A={1,2} Aᵀ={1}  -> {1,2}
+//   row 1: A={0}   Aᵀ={0}  -> {0}      (reciprocal pair (0,1)/(1,0) coalesces)
+//   row 2: A={}    Aᵀ={0}  -> {0}
+TEST(ArrowQueryResultTest, symmetrizeCoalescesReciprocalPairsSlowPath) {
+    auto out = symmetrizeCSR({0, 2, 3, 3}, {2, 1, 0}, false /*sortedByDest*/);
+    // Row 0's neighbors {2,1} are NOT sorted in A, so the slow path must sort
+    // them before the two-pointer merge — verifying the sort is exercised.
+    EXPECT_EQ(csrArrowValues(out.indptr), (std::vector<int64_t>{0, 2, 3, 4}));
+    EXPECT_EQ(csrArrowValues(out.indices), (std::vector<int64_t>{1, 2, 0, 0}));
+    // Symmetrize drops edgeIDs (sparse-addition semantics).
+    EXPECT_FALSE(out.edgeIDs.has_value());
+}
+
+// Same graph but with A's neighbors already sorted within each row, and the
+// sortedByDest flag set — exercises the fast path (no per-row sort).
+TEST(ArrowQueryResultTest, symmetrizeFastPathMatchesSlowPath) {
+    const auto slow = symmetrizeCSR({0, 2, 3, 3}, {2, 1, 0}, false);
+    const auto fast = symmetrizeCSR({0, 2, 3, 3}, {1, 2, 0}, true /*sortedByDest*/);
+    EXPECT_EQ(csrArrowValues(fast.indptr), csrArrowValues(slow.indptr));
+    EXPECT_EQ(csrArrowValues(fast.indices), csrArrowValues(slow.indices));
+}
+
+// Self-loop (0,0): appears once in A and once in Aᵀ (same edge), so the
+// merge coalesces the two equal heads into a single entry.
+TEST(ArrowQueryResultTest, symmetrizeCoalescesSelfLoop) {
+    auto out = symmetrizeCSR({0, 1, 1}, {0}, true /*sortedByDest*/);
+    EXPECT_EQ(csrArrowValues(out.indptr), (std::vector<int64_t>{0, 1, 1}));
+    EXPECT_EQ(csrArrowValues(out.indices), (std::vector<int64_t>{0}));
+}
+
+TEST(ArrowConverterTest, bindsIntegerBackedSnowflakeDecimalMetadataAsDecimal) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "7"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 7u);
+    ASSERT_EQ(DecimalType::getScale(type), 2u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::SNOWFLAKE);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, bindsSnowflakeRawDataTypeMetadataAsDecimal) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata({{"DATA_TYPE", "NUMBER(12, 4)"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 12u);
+    ASSERT_EQ(DecimalType::getScale(type), 4u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::SNOWFLAKE);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, bindsSnowflakeRawNumberMetadataWithoutExplicitScaleAsDecimal) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata({{"DATA_TYPE", "NUMBER(18)"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 18u);
+    ASSERT_EQ(DecimalType::getScale(type), 0u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::SNOWFLAKE);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, bindsSnowflakeRawNumericMetadataWithWhitespaceAsDecimal) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata({{"DATA_TYPE", " numeric ( 10 , 3 ) "}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 10u);
+    ASSERT_EQ(DecimalType::getScale(type), 3u);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, bindsGenericIntegerBackedDecimalMetadataAsDecimal) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "DECIMAL"}, {"precision", "9"}, {"scale", "3"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 9u);
+    ASSERT_EQ(DecimalType::getScale(type), 3u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::GENERIC_METADATA);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, malformedIntegerBackedDecimalMetadataFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "bad"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, negativeSnowflakeDecimalMetadataFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "-1"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, overflowSnowflakeDecimalMetadataFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata(
+        {{"logicalType", "FIXED"}, {"precision", "4294967296"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, invalidSnowflakeDecimalScaleFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "4"}, {"scale", "5"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, negativeMetadataEntryCountFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    std::vector<char> metadata;
+    appendInt32(metadata, -1);
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    ASSERT_FALSE(tryGetArrowLogicalTypeInfo(&schema).has_value());
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, negativeMetadataKeyLengthFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    std::vector<char> metadata;
+    appendInt32(metadata, 1);
+    appendInt32(metadata, -1);
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    ASSERT_FALSE(tryGetArrowLogicalTypeInfo(&schema).has_value());
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, negativeMetadataValueLengthFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    std::vector<char> metadata;
+    appendInt32(metadata, 1);
+    appendString(metadata, "logicalType");
+    appendInt32(metadata, -1);
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    ASSERT_FALSE(tryGetArrowLogicalTypeInfo(&schema).has_value());
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, invalidGenericDecimalScaleFallsBackToPhysicalType) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "DECIMAL"}, {"precision", "6"}, {"scale", "7"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::INT64);
+    ASSERT_FALSE(tryGetArrowLogicalTypeInfo(&schema).has_value());
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, genericDecimalMetadataDoesNotBindFloatBackedStorage) {
+    ArrowSchema schema{};
+    createSchema<double>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "DECIMAL"}, {"precision", "9"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DOUBLE);
+    ASSERT_FALSE(tryGetArrowLogicalTypeInfo(&schema).has_value());
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, malformedSnowflakeRawDataTypeFallsBackToSnowflakeLogicalTypeMetadata) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata({{"DATA_TYPE", "NUMBER(bad,2)"},
+        {"logicalType", "FIXED"}, {"precision", "7"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 7u);
+    ASSERT_EQ(DecimalType::getScale(type), 2u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::SNOWFLAKE);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, malformedSnowflakeRawDataTypeFallsBackToGenericLogicalTypeMetadata) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata({{"DATA_TYPE", "NUMBER(bad,2)"},
+        {"logicalType", "DECIMAL"}, {"precision", "7"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 7u);
+    ASSERT_EQ(DecimalType::getScale(type), 2u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::GENERIC_METADATA);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest,
+    snowflakeRawDataTypeMetadataTakesPrecedenceOverGenericLogicalTypeMetadata) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata = serializeArrowMetadata({{"DATA_TYPE", "NUMBER(12,4)"},
+        {"logicalType", "DECIMAL"}, {"precision", "9"}, {"scale", "3"}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::DECIMAL);
+    ASSERT_EQ(DecimalType::getPrecision(type), 12u);
+    ASSERT_EQ(DecimalType::getScale(type), 4u);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->source, ArrowLogicalTypeInfo::Source::SNOWFLAKE);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, scansFloatBackedSnowflakeDecimalMetadataIntoDecimalStorage) {
+    ArrowSchema schema{};
+    createSchema<double>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "9"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    ArrowArray array{};
+    createDoubleArray(&array, {1.25, -2.50, 100.01});
+    ValueVector outputVector{LogicalType::DECIMAL(9, 2)};
+
+    ArrowConverter::fromArrowArray(&schema, &array, outputVector);
+
+    ASSERT_EQ(outputVector.getValue<int32_t>(0), 125);
+    ASSERT_EQ(outputVector.getValue<int32_t>(1), -250);
+    ASSERT_EQ(outputVector.getValue<int32_t>(2), 10001);
+    array.release(&array);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, scansFloat32BackedSnowflakeDecimalMetadataIntoDecimalStorage) {
+    ArrowSchema schema{};
+    createSchema<float>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "8"}, {"scale", "1"}});
+    schema.metadata = metadata.data();
+
+    ArrowArray array{};
+    createFloatArray(&array, {1.5F, -2.0F, 12.3F});
+    ValueVector outputVector{LogicalType::DECIMAL(8, 1)};
+
+    ArrowConverter::fromArrowArray(&schema, &array, outputVector);
+
+    ASSERT_EQ(outputVector.getValue<int32_t>(0), 15);
+    ASSERT_EQ(outputVector.getValue<int32_t>(1), -20);
+    ASSERT_EQ(outputVector.getValue<int32_t>(2), 123);
+    array.release(&array);
+    schema.release(&schema);
+}
+
+TEST(ArrowConverterTest, scansIntegerBackedSnowflakeDecimalMetadataIntoDecimalStorage) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "amount");
+    auto metadata =
+        serializeArrowMetadata({{"logicalType", "FIXED"}, {"precision", "7"}, {"scale", "2"}});
+    schema.metadata = metadata.data();
+
+    ArrowArray array{};
+    createInt64Array(&array, {120, 200, 50, 10000});
+    ValueVector outputVector{LogicalType::DECIMAL(7, 2)};
+
+    ArrowConverter::fromArrowArray(&schema, &array, outputVector);
+
+    ASSERT_EQ(outputVector.getValue<int32_t>(0), 120);
+    ASSERT_EQ(outputVector.getValue<int32_t>(1), 200);
+    ASSERT_EQ(outputVector.getValue<int32_t>(2), 50);
+    ASSERT_EQ(outputVector.getValue<int32_t>(3), 10000);
+    array.release(&array);
+    schema.release(&schema);
+}
+
+TEST_F(ArrowTest, resultToArrow) {
+    auto query = "MATCH (a:person) WHERE a.fName = 'Bob' RETURN a.fName";
+    auto result = conn->query(query);
+    auto arrowArray = result->getNextArrowChunk(1);
+    ASSERT_EQ(arrowArray->length, 1);
+    ASSERT_EQ(arrowArray->null_count, 0);
+    ASSERT_EQ(arrowArray->n_children, 1);
+    // FIXME: Not sure where the length of the string is stored
+    ASSERT_EQ(std::string((const char*)arrowArray->children[0]->buffers[2], 3), "Bob");
+    ASSERT_FALSE(result->hasNextArrowChunk());
+    arrowArray->release(arrowArray.get());
+}
+
+TEST_F(ArrowTest, queryAsArrow) {
+    auto query = "MATCH (a:person) WHERE a.fName = 'Bob' RETURN a.fName";
+    auto result = conn->queryAsArrow(query, 1);
+    auto arrowArray = result->getNextArrowChunk(1);
+    ASSERT_EQ(arrowArray->length, 1);
+    ASSERT_EQ(arrowArray->null_count, 0);
+    ASSERT_EQ(arrowArray->n_children, 1);
+    // FIXME: Not sure where the length of the string is stored
+    ASSERT_EQ(std::string((const char*)arrowArray->children[0]->buffers[2], 3), "Bob");
+    ASSERT_FALSE(result->hasNextArrowChunk());
+    arrowArray->release(arrowArray.get());
+}
+
+TEST_F(ArrowTest, getArrowResult) {
+    auto query = "MATCH (a:person) WHERE a.fName = 'Bob' RETURN a.fName";
+    auto result = conn->queryAsArrow(query, 1);
+    try {
+        result->getNextArrowChunk(2);
+        FAIL();
+    } catch (const Exception& e) {
+        ASSERT_STREQ(e.what(), "Runtime exception: Chunk size does not match expected value 1.");
+    }
+    try {
+        (void)result->hasNext();
+        FAIL();
+    } catch (const Exception& e) {
+        ASSERT_STREQ(e.what(),
+            "ArrowQueryResult does not implement hasNext. Use MaterializedQueryResult instead.");
+    }
+    try {
+        (void)result->getNext();
+        FAIL();
+    } catch (const Exception& e) {
+        ASSERT_STREQ(e.what(),
+            "ArrowQueryResult does not implement getNext. Use MaterializedQueryResult instead.");
+    }
+    try {
+        (void)result->toString();
+        FAIL();
+    } catch (const Exception& e) {
+        ASSERT_STREQ(e.what(),
+            "ArrowQueryResult does not implement toString. Use MaterializedQueryResult instead.");
+    }
+    ASSERT_TRUE(result->hasNextArrowChunk());
+    auto arrowArray = result->getNextArrowChunk(1);
+    ASSERT_EQ(arrowArray->length, 1);
+    ASSERT_EQ(arrowArray->null_count, 0);
+    ASSERT_FALSE(result->hasNextArrowChunk());
+    arrowArray->release(arrowArray.get());
+}
+
+TEST_F(ArrowTest, getArrowSchema) {
+    auto query = "MATCH (a:person) RETURN a.fName as NAME";
+    auto result = conn->query(query);
+    auto schema = result->getArrowSchema();
+    ASSERT_EQ(schema->n_children, 1);
+    ASSERT_EQ(std::string(schema->children[0]->name), "NAME");
+    schema->release(schema.get());
+}
+
+// The Arrow columnar map layout requires the entries struct of a map and the
+// key child of that struct to be non-nullable. Consumers (e.g. arrow-java's
+// MapVector) reject the schema when these flags are wrong, which makes every
+// query that returns a MAP column unreadable through the Arrow API.
+// See https://arrow.apache.org/docs/format/Columnar.html#map-layout
+TEST_F(ArrowTest, mapColumnArrowSchemaHasNonNullableEntriesAndKey) {
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE MapT(id STRING, m MAP(STRING, STRING), "
+                            "PRIMARY KEY(id));")
+                    ->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:MapT {id: 'r1', m: map(['k'], ['v'])});")->isSuccess());
+
+    auto result = conn->query("MATCH (n:MapT) RETURN n.m;");
+    ASSERT_TRUE(result->isSuccess());
+    auto schema = result->getArrowSchema();
+    ASSERT_NE(schema, nullptr);
+    ASSERT_EQ(schema->n_children, 1);
+
+    auto* mapColumn = schema->children[0];
+    ASSERT_STREQ(mapColumn->format, "+m");
+    // The map column itself may be null.
+    ASSERT_TRUE(mapColumn->flags & ARROW_FLAG_NULLABLE);
+    ASSERT_EQ(mapColumn->n_children, 1);
+
+    auto* entries = mapColumn->children[0];
+    ASSERT_STREQ(entries->name, "entries");
+    // Per the Arrow map layout, the entries struct must be non-nullable.
+    ASSERT_FALSE(entries->flags & ARROW_FLAG_NULLABLE);
+    ASSERT_EQ(entries->n_children, 2);
+
+    auto* key = entries->children[0];
+    auto* value = entries->children[1];
+    // Map keys are always non-nullable.
+    ASSERT_FALSE(key->flags & ARROW_FLAG_NULLABLE);
+    // Map values follow the value type's nullability.
+    ASSERT_TRUE(value->flags & ARROW_FLAG_NULLABLE);
+
+    schema->release(schema.get());
+}
+
+TEST_F(ArrowTest, queryAsArrowDirectCSRRowIDProjection) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE DirectPerson(id INT64, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE REL TABLE DirectKnows(FROM DirectPerson TO DirectPerson);")
+                    ->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:DirectPerson {id: 0});")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:DirectPerson {id: 1});")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:DirectPerson {id: 2});")->isSuccess());
+    ASSERT_TRUE(conn->query("MATCH (a:DirectPerson {id: 0}), (b:DirectPerson {id: 1}) "
+                            "CREATE (a)-[:DirectKnows]->(b);")
+                    ->isSuccess());
+    ASSERT_TRUE(conn->query("MATCH (a:DirectPerson {id: 0}), (b:DirectPerson {id: 2}) "
+                            "CREATE (a)-[:DirectKnows]->(b);")
+                    ->isSuccess());
+    ASSERT_TRUE(conn->query("MATCH (a:DirectPerson {id: 1}), (b:DirectPerson {id: 2}) "
+                            "CREATE (a)-[:DirectKnows]->(b);")
+                    ->isSuccess());
+
+    auto query =
+        "MATCH (a:DirectPerson)-[r:DirectKnows]->(b:DirectPerson) RETURN a.rowid, r.rowid, b.rowid";
+    auto rowResult = conn->query(query);
+    std::vector<std::tuple<int64_t, int64_t, int64_t>> expected;
+    while (rowResult->hasNext()) {
+        auto tuple = rowResult->getNext();
+        expected.emplace_back(tuple->getValue(0)->getValue<int64_t>(),
+            tuple->getValue(1)->getValue<int64_t>(), tuple->getValue(2)->getValue<int64_t>());
+    }
+
+    conn->setMaxNumThreadForExec(4);
+    auto result = conn->queryAsArrow(query, 2);
+    auto* arrowResult = dynamic_cast<ArrowQueryResult*>(result.get());
+    ASSERT_NE(arrowResult, nullptr);
+    ASSERT_TRUE(arrowResult->hasCSRMetadata());
+
+    // Direct collector no longer materializes the per-column ArrowArrays
+    // for INT64 rowid projections — the rowids are already in the CSR,
+    // and the .csr() consumer never touches the ArrowArrays. Saving the
+    // ~24GB of double materialization is the whole point of this path.
+    ASSERT_FALSE(arrowResult->hasNextArrowChunk());
+    ASSERT_TRUE(arrowResult->getArrowChunks().empty());
+
+    const auto& metadata = arrowResult->getCSRMetadata();
+    std::vector<std::tuple<int64_t, int64_t, int64_t>> reconstructed;
+    for (auto srcRowID = 0u; srcRowID + 1 < metadata.indptr.size(); ++srcRowID) {
+        for (auto idx = metadata.indptr[srcRowID]; idx < metadata.indptr[srcRowID + 1]; ++idx) {
+            reconstructed.emplace_back(static_cast<int64_t>(srcRowID), metadata.edgeIDs[idx],
+                metadata.indices[idx]);
+        }
+    }
+    ASSERT_EQ(reconstructed, expected);
+}
+
+TEST_F(ArrowTest, queryAsArrowDirectCSRRowIDProjectionKeepsCSRMetadataWithFourThreads) {
+    auto query = "MATCH (a:person)-[b:knows]->(c:person) RETURN a.rowid, b.rowid, c.rowid "
+                 "ORDER BY a.rowid, b.rowid, c.rowid";
+    conn->setMaxNumThreadForExec(4);
+    auto result = conn->queryAsArrow(query, 8);
+    auto* arrowResult = dynamic_cast<ArrowQueryResult*>(result.get());
+    ASSERT_NE(arrowResult, nullptr);
+    ASSERT_TRUE(arrowResult->hasCSRMetadata());
+}
+
+TEST_F(ArrowTest, queryAsArrowTracksCSRMetadataWithoutRelIDs) {
+    auto query =
+        "MATCH (a:person)-[:knows]->(b:person) RETURN a.rowid, b.rowid ORDER BY a.rowid, b.rowid";
+    auto rowResult = conn->query(query);
+    std::vector<std::pair<int64_t, int64_t>> expected;
+    while (rowResult->hasNext()) {
+        auto tuple = rowResult->getNext();
+        expected.emplace_back(tuple->getValue(0)->getValue<int64_t>(),
+            tuple->getValue(1)->getValue<int64_t>());
+    }
+
+    auto result = conn->queryAsArrow(query, 8);
+    auto* arrowResult = dynamic_cast<ArrowQueryResult*>(result.get());
+    ASSERT_NE(arrowResult, nullptr);
+    ASSERT_TRUE(arrowResult->hasCSRMetadata());
+
+    const auto& metadata = arrowResult->getCSRMetadata();
+    ASSERT_FALSE(metadata.hasEdgeIDs);
+    ASSERT_TRUE(metadata.edgeIDs.empty());
+
+    auto csrArrays = arrowResult->getCSRArrowArrays();
+    ASSERT_STREQ(csrArrays.indptr.schema.format, "l");
+    ASSERT_STREQ(csrArrays.indices.schema.format, "l");
+    ASSERT_EQ(csrArrays.indptr.array.length, static_cast<int64_t>(metadata.indptr.size()));
+    ASSERT_EQ(csrArrays.indices.array.length, static_cast<int64_t>(metadata.indices.size()));
+    ASSERT_EQ(csrArrays.indptr.array.null_count, 0);
+    ASSERT_EQ(csrArrays.indices.array.null_count, 0);
+    ASSERT_EQ(csrArrays.indptr.array.buffers[0], nullptr);
+    ASSERT_EQ(csrArrays.indices.array.buffers[0], nullptr);
+    ASSERT_EQ(csrArrays.indptr.array.buffers[1], metadata.indptr.data());
+    ASSERT_EQ(csrArrays.indices.array.buffers[1], metadata.indices.data());
+    ASSERT_FALSE(csrArrays.edgeIDs.has_value());
+    releaseCSRArrowArray(csrArrays.indptr);
+    releaseCSRArrowArray(csrArrays.indices);
+
+    std::vector<std::pair<int64_t, int64_t>> reconstructed;
+    ASSERT_GE(metadata.indptr.size(), 1);
+    for (auto srcRowID = 0u; srcRowID + 1 < metadata.indptr.size(); ++srcRowID) {
+        for (auto idx = metadata.indptr[srcRowID]; idx < metadata.indptr[srcRowID + 1]; ++idx) {
+            reconstructed.emplace_back(static_cast<int64_t>(srcRowID), metadata.indices[idx]);
+        }
+    }
+    ASSERT_EQ(reconstructed, expected);
+}
+
+TEST_F(ArrowTest, queryAsArrowTracksCSRMetadataWithRelIDsAndExtraColumns) {
+    auto query = "MATCH (a:person)-[e:knows]->(b:person) "
+                 "RETURN a.rowid, e.rowid, b.rowid, e.date, b.fName "
+                 "ORDER BY a.rowid, e.rowid, b.rowid";
+    auto rowResult = conn->query(query);
+    std::vector<std::tuple<int64_t, int64_t, int64_t>> expected;
+    while (rowResult->hasNext()) {
+        auto tuple = rowResult->getNext();
+        expected.emplace_back(tuple->getValue(0)->getValue<int64_t>(),
+            tuple->getValue(1)->getValue<int64_t>(), tuple->getValue(2)->getValue<int64_t>());
+    }
+
+    auto result = conn->queryAsArrow(query, 8);
+    auto* arrowResult = dynamic_cast<ArrowQueryResult*>(result.get());
+    ASSERT_NE(arrowResult, nullptr);
+    ASSERT_TRUE(arrowResult->hasCSRMetadata());
+    ASSERT_EQ(result->getColumnNames().size(), 5);
+
+    const auto& metadata = arrowResult->getCSRMetadata();
+    ASSERT_TRUE(metadata.hasEdgeIDs);
+    ASSERT_EQ(metadata.indices.size(), metadata.edgeIDs.size());
+
+    auto csrArrays = arrowResult->getCSRArrowArrays();
+    ASSERT_TRUE(csrArrays.edgeIDs.has_value());
+    ASSERT_EQ(csrArrays.edgeIDs->array.length, static_cast<int64_t>(metadata.edgeIDs.size()));
+    ASSERT_EQ(csrArrays.edgeIDs->array.buffers[0], nullptr);
+    ASSERT_EQ(csrArrays.edgeIDs->array.buffers[1], metadata.edgeIDs.data());
+    releaseCSRArrowArray(csrArrays.indptr);
+    releaseCSRArrowArray(csrArrays.indices);
+    releaseCSRArrowArray(*csrArrays.edgeIDs);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t>> reconstructed;
+    ASSERT_GE(metadata.indptr.size(), 1);
+    for (auto srcRowID = 0u; srcRowID + 1 < metadata.indptr.size(); ++srcRowID) {
+        for (auto idx = metadata.indptr[srcRowID]; idx < metadata.indptr[srcRowID + 1]; ++idx) {
+            reconstructed.emplace_back(static_cast<int64_t>(srcRowID), metadata.edgeIDs[idx],
+                metadata.indices[idx]);
+        }
+    }
+    ASSERT_EQ(reconstructed, expected);
+}
+
+TEST_F(ArrowTest, queryAsArrowDoesNotTrackCSRMetadataForNonCSRShape) {
+    auto query = "MATCH (a:person)-[e:knows]->(b:person) RETURN a.rowid, e.date ORDER BY a.rowid";
+    auto result = conn->queryAsArrow(query, 8);
+    auto* arrowResult = dynamic_cast<ArrowQueryResult*>(result.get());
+    ASSERT_NE(arrowResult, nullptr);
+    ASSERT_FALSE(arrowResult->hasCSRMetadata());
+}
+
+// Verify that an Arrow FixedSizeBinary(16) column with the `arrow.uuid`
+// extension metadata is recognized as a UUID. This is the encoding the
+// Arrow UUID spec mandates and is the only encoding that maps cleanly
+// onto a UUID primary key on a relationship table.
+TEST(ArrowConverterTest, bindsArrowUuidExtensionMetadataAsUuid) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "id");
+    schema.format = "w:16";
+    auto metadata = serializeArrowMetadata(
+        {{"ARROW:extension:name", "arrow.uuid"}, {"ARROW:extension:metadata", ""}});
+    schema.metadata = metadata.data();
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_EQ(type.getLogicalTypeID(), LogicalTypeID::UUID);
+    ASSERT_TRUE(logicalTypeInfo.has_value());
+    ASSERT_EQ(logicalTypeInfo->type, ArrowLogicalTypeInfo::Type::UUID);
+    schema.release(&schema);
+}
+
+// A bare FixedSizeBinary(16) WITHOUT the `arrow.uuid` extension is just a
+// BLOB. The UUID parser must not mistake it for a UUID.
+TEST(ArrowConverterTest, fixedSizeBinaryWithoutUuidExtensionIsNotUuid) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "id");
+    schema.format = "w:16";
+    schema.metadata = nullptr;
+
+    const auto type = ArrowConverter::fromArrowSchema(&schema);
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+
+    ASSERT_NE(type.getLogicalTypeID(), LogicalTypeID::UUID);
+    ASSERT_FALSE(logicalTypeInfo.has_value());
+    schema.release(&schema);
+}
+
+// A FixedSizeBinary of a width other than 16 with the `arrow.uuid` extension
+// is malformed: a UUID is exactly 16 bytes, so this must not bind to UUID.
+TEST(ArrowConverterTest, rejectsNon16ByteArrowUuidExtensionAsUuid) {
+    ArrowSchema schema{};
+    createSchema<int64_t>(&schema, "id");
+    schema.format = "w:8";
+    auto metadata = serializeArrowMetadata(
+        {{"ARROW:extension:name", "arrow.uuid"}, {"ARROW:extension:metadata", ""}});
+    schema.metadata = metadata.data();
+
+    const auto logicalTypeInfo = tryGetArrowLogicalTypeInfo(&schema);
+    ASSERT_FALSE(logicalTypeInfo.has_value());
+    schema.release(&schema);
+}

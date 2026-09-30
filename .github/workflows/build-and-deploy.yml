@@ -1,0 +1,629 @@
+name: Build and Deploy
+on:
+  schedule:
+    - cron: "0 11 * * *"
+
+  workflow_dispatch:
+    inputs:
+      isDeploy:
+        description: "Whether the build should be deployed?"
+        type: boolean
+        required: true
+        default: false
+      skipBinaries:
+        description: "Skip building precompiled binaries?"
+        type: boolean
+        required: true
+        default: false
+      skipJava:
+        description: "Skip building Java?"
+        type: boolean
+        required: true
+        default: false
+      skipNodejs:
+        description: "Skip building Node.js?"
+        type: boolean
+        required: true
+        default: false
+      skipWasm:
+        description: "Skip building WebAssembly?"
+        type: boolean
+        required: true
+        default: false
+      skipPython:
+        description: "Skip building Python?"
+        type: boolean
+        required: true
+        default: false
+      skipRust:
+        description: "Skip building Rust?"
+        type: boolean
+        required: true
+        default: false
+      skipExtensions:
+        description: "Skip building extensions?"
+        type: boolean
+        required: true
+        default: true
+      isNightly:
+        description: "Whether the build is a nightly build?"
+        type: boolean
+        required: true
+        default: false
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: 1
+
+permissions:
+  id-token: write  # Required for OIDC
+  contents: read
+  packages: write  # Required by extension deployment
+
+jobs:
+  get-nightly-version:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        run: python3 -m pip install uv
+
+      - name: Update nightly version
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py | grep "New Python dev version:" | awk -F'New Python dev version: ' '{print $2}' | sed 's/\.$//' > version.txt
+          cat version.txt
+        working-directory: scripts
+      
+      - name: Upload version
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: version
+          path: scripts/version.txt
+
+  build-extension:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipExtensions != 'true' }}
+    uses: ./.github/workflows/build-and-deploy-extension.yml
+    with:
+      isNightly: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+    secrets: inherit
+
+  build-wheels:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipPython != 'true' }}
+    needs: [build-precompiled-bin]
+    uses: ./.github/workflows/python-wheel-workflow.yml
+    with:
+      isNightly: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+      precompiledRunId: ${{ github.run_id }}
+    secrets: inherit
+
+  deploy-python:
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipPython != 'true' }}
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-wheels-arm64
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-wheels-x86_64
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: manylinux_2_28-wheels-x86_64
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: manylinux_2_28-wheels-aarch64
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-wheels-amd64
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-wheels-arm64
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-sdist
+          path: dist
+
+      - name: List wheels
+        run: ls -l
+        working-directory: dist
+
+      - name: Clean up existing attestation files
+        run: rm -f *.publish.attestation
+        working-directory: dist
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-deploy-wheels
+          path: dist/*
+
+      - name: Deploy to PyPI test
+        if: ${{ github.event_name != 'workflow_dispatch' && github.event.inputs.isDeploy != 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+      - name: Clean up TestPyPI attestation files
+        if: ${{ github.event_name != 'workflow_dispatch' && github.event.inputs.isDeploy != 'true' }}
+        run: rm -f *.publish.attestation
+        working-directory: dist
+
+      - name: Deploy to PyPI
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.isDeploy == 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+  
+  deploy-rust:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipRust != 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      LBUG_SOURCE_DIR: ${{ github.workspace }}
+      LBUG_RUST_BUILD_FROM_SOURCE: 1
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/rust_api
+
+      - name: Create lbug-src symlink
+        run: ln -s $(pwd) tools/rust_api/lbug-src
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Update nightly version
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      - name: Update Cargo.toml version
+        run: python3 update_version.py
+        working-directory: tools/rust_api
+
+      - name: Deploy crate to Crates.io
+        run: cargo publish --allow-dirty
+        if: ${{ github.event.inputs.isDeploy == 'true' }}
+        working-directory: tools/rust_api
+
+      - name: Test publishing crate
+        run: cargo publish --dry-run --allow-dirty
+        if: ${{ github.event.inputs.isDeploy != 'true' }}
+        working-directory: tools/rust_api
+
+      - name: Upload crate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-deploy-crate
+          path: tools/rust_api/target/package/*.crate
+
+  build-java:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipJava != 'true' }}
+    needs: [build-precompiled-bin, build-linux-builder-image]
+    uses: ./.github/workflows/java-workflow.yml
+    with:
+      isNightly: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+      precompiledRunId: ${{ github.run_id }}
+      linuxBuilderImage: ${{ needs.build-linux-builder-image.outputs.image }}
+    secrets: inherit
+
+  deploy-java:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipJava != 'true' }}
+    needs: [build-java]
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
+      GPG_SIGNING_KEY: ${{ secrets.PGP_PRIVATE_KEY }}
+      GPG_SIGNING_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+      SKIP_CMAKE_BUILD: true
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/java_api dataset
+
+      - name: Install uv
+        run: python3 -m pip install uv
+
+      - name: Update nightly version
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: java-lib-osx-arm64
+          path: tools/java_api/src/main/resources
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: java-lib-linux-aarch64
+          path: tools/java_api/src/main/resources
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: java-lib-linux-x86_64
+          path: tools/java_api/src/main/resources
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: java-lib-win-x86_64
+          path: tools/java_api/src/main/resources
+
+      - name: Create Java JAR
+        working-directory: tools/java_api
+        run: |
+          ./gradlew build --stacktrace --info --warning-mode all --no-parallel --max-workers=1
+
+      - name: Upload Java test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: java-test-diagnostics
+          path: |
+            tools/java_api/build/test-results/test
+            tools/java_api/build/reports/tests/test
+            tools/java_api/build/hs_err_pid*.log
+
+      - name: Upload Java JAR
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-java-multiplatform-jar
+          path: tools/java_api/build/libs/lbug*.jar
+
+      - name: Create Maven Central bundle
+        working-directory: tools/java_api
+        run: |
+            ORIGINAL_PWD=$(pwd)
+            ./gradlew publishMavenJavaToLocalRepo -i
+            cd build/repo
+            zip -r lbug-java-bundle.zip com
+            mv lbug-java-bundle.zip $ORIGINAL_PWD
+      
+      - name: Upload Maven Central bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-java-multiplatform-bundle
+          path: tools/java_api/lbug-java-bundle.zip
+      
+      - name: Deploy to Maven Central
+        if: ${{ github.event.inputs.isDeploy == 'true' && github.event.inputs.isNightly != 'true' }}
+        working-directory: tools/java_api
+        run: |
+          curl --request POST \
+          --verbose \
+          --header 'Authorization: Bearer ${{ secrets.MAVEN_CENTRAL_PORTAL_TOKEN }}' \
+          --form bundle=@lbug-java-bundle.zip \
+          https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC
+        
+      - name: Publish to GitHub Packages
+        if: ${{ github.event.inputs.isDeploy == 'true' || github.event_name == 'schedule' }}
+        working-directory: tools/java_api
+        run: |
+          ./gradlew publish -i
+
+  build-nodejs:
+    if: ${{ always() && (github.event_name == 'schedule' || github.event.inputs.skipNodejs != 'true') && needs.build-precompiled-bin.result == 'success' && needs.build-linux-builder-image.result == 'success' && (needs.build-extension.result == 'success' || github.event.inputs.skipExtensions == 'true') }}
+    needs: [build-precompiled-bin, build-linux-builder-image, build-extension]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node-version: "22"
+            artifact-suffix: ""
+            experimental: false
+          - node-version: "20"
+            artifact-suffix: "-node20"
+            experimental: false
+          - node-version: "24"
+            artifact-suffix: "-node24"
+            experimental: true
+    uses: ./.github/workflows/nodejs-workflow.yml
+    with:
+      isNightly: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+      precompiledRunId: ${{ github.run_id }}
+      nodeVersion: ${{ matrix.node-version }}
+      artifactSuffix: ${{ matrix.artifact-suffix }}
+      linuxBuilderImage: ${{ needs.build-linux-builder-image.outputs.image }}
+      useBuiltExtensions: ${{ needs.build-extension.result == 'success' }}
+    secrets: inherit
+
+  deploy-nodejs:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipNodejs != 'true' }}
+    needs: [build-nodejs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/nodejs_api
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Update nightly version
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+        run: |
+          uv venv
+          source .venv/bin/activate
+          python3 update-nightly-build-version.py
+        working-directory: scripts
+
+      - name: Create prebuilt folder
+        run: mkdir -p tools/nodejs_api/prebuilt
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mac-nodejs-module-arm64
+          path: tools/nodejs_api/prebuilt
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mac-nodejs-module-x64
+          path: tools/nodejs_api/prebuilt
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-nodejs-module-x86_64
+          path: tools/nodejs_api/prebuilt
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-nodejs-module-aarch64
+          path: tools/nodejs_api/prebuilt
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-nodejs-module
+          path: tools/nodejs_api/prebuilt
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Package Node.js API (main + per-platform sub-packages)
+        run: node package
+        working-directory: tools/nodejs_api
+
+      - name: Show tarball contents
+        run: |
+          for f in lbug-source.tar.gz lbug-linux-x64.tar.gz lbug-linux-arm64.tar.gz lbug-darwin-arm64.tar.gz lbug-darwin-x64.tar.gz lbug-win32-x64.tar.gz; do
+            if [ -f "$f" ]; then
+              echo "=== $f ==="; tar -tvf "$f"; echo
+            fi
+          done
+        working-directory: tools/nodejs_api
+
+      - name: Upload main tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-deploy-nodejs
+          path: tools/nodejs_api/lbug-source.tar.gz
+
+      - name: Upload per-platform tarballs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-deploy-nodejs-platform-packages
+          path: tools/nodejs_api/lbug-*.tar.gz
+
+      - name: Deploy to npm.js dry run
+        if: ${{ github.event_name != 'schedule' && github.event.inputs.isDeploy != 'true' }}
+        run: |
+          TAG=latest
+          if [ "${{ github.event.inputs.isNightly }}" = "true" ]; then
+            TAG=next
+          fi
+          for tarball in lbug-source.tar.gz lbug-linux-x64.tar.gz lbug-linux-arm64.tar.gz lbug-darwin-arm64.tar.gz lbug-darwin-x64.tar.gz lbug-win32-x64.tar.gz; do
+            [ -f "$tarball" ] || continue
+            PACKAGE_NAME="$(tar -xOf "$tarball" package/package.json | node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(pkg.name)")"
+            PACKAGE_VERSION="$(tar -xOf "$tarball" package/package.json | node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(pkg.version)")"
+            PACKAGE_REF="${PACKAGE_NAME}@${PACKAGE_VERSION}"
+            if npm view "${PACKAGE_REF}" version >/dev/null 2>&1; then
+              echo "${PACKAGE_REF} already published; skipping dry-run."
+            else
+              npm publish "$tarball" --access public --tag "${TAG}" --dry-run
+            fi
+          done
+        working-directory: tools/nodejs_api
+
+      - name: Deploy nightly to npm.js
+        if: ${{ github.event_name == 'schedule' || (github.event.inputs.isDeploy == 'true' && github.event.inputs.isNightly == 'true') }}
+        run: |
+          NIGHTLY_TAG="nightly-$(date -u +%Y%m%d)"
+          for tarball in lbug-linux-x64.tar.gz lbug-linux-arm64.tar.gz lbug-darwin-arm64.tar.gz lbug-darwin-x64.tar.gz lbug-win32-x64.tar.gz lbug-source.tar.gz; do
+            [ -f "$tarball" ] || continue
+            PACKAGE_NAME="$(tar -xOf "$tarball" package/package.json | node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(pkg.name)")"
+            PACKAGE_VERSION="$(tar -xOf "$tarball" package/package.json | node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(pkg.version)")"
+            PACKAGE_REF="${PACKAGE_NAME}@${PACKAGE_VERSION}"
+            echo "Nightly tag: ${NIGHTLY_TAG}, Package: ${PACKAGE_REF}"
+            if npm view "${PACKAGE_REF}" version >/dev/null 2>&1; then
+              echo "Already published; trusted publishing only supports publish, so skipping dist-tag update."
+            else
+              npm publish "$tarball" --provenance --access public --tag "${NIGHTLY_TAG}"
+            fi
+          done
+        working-directory: tools/nodejs_api
+
+      - name: Deploy to npm.js
+        if: ${{ github.event.inputs.isDeploy == 'true' && github.event.inputs.isNightly != 'true' }}
+        run: |
+          for tarball in lbug-linux-x64.tar.gz lbug-linux-arm64.tar.gz lbug-darwin-arm64.tar.gz lbug-darwin-x64.tar.gz lbug-win32-x64.tar.gz lbug-source.tar.gz; do
+            [ -f "$tarball" ] || continue
+            npm publish "$tarball" --provenance --access public --tag latest
+          done
+        working-directory: tools/nodejs_api
+  
+  build-and-test-wasm:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipWasm != 'true' }}
+    uses: ./.github/workflows/wasm-workflow.yml
+    with:
+      isNightly: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+    secrets: inherit
+  
+  deploy-wasm:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipWasm != 'true' }}
+    needs: [build-and-test-wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/wasm
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: lbug-deploy-wasm
+          path: tools/wasm
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm
+        run: npm install -g npm@11
+
+      - name: Show tarball contents
+        run: tar -tvf lbug-wasm.tar.gz
+        working-directory: tools/wasm
+
+      - name: Deploy to npm.js dry run
+        if: ${{ github.event_name != 'schedule' && github.event.inputs.isDeploy != 'true' }}
+        run: |
+          TAG=latest
+          if [ "${{ github.event.inputs.isNightly }}" = "true" ]; then
+            TAG=next
+          fi
+          npm publish lbug-wasm.tar.gz --access public --tag "${TAG}" --dry-run
+        working-directory: tools/wasm
+
+      - name: Deploy nightly to npm.js
+        if: ${{ github.event_name == 'schedule' || (github.event.inputs.isDeploy == 'true' && github.event.inputs.isNightly == 'true') }}
+        run: |
+          NIGHTLY_TAG="nightly-$(date -u +%Y%m%d)"
+          PACKAGE_NAME="$(tar -xOf lbug-wasm.tar.gz package/package.json | node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(pkg.name)")"
+          PACKAGE_VERSION="$(tar -xOf lbug-wasm.tar.gz package/package.json | node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(pkg.version)")"
+          PACKAGE_REF="${PACKAGE_NAME}@${PACKAGE_VERSION}"
+          echo "Nightly tag: ${NIGHTLY_TAG}"
+          echo "Package ref: ${PACKAGE_REF}"
+
+          if npm view "${PACKAGE_REF}" version >/dev/null 2>&1; then
+            echo "Package version already exists on npm; trusted publishing only supports publish, so skipping dist-tag update."
+          else
+            npm publish lbug-wasm.tar.gz --provenance --access public --tag "${NIGHTLY_TAG}"
+          fi
+        working-directory: tools/wasm
+
+      - name: Deploy to npm.js
+        if: ${{ github.event.inputs.isDeploy == 'true' && github.event.inputs.isNightly != 'true' }}
+        run: npm publish lbug-wasm.tar.gz --provenance --access public --tag latest
+        working-directory: tools/wasm
+
+  build-precompiled-bin:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipBinaries != 'true' }}
+    uses: ./.github/workflows/precompiled-bin-workflow.yml
+    with:
+      isNightly: ${{ github.event_name == 'schedule' || github.event.inputs.isNightly == 'true' }}
+    secrets: inherit
+
+  build-linux-builder-image:
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.skipJava != 'true' || github.event.inputs.skipNodejs != 'true' }}
+    runs-on: ubuntu-22.04
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Select builder image tag
+        id: image
+        shell: bash
+        run: |
+          DOCKERFILE=".github/docker/ubuntu-22.04-gcc13/Dockerfile"
+          IMAGE_NAME="ghcr.io/ladybugdb/ubuntu-22.04-gcc13"
+          IMAGE_TAG="sha-$(sha256sum "$DOCKERFILE" | cut -c1-12)"
+          echo "image=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for existing builder image
+        id: image-exists
+        shell: bash
+        run: |
+          if docker buildx imagetools inspect "${{ steps.image.outputs.image }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: ${{ steps.image-exists.outputs.exists != 'true' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.image-exists.outputs.exists != 'true' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push builder image
+        if: ${{ steps.image-exists.outputs.exists != 'true' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .github/docker/ubuntu-22.04-gcc13/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Ubuntu 22.04 builder image with GCC 13 for Ladybug Java and Node.js release builds
+          tags: |
+            ${{ steps.image.outputs.image }}
+            ${{ steps.image.outputs.image_name }}:latest

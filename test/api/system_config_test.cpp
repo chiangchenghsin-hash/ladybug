@@ -1,0 +1,227 @@
+#include "api_test/api_test.h"
+#include "catalog/catalog.h"
+#include "catalog/catalog_entry/node_table_catalog_entry.h"
+#include "common/exception/buffer_manager.h"
+#include "common/system_config.h"
+#include "storage/storage_manager.h"
+#include "storage/table/node_table.h"
+#include "transaction/transaction.h"
+
+using namespace lbug::common;
+using namespace lbug::catalog;
+using namespace lbug::storage;
+using namespace lbug::testing;
+using namespace lbug::main;
+using namespace lbug::transaction;
+
+class SystemConfigTest : public ApiTest {
+    void SetUp() override { BaseGraphTest::SetUp(); }
+};
+
+void assertQuery(QueryResult& result) {
+    auto a = result.toString();
+    ASSERT_TRUE(result.isSuccess()) << result.toString();
+}
+
+TEST_F(SystemConfigTest, testAccessMode) {
+    systemConfig->readOnly = false;
+    auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    auto con = std::make_unique<Connection>(db.get());
+    assertQuery(
+        *con->query("CREATE NODE TABLE Person1(name STRING, age INT64, PRIMARY KEY(name))"));
+    assertQuery(*con->query("CREATE (:Person1 {name: 'Alice', age: 25})"));
+    assertQuery(*con->query("MATCH (:Person1) RETURN COUNT(*)"));
+    db.reset();
+    systemConfig->readOnly = true;
+    if (databasePath == "" || databasePath == ":memory:") {
+        EXPECT_THROW(auto db2 = std::make_unique<Database>("", *systemConfig), Exception);
+        EXPECT_THROW(auto db2 = std::make_unique<Database>(":memory:", *systemConfig), Exception);
+        return;
+    }
+    std::unique_ptr<Database> db2;
+    std::unique_ptr<Connection> con2;
+    EXPECT_NO_THROW(db2 = std::make_unique<Database>(databasePath, *systemConfig));
+    EXPECT_NO_THROW(con2 = std::make_unique<Connection>(db2.get()));
+    ASSERT_FALSE(con2->query("DROP TABLE Person")->isSuccess());
+    EXPECT_NO_THROW(con2->query("MATCH (:Person) RETURN COUNT(*)"));
+}
+
+TEST_F(SystemConfigTest, testSpillToDisk) {
+    systemConfig->readOnly = false;
+    auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    auto con = std::make_unique<Connection>(db.get());
+    if (databasePath == "" || databasePath == ":memory:") {
+        auto res = con->query("CALL spill_to_disk=true;");
+        ASSERT_FALSE(res->isSuccess());
+        ASSERT_EQ(res->toString(),
+            "Runtime exception: Cannot set spill_to_disk to true for an in-memory database!");
+    } else {
+        ASSERT_TRUE(con->query("CALL spill_to_disk=true;"));
+        ASSERT_TRUE(con->query("CALL spill_to_disk=false;"));
+    }
+    db.reset();
+    systemConfig->readOnly = true;
+    if (databasePath == "" || databasePath == ":memory:") {
+        EXPECT_THROW(auto db2 = std::make_unique<Database>("", *systemConfig), Exception);
+        EXPECT_THROW(auto db2 = std::make_unique<Database>(":memory:", *systemConfig), Exception);
+        return;
+    }
+    std::unique_ptr<Database> db2;
+    std::unique_ptr<Connection> con2;
+    EXPECT_NO_THROW(db2 = std::make_unique<Database>(databasePath, *systemConfig));
+    EXPECT_NO_THROW(con2 = std::make_unique<Connection>(db2.get()));
+    auto result = con2->query("CALL spill_to_disk=true;");
+    ASSERT_FALSE(result->isSuccess());
+    ASSERT_EQ(result->toString(),
+        "Runtime exception: Cannot set spill_to_disk to true for a read only database!");
+}
+
+TEST_F(SystemConfigTest, testMaxDBSize) {
+    systemConfig->maxDBSize = 1024;
+    try {
+        auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    } catch (const BufferManagerException& e) {
+        ASSERT_EQ(std::string(e.what()),
+            "Buffer manager exception: The given max db size should be at least " +
+                std::to_string(2 * LBUG_PAGE_SIZE * StorageConstants::PAGE_GROUP_SIZE) + " bytes.");
+    }
+    systemConfig->maxDBSize = 2 * LBUG_PAGE_SIZE * StorageConstants::PAGE_GROUP_SIZE + 1;
+    try {
+        auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    } catch (const BufferManagerException& e) {
+        ASSERT_EQ(std::string(e.what()),
+            "Buffer manager exception: The given max db size should be a power of 2.");
+    }
+    systemConfig->maxDBSize = 2 * LBUG_PAGE_SIZE * StorageConstants::PAGE_GROUP_SIZE;
+    try {
+        auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    } catch (const BufferManagerException& e) {
+        ASSERT_EQ(std::string(e.what()),
+            "Buffer manager exception: No more frame groups can be added to the allocator.");
+    }
+}
+
+TEST_F(SystemConfigTest, testRepeatedCheckpointsDoNotExhaustMaxDBSize) {
+    // Regression test for https://github.com/LadybugDB/ladybug/issues/924: each CHECKPOINT
+    // used to permanently consume ~1 VM frame group of max_db_size accounting (the shadowing
+    // FileHandle was orphaned on every checkpoint), so ~7 checkpoints exhausted a 64 MiB cap.
+    if (databasePath == "" || databasePath == ":memory:") {
+        GTEST_SKIP();
+    }
+    systemConfig->maxDBSize = 64 * 1024 * 1024;
+    auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    auto con = std::make_unique<Connection>(db.get());
+    assertQuery(*con->query("CREATE NODE TABLE Node(id STRING, payload STRING, PRIMARY KEY(id))"));
+    for (auto i = 0; i < 50; ++i) {
+        auto res = con->query("MERGE (n:Node {id: 'node-" + std::to_string(i % 10) +
+                              "'}) ON CREATE SET n.payload = 'x' ON MATCH SET n.payload = 'x'");
+        ASSERT_TRUE(res->isSuccess()) << res->toString();
+        auto checkpoint = con->query("CHECKPOINT");
+        ASSERT_TRUE(checkpoint->isSuccess()) << checkpoint->toString();
+    }
+    auto count = con->query("MATCH (n:Node) RETURN COUNT(*)");
+    ASSERT_TRUE(count->isSuccess()) << count->toString();
+    ASSERT_EQ(TestHelper::convertResultToString(*count), std::vector<std::string>{"10"});
+}
+
+TEST_F(SystemConfigTest, testBufferPoolSize) {
+    systemConfig->bufferPoolSize = 1024;
+    try {
+        auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    } catch (const BufferManagerException& e) {
+        ASSERT_EQ(std::string(e.what()),
+            "Buffer manager exception: The given buffer pool size should be at least " +
+                std::to_string(LBUG_PAGE_SIZE) + " bytes.");
+    }
+    systemConfig->bufferPoolSize = TestHelper::DEFAULT_BUFFER_POOL_SIZE_FOR_TESTING;
+    EXPECT_NO_THROW(auto db = std::make_unique<Database>(databasePath, *systemConfig));
+}
+
+TEST_F(SystemConfigTest, testDisableDefaultHashIndexFromSystemConfig) {
+    systemConfig->enableDefaultHashIndex = false;
+    auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    auto con = std::make_unique<Connection>(db.get());
+    assertQuery(*con->query("CREATE NODE TABLE PersonNoIdx(name STRING, PRIMARY KEY(name))"));
+    assertQuery(*con->query("CREATE (:PersonNoIdx {name: 'Alice'})"));
+
+    auto result = con->query("CALL current_setting('enable_default_hash_index') RETURN *");
+    ASSERT_TRUE(result->isSuccess());
+    ASSERT_EQ(TestHelper::convertResultToString(*result), std::vector<std::string>{"False"});
+
+    auto* entry = db->getCatalog()
+                      ->getTableCatalogEntry(&DUMMY_CHECKPOINT_TRANSACTION, "PersonNoIdx")
+                      ->ptrCast<NodeTableCatalogEntry>();
+    auto& nodeTable = db->getStorageManager()->getTable(entry->getTableID())->cast<NodeTable>();
+    ASSERT_EQ(nodeTable.tryGetPKIndex(), nullptr);
+}
+
+TEST_F(SystemConfigTest, testDisableDefaultHashIndexFromDBConfig) {
+    auto db = std::make_unique<Database>(databasePath, *systemConfig);
+    auto con = std::make_unique<Connection>(db.get());
+    assertQuery(*con->query("CALL enable_default_hash_index=false;"));
+    assertQuery(*con->query("CREATE NODE TABLE PersonNoIdx2(name STRING, PRIMARY KEY(name))"));
+    assertQuery(*con->query("CREATE (:PersonNoIdx2 {name: 'Alice'})"));
+    auto result = con->query("CALL current_setting('enable_default_hash_index') RETURN *");
+    ASSERT_TRUE(result->isSuccess());
+    ASSERT_EQ(TestHelper::convertResultToString(*result), std::vector<std::string>{"False"});
+
+    auto* entry = db->getCatalog()
+                      ->getTableCatalogEntry(&DUMMY_CHECKPOINT_TRANSACTION, "PersonNoIdx2")
+                      ->ptrCast<NodeTableCatalogEntry>();
+    auto& nodeTable = db->getStorageManager()->getTable(entry->getTableID())->cast<NodeTable>();
+    ASSERT_EQ(nodeTable.tryGetPKIndex(), nullptr);
+}
+
+// Regression: the per-thread reusable ResultSet used to live in a process-wide thread_local, so
+// on single-threaded builds (where the calling thread runs ProcessorTask::run, e.g. the
+// single-threaded Wasm package) it outlived Database::~Database and released (or reused)
+// ValueVector buffers through the destroyed database's MemoryManager the next time any database
+// ran a query on that thread. That is a heap-use-after-free under AddressSanitizer and silent heap
+// corruption otherwise; on Wasm it surfaced as "RuntimeError: null function" after a
+// prepared-write / close / reopen sequence. The pool is now owned by the database. On
+// multithreaded builds worker threads (and their former thread_local) are joined with the
+// database, so this test only demonstrates the bug in a SINGLE_THREADED (+ASan) configuration;
+// elsewhere it still checks reuse and data visibility across the reopen.
+TEST_F(SystemConfigTest, testResultSetReuseDoesNotOutliveDatabase) {
+    if (databasePath == "" || databasePath == ":memory:") {
+        GTEST_SKIP() << "Requires an on-disk database that can be closed and reopened";
+    }
+    systemConfig->readOnly = false;
+    for (auto round = 0u; round < 3; ++round) {
+        auto db = std::make_unique<Database>(databasePath, *systemConfig);
+        auto con = std::make_unique<Connection>(db.get());
+        if (round == 0) {
+            assertQuery(
+                *con->query("CREATE NODE TABLE Meta(key STRING, value STRING, PRIMARY KEY(key))"));
+        }
+        // Prepared write executed once: the executing thread caches a ResultSet whose
+        // string buffers belong to this database's MemoryManager.
+        auto del = con->prepare("MATCH (m:Meta) WHERE m.key = $key DELETE m");
+        assertQuery(*con->execute(del.get(),
+            std::make_pair(std::string("key"), std::string("graphIdentitySchemaVersion"))));
+        auto ins = con->prepare("CREATE (:Meta {key: $key, value: $value})");
+        assertQuery(*con->execute(ins.get(),
+            std::make_pair(std::string("key"), std::string("graphIdentitySchemaVersion")),
+            std::make_pair(std::string("value"), std::string("qualified-scope-id-v2-round-x"))));
+        // Reuse across executions of the same prepared statement must still work.
+        assertQuery(*con->execute(del.get(),
+            std::make_pair(std::string("key"), std::string("graphIdentitySchemaVersion"))));
+        assertQuery(*con->execute(ins.get(),
+            std::make_pair(std::string("key"), std::string("graphIdentitySchemaVersion")),
+            std::make_pair(std::string("value"), std::string("qualified-scope-id-v2"))));
+        del.reset();
+        ins.reset();
+        con.reset();
+        db.reset();
+        // Reopen on the same thread and run a query with a different descriptor: before the fix
+        // this released the previous database's cached ResultSet through a dangling
+        // MemoryManager.
+        db = std::make_unique<Database>(databasePath, *systemConfig);
+        con = std::make_unique<Connection>(db.get());
+        auto result = con->query("MATCH (m:Meta) RETURN m.key, m.value ORDER BY m.key");
+        assertQuery(*result);
+        ASSERT_EQ(result->getNumTuples(), 1u);
+        ASSERT_EQ(result->getNext()->toString(),
+            "graphIdentitySchemaVersion|qualified-scope-id-v2\n");
+    }
+}

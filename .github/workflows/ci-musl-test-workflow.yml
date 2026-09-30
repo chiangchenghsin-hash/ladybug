@@ -1,0 +1,374 @@
+name: CI MUSL Test Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      auto_checkpoint:
+        description: 'Database config - auto checkpoint'
+        required: false
+        default: true
+        type: boolean
+
+      buffer_pool_size:
+        description: 'Database config - buffer pool size'
+        required: false
+        type: number
+
+      max_num_threads:
+        description: 'Database config - max number of threads'
+        required: false
+        default: 2
+        type: number
+
+      enable_compression:
+        description: 'Database config - enable compression'
+        required: false
+        default: true
+        type: boolean
+
+      checkpoint_threshold:
+        description: 'Database config - checkpoint threshold'
+        required: false
+        default: 16777216
+        type: number
+
+      force_checkpoint_on_close:
+        description: "Database config - force checkpoint on close"
+        required: false
+        default: true
+        type: boolean
+env:
+  RUNTIME_CHECKS: 1
+  USE_EXISTING_BINARY_DATASET: 1
+  AUTO_CHECKPOINT: ${{ github.event.inputs.auto_checkpoint }}
+  BUFFER_POOL_SIZE: ${{ github.event.inputs.buffer_pool_size }}
+  MAX_NUM_THREADS: ${{ github.event.inputs.max_num_threads }}
+  ENABLE_COMPRESSION: ${{ github.event.inputs.enable_compression }}
+  CHECKPOINT_THRESHOLD: ${{ github.event.inputs.checkpoint_threshold }}
+  FORCE_CHECKPOINT_ON_CLOSE: ${{ github.event.inputs.force_checkpoint_on_close }}
+  WERROR: 1
+  RUSTFLAGS: --deny warnings
+  PIP_BREAK_SYSTEM_PACKAGES: 1
+
+# Only allow one run in this group to run at a time, and cancel any runs in progress in this group.
+# We use the workflow name and then add the pull request number, or (if it's a push to main), we use the name of the branch.
+# See github's docs[1] and a relevant stack overflow answer[2]
+#   [1]: https://docs.github.com/en/actions/using-jobs/using-concurrency
+#   [2]: https://stackoverflow.com/questions/66335225/how-to-cancel-previous-runs-in-the-pr-when-you-push-new-commitsupdate-the-curre
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanity-checks:
+    name: sanity checks
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash git python3
+
+      - name: Match container user/group to Ubuntu runner
+        run: |
+          RUNNER_UID="$(stat -c '%u' /__w)"
+          RUNNER_GID="$(stat -c '%g' /__w)"
+
+          if ! awk -F: -v gid="$RUNNER_GID" '$3 == gid { found=1 } END { exit !found }' /etc/group; then
+            addgroup -g "$RUNNER_GID" ubuntu
+          fi
+
+          RUNNER_GROUP="$(awk -F: -v gid="$RUNNER_GID" '$3 == gid { print $1; exit }' /etc/group)"
+
+          if ! awk -F: -v uid="$RUNNER_UID" '$3 == uid { found=1 } END { exit !found }' /etc/passwd; then
+            adduser -D -u "$RUNNER_UID" -G "$RUNNER_GROUP" ubuntu
+          fi
+
+          git config --system --add safe.directory /__w/ladybug/ladybug
+
+      - uses: actions/checkout@v4
+
+      - name: Check source headers for include guards
+        run: ./scripts/check-include-guards.sh src/include
+          ./scripts/check-include-guards.sh test/include
+
+      - name: Check extension headers for include guards
+        run: |
+          for dir in extension/*/src/include ;do
+            ./scripts/check-include-guards.sh "$dir"
+          done
+
+      - name: Checks source files for std::assert
+        run: ./scripts/check-no-std-assert.sh src
+
+      - name: Check extension files for std::assert
+        run: ./scripts/check-no-std-assert.sh extension
+
+      - name: Ensure generated grammar files are up to date
+        run: |
+          python3 scripts/antlr4/hash.py src/antlr4/keywords.txt src/antlr4/Cypher.g4 > tmphashfile
+          cmp tmphashfile scripts/antlr4/hash.md5
+          rm tmphashfile
+
+  clang-format:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install clang-format dependencies
+        run: apk add --no-cache git python3 clang18-extra-tools
+
+      - name: Match container user/group to Ubuntu runner
+        run: |
+          RUNNER_UID="$(stat -c '%u' /__w)"
+          RUNNER_GID="$(stat -c '%g' /__w)"
+
+          if ! awk -F: -v gid="$RUNNER_GID" '$3 == gid { found=1 } END { exit !found }' /etc/group; then
+            addgroup -g "$RUNNER_GID" ubuntu
+          fi
+
+          RUNNER_GROUP="$(awk -F: -v gid="$RUNNER_GID" '$3 == gid { print $1; exit }' /etc/group)"
+
+          if ! awk -F: -v uid="$RUNNER_UID" '$3 == uid { found=1 } END { exit !found }' /etc/passwd; then
+            adduser -D -u "$RUNNER_UID" -G "$RUNNER_GROUP" ubuntu
+          fi
+
+          git config --system --add safe.directory /__w/ladybug/ladybug
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Clang Format
+        run: python3 scripts/run-clang-format.py --clang-format-executable /usr/lib/llvm18/bin/clang-format -r src/ test/ tools/ extension/
+
+  minimal-test:
+    name: minimal test
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    needs: [ sanity-checks ]
+    env:
+      GEN: Ninja
+      TEST_JOBS: 4
+      NUM_THREADS: 4
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash git make cmake ninja build-base linux-headers ccache python3 py3-pip curl wget unzip su-exec
+
+      - name: Match container user/group to Ubuntu runner
+        run: |
+          RUNNER_UID="$(stat -c '%u' /__w)"
+          RUNNER_GID="$(stat -c '%g' /__w)"
+
+          if ! awk -F: -v gid="$RUNNER_GID" '$3 == gid { found=1 } END { exit !found }' /etc/group; then
+            addgroup -g "$RUNNER_GID" ubuntu
+          fi
+
+          RUNNER_GROUP="$(awk -F: -v gid="$RUNNER_GID" '$3 == gid { print $1; exit }' /etc/group)"
+
+          if ! awk -F: -v uid="$RUNNER_UID" '$3 == uid { found=1 } END { exit !found }' /etc/passwd; then
+            adduser -D -u "$RUNNER_UID" -G "$RUNNER_GROUP" ubuntu
+          fi
+
+          RUNNER_USER="$(awk -F: -v uid="$RUNNER_UID" '$3 == uid { print $1; exit }' /etc/passwd)"
+          RUNNER_HOME="$(awk -F: -v uid="$RUNNER_UID" '$3 == uid { print $6; exit }' /etc/passwd)"
+
+          echo "RUN_AS_USER=$RUNNER_USER" >> "$GITHUB_ENV"
+          echo "RUN_AS_GROUP=$RUNNER_GROUP" >> "$GITHUB_ENV"
+          echo "RUN_AS_HOME=$RUNNER_HOME" >> "$GITHUB_ENV"
+
+          git config --system --add safe.directory /__w/ladybug/ladybug
+          su-exec "$RUNNER_USER:$RUNNER_GROUP" env HOME="$RUNNER_HOME" git config --global --add safe.directory /__w/ladybug/ladybug
+
+      - uses: actions/checkout@v4
+
+      - name: Fix workspace ownership for non-root user
+        run: chown -R "$(id -u "$RUN_AS_USER")":"$(id -g "$RUN_AS_USER")" /__w/ladybug/ladybug
+
+      - name: Checkout dataset and benchmarks
+        run: su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'git submodule update --init dataset benchmark' # needed for demo db
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: minimal-test-${{ runner.os }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            minimal-test-${{ runner.os }}-refs/heads/main
+            minimal-test-${{ runner.os }}-
+
+      - name: Build
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'make relwithdebinfo'
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Generate datasets
+        run: |
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'bash scripts/generate_binary_demo.sh --lbug-shell-mode relwithdebinfo'
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'uv run --with pyarrow python3 scripts/generate-dictionary-bug-fixture.py'
+
+      - name: Test
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: |
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc '
+            uv venv
+            . .venv/bin/activate
+            uv pip install pytest pexpect
+            make shell-test test
+          '
+
+  minimal-linux-extension-test:
+    name: minimal linux extension test
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    env:
+      GEN: Ninja
+      EXTRA_CMAKE_FLAGS: -DOPENSSL_ROOT_DIR=/usr/lib/openssl3 -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_CRYPTO_LIBRARY=/usr/lib/openssl3/libcrypto.so -DOPENSSL_SSL_LIBRARY=/usr/lib/openssl3/libssl.so
+      UW_S3_ACCESS_KEY_ID: ${{ secrets.UW_S3_ACCESS_KEY_ID }}
+      UW_S3_SECRET_ACCESS_KEY: ${{ secrets.UW_S3_SECRET_ACCESS_KEY }}
+      AWS_S3_ACCESS_KEY_ID: ${{ secrets.AWS_S3_ACCESS_KEY_ID }}
+      AWS_S3_SECRET_ACCESS_KEY: ${{ secrets.AWS_S3_SECRET_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_S3_SECRET_ACCESS_KEY }}
+      GCS_ACCESS_KEY_ID: ${{ secrets.GCS_ACCESS_KEY_ID }}
+      GCS_SECRET_ACCESS_KEY: ${{ secrets.GCS_SECRET_ACCESS_KEY }}
+      AZURE_CONNECTION_STRING: ${{ format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', secrets.AZURE_ACCOUNT_NAME, secrets.AZURE_ACCOUNT_KEY) }}
+      AZURE_ACCOUNT_NAME: ${{ secrets.AZURE_ACCOUNT_NAME }}
+      AZURE_PUBLIC_CONTAINER: ${{ secrets.AZURE_PUBLIC_CONTAINER }}
+
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash git make cmake ninja build-base linux-headers ccache python3 py3-pip curl wget unzip nodejs npm su-exec openssl openssl-dev
+
+      - name: Match container user/group to Ubuntu runner
+        run: |
+          RUNNER_UID="$(stat -c '%u' /__w)"
+          RUNNER_GID="$(stat -c '%g' /__w)"
+
+          if ! awk -F: -v gid="$RUNNER_GID" '$3 == gid { found=1 } END { exit !found }' /etc/group; then
+            addgroup -g "$RUNNER_GID" ubuntu
+          fi
+
+          RUNNER_GROUP="$(awk -F: -v gid="$RUNNER_GID" '$3 == gid { print $1; exit }' /etc/group)"
+
+          if ! awk -F: -v uid="$RUNNER_UID" '$3 == uid { found=1 } END { exit !found }' /etc/passwd; then
+            adduser -D -u "$RUNNER_UID" -G "$RUNNER_GROUP" ubuntu
+          fi
+
+          RUNNER_USER="$(awk -F: -v uid="$RUNNER_UID" '$3 == uid { print $1; exit }' /etc/passwd)"
+          RUNNER_HOME="$(awk -F: -v uid="$RUNNER_UID" '$3 == uid { print $6; exit }' /etc/passwd)"
+
+          echo "RUN_AS_USER=$RUNNER_USER" >> "$GITHUB_ENV"
+          echo "RUN_AS_GROUP=$RUNNER_GROUP" >> "$GITHUB_ENV"
+          echo "RUN_AS_HOME=$RUNNER_HOME" >> "$GITHUB_ENV"
+
+          git config --system --add safe.directory /__w/ladybug/ladybug
+          su-exec "$RUNNER_USER:$RUNNER_GROUP" env HOME="$RUNNER_HOME" git config --global --add safe.directory /__w/ladybug/ladybug
+
+      - uses: actions/checkout@v4
+
+      - name: Fix workspace ownership for non-root user
+        run: chown -R "$(id -u "$RUN_AS_USER")":"$(id -g "$RUN_AS_USER")" /__w/ladybug/ladybug
+
+      - name: Checkout extensions
+        run: su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'git submodule update --init extension dataset benchmark'
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: minimal-extension-test-${{ runner.os }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            minimal-extension-test-${{ runner.os }}-refs/heads/main
+            minimal-extension-test-${{ runner.os }}-
+
+      - name: Update PostgreSQL host
+        working-directory: extension/postgres/test/test_files
+        env:
+          PG_FNAME: postgres.test
+          SQL_FNAME: sql_query.test
+          FIND: "localhost"
+        run: |
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc '
+            node -e '\''fs=require("fs");fs.readFile(process.env.PG_FNAME,"utf8",(err,data)=>{if(err!=null)throw err;fs.writeFile(process.env.PG_FNAME,data.replaceAll(process.env.FIND,process.env.PG_HOST),"utf8",e=>{if(e!=null)throw e;});});'\''
+            node -e '\''fs=require("fs");fs.readFile(process.env.SQL_FNAME,"utf8",(err,data)=>{if(err!=null)throw err;fs.writeFile(process.env.SQL_FNAME,data.replaceAll(process.env.FIND,process.env.PG_HOST),"utf8",e=>{if(e!=null)throw e;});});'\''
+          '
+
+      - name: Install DuckDB (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ runner.arch }}" = "X64" ]; then
+            wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-amd64-musl.zip
+            unzip libduckdb-linux-amd64-musl.zip -d duckdb
+          else
+            wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-arm64-musl.zip
+            unzip libduckdb-linux-arm64-musl.zip -d duckdb
+          fi
+
+          mkdir -p /usr/local/include /usr/local/lib
+          cp duckdb/duckdb.h /usr/local/include/duckdb.h
+          cp duckdb/duckdb.hpp /usr/local/include/duckdb.hpp
+          cp duckdb/libduckdb.so /usr/local/lib/libduckdb.so
+
+          # Create CMake config files
+          mkdir -p /usr/local/lib/cmake/DuckDB
+          tee /usr/local/lib/cmake/DuckDB/DuckDBConfig.cmake > /dev/null << 'EOF'
+          # DuckDB CMake configuration file
+
+          if(NOT TARGET DuckDB::duckdb)
+            add_library(DuckDB::duckdb SHARED IMPORTED)
+            set_target_properties(DuckDB::duckdb PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
+              IMPORTED_LOCATION "/usr/local/lib/libduckdb.so"
+            )
+          endif()
+
+          set(DuckDB_LIBRARIES DuckDB::duckdb)
+          set(DuckDB_INCLUDE_DIRS "/usr/local/include")
+          set(DuckDB_FOUND TRUE)
+          EOF
+
+      - name: Install uv
+        run: |
+          pip3 install uv
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'uv venv'
+
+      - name: Install dependencies
+        run: su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc 'uv pip install rangehttpserver requests'
+
+      # shell needs to be built first to generate the dataset provided by the server
+      - name: Extension test build
+        run: |
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc '
+            make relwithdebinfo
+            cp build/relwithdebinfo/tools/shell/lbug lbug.prod
+            make extension-test-build
+            cp lbug.prod build/relwithdebinfo/tools/shell/lbug
+          '
+
+      - name: Test dynamic extension loading
+        run: |
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc '
+            cd tools/shell/test
+            uv venv
+            . .venv/bin/activate
+            uv pip install pytest pexpect
+            pytest test_dynamic_extension_loading.py -v
+          '
+
+      - name: Extension test
+        run: |
+          su-exec "$RUN_AS_USER:$RUN_AS_GROUP" env HOME="$RUN_AS_HOME" sh -lc '
+            uv run scripts/generate-tinysnb.py
+            uv run scripts/setup-extension-repo.py &
+            make extension-test
+          '

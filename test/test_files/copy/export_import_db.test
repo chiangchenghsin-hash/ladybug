@@ -1,0 +1,310 @@
+-DATASET CSV demo-db/csv
+
+--
+
+-CASE ExportImportDatabaseDefault
+-SKIP_WASM
+-STATEMENT create macro addWithDefault(a,b:=3) as a + b;
+---- ok
+-STATEMENT ALTER TABLE User ADD random MAP(STRING, INT64) DEFAULT map(["key1","key2"],[400,250])
+---- ok
+-STATEMENT MATCH (p:User) WHERE p.name = "Adam" return p.random
+---- 1
+{key1=400, key2=250}
+-STATEMENT create sequence seq start 0 increment 10 minvalue 0;
+---- ok
+-STATEMENT return nextval('seq');
+---- 1
+0
+-STATEMENT return nextval('seq');
+---- 1
+10
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case1/demo-db"
+---- 1
+Exported database successfully.
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case1/demo-db"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case1/demo-db"
+---- 1
+Imported database successfully.
+-LOG ReturnAge
+-STATEMENT MATCH (u:User) WHERE u.name="Adam" RETURN u.age
+---- 1
+30
+-STATEMENT MATCH (u:User)-[:Follows]->(f:User) RETURN u.name, f.name ORDER BY u.name, f.name
+---- 4
+Adam|Karissa
+Adam|Zhang
+Karissa|Zhang
+Zhang|Noura
+-STATEMENT return addWithDefault(2);
+---- 1
+5
+-STATEMENT return currval('seq');
+---- 1
+10
+
+-CASE ExportImportDatabaseWithCSVOption
+-SKIP_WASM
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case2/demo-db2" (format="csv", header=true)
+---- error
+Binder exception: Export database only supports the parquet (icebug-disk CSR) format.
+
+-CASE ExportImportDatabaseWithPARQUET
+-SKIP_WASM
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case3/demo-db3" (format="parquet")
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case3/demo-db3"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case3/demo-db3"
+---- ok
+-STATEMENT MATCH (u:User)-[:Follows]->(f:User) RETURN u.name, f.name ORDER BY u.name, f.name
+---- 4
+Adam|Karissa
+Adam|Zhang
+Karissa|Zhang
+Zhang|Noura
+
+-CASE ExportImportDatabaseError
+-SKIP_WASM
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4" (format="npy")
+---- error
+Binder exception: Export database only supports the parquet (icebug-disk CSR) format.
+
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4" (format=false)
+---- error
+Binder exception: The type of format option must be a string.
+
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4" (format="PARQUET", header=true)
+---- error
+Binder exception: Export database does not support copy options with the parquet (icebug-disk CSR) format.
+
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4" (format="CSV", header=true)
+---- error
+Binder exception: Export database only supports the parquet (icebug-disk CSR) format.
+
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4"
+---- 1
+Exported database successfully.
+-REMOVE_FILE "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4/schema.cypher"
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4"
+---- error(regex)
+^Binder exception: File ${LBUG_EXPORT_DB_DIRECTORY}_case4/demo-db4[/\\]schema.cypher does not exist.$
+
+
+-CASE ExportImportDatabaseRelGroup
+-SKIP_WASM
+-STATEMENT CREATE NODE TABLE A(ID INT64, PRIMARY KEY(ID));
+---- ok
+-STATEMENT CREATE NODE TABLE B(ID INT64, PRIMARY KEY(ID));
+---- ok
+-STATEMENT CREATE NODE TABLE End2(ID INT64, PRIMARY KEY(ID));
+---- ok
+-STATEMENT CREATE REL TABLE REL2(FROM A TO B, FROM B TO End2, num INT64);
+---- ok
+-STATEMENT CREATE REL TABLE REL3(FROM A TO B, FROM B TO End2);
+---- ok
+-STATEMENT CREATE (a:A{ID:0})-[:REL2 {num: 1}]->(b:B{ID:1})-[:REL2 {num: 2}]->(e:End2{ID:2});
+---- ok
+-STATEMENT MATCH (a:A{ID:0}), (b:B{ID:1}) CREATE (a)-[:REL3]->(b);
+---- ok
+-STATEMENT MATCH (a)-[r:REL2]->(b:B)
+           RETURN a.ID;
+---- 1
+0
+-STATEMENT MATCH (a)-[r:REL3]->(b:B)
+           RETURN a.ID, b.ID;
+---- 1
+0|1
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case5/demo-db"
+---- error(regex)
+.*connects multiple node pairs.*
+
+-CASE ExportDatabaseWithSerialTable
+-SKIP_WASM
+-STATEMENT CREATE NODE TABLE oneserial(ID serial, PRIMARY KEY(ID));
+---- ok
+-STATEMENT CREATE (o:oneserial)
+---- ok
+-STATEMENT CREATE (o:oneserial)
+---- ok
+-STATEMENT CREATE NODE TABLE twoserial(ID serial, prop STRING, PRIMARY KEY(ID));
+---- ok
+-STATEMENT CREATE (o:twoserial {prop: "Alice"})
+---- ok
+-STATEMENT CREATE (o:twoserial {prop: "Bob"})
+---- ok
+-STATEMENT CREATE (o:twoserial {prop: "Carol"})
+---- ok
+-STATEMENT CREATE (o:twoserial {prop: "Dan"})
+---- ok
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case7/demo-db"
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case7/demo-db"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case7/demo-db"
+---- 1
+Imported database successfully.
+-STATEMENT MATCH (o:twoserial) RETURN o.*;
+---- 4
+0|Alice
+1|Bob
+2|Carol
+3|Dan
+-STATEMENT MATCH (o:oneserial) RETURN o.*;
+---- 2
+0
+1
+
+-CASE DocExportImportExampleCSV
+-SKIP_WASM
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case8/demo-db" (format="csv", header=true);
+---- error
+Binder exception: Export database only supports the parquet (icebug-disk CSR) format.
+
+
+-CASE DocExportImportExampleParquet
+-SKIP_WASM
+-STATEMENT Export Database "${LBUG_EXPORT_DB_DIRECTORY}_case9/demo-db" (format="parquet");
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case9/demo-db"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_case9/demo-db"
+---- ok
+-STATEMENT MATCH (u:User)-[:Follows]->(f:User) RETURN u.name, f.name;
+---- 4
+Adam|Karissa
+Adam|Zhang
+Karissa|Zhang
+Zhang|Noura
+
+-CASE ExplainExport
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT EXPLAIN EXPORT Database "${LBUG_EXPORT_DB_DIRECTORY}_case10/demo-db" (format="parquet");
+---- ok
+-STATEMENT EXPORT Database "${LBUG_EXPORT_DB_DIRECTORY}_case10/demo-db-data";
+---- ok
+-STATEMENT LOAD FROM "${LBUG_EXPORT_DB_DIRECTORY}_case10/demo-db-data/nodes_City.parquet" RETURN *
+---- 3
+Waterloo|150000
+Kitchener|200000
+Guelph|75000
+
+-CASE ExportDBWithSpecialTableName
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT CREATE NODE TABLE `0_idx_person` (ID SERIAL, PRIMARY KEY(ID))
+---- ok
+-STATEMENT CREATE NODE TABLE person (ID SERIAL, PRIMARY KEY(ID))
+---- ok
+-STATEMENT CREATE REL TABLE `0_idx_knows` (FROM `0_idx_person` TO  `0_idx_person`)
+---- ok
+-STATEMENT CREATE REL TABLE `0_idx_knows_group` (FROM person TO `0_idx_person`)
+---- ok
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_char";
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_char"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_char";
+---- ok
+
+-CASE ImportError
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT IMPORT Database "${LBUG_ROOT_DIRECTORY}/dataset/import_db_error"
+---- error
+Runtime exception: Import database failed: Binder exception: Table org does not exist.
+
+-CASE ExportDBWithSpecialPropertyName
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT CREATE NODE TABLE `N Table` (ID INT64 PRIMARY KEY, `PROP 1` STRING);
+---- ok
+-STATEMENT CREATE REL TABLE `R Table` (FROM `N Table` TO `N Table`, `PROP 1` STRING);
+---- ok
+-STATEMENT CREATE (a:`N Table` {id:0, `prop 1`: 'A'})-[:`R Table` {`prop 1`: 'Edge'}]->(b: `N Table` {id:1, `prop 1`: 'B'})
+---- ok
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name";
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name";
+---- ok
+-STATEMENT MATCH (a:`N Table`)-[e:`R Table`]->(b:`N Table`) RETURN a.*, e.*, b.*;
+---- 1
+0|A|Edge|1|B
+
+-CASE ExportDBSchemaOnly
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name" (SCHEMA_ONLY=true, header=true);
+---- error
+Binder exception: When 'SCHEMA_ONLY' option is set to true in export database, no other options are allowed.
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name" (SCHEMA_ONLY='abc');
+---- error
+Binder exception: The 'SCHEMA_ONLY' option must have a BOOL value.
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name" (SCHEMA_ONLY=false, format='csv');
+---- error
+Binder exception: Export database only supports the parquet (icebug-disk CSR) format.
+-STATEMENT CREATE NODE TABLE `N Table` (ID INT64 PRIMARY KEY, `PROP 1` STRING);
+---- ok
+-STATEMENT CREATE REL TABLE `R Table` (FROM `N Table` TO `N Table`, `PROP 1` STRING);
+---- ok
+-STATEMENT CREATE (a:`N Table` {id:0, `prop 1`: 'A'})-[:`R Table` {`prop 1`: 'Edge'}]->(b: `N Table` {id:1, `prop 1`: 'B'})
+---- ok
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name1" (SCHEMA_ONLY=true);
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name1"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/special_property_name1";
+---- ok
+
+-CASE ExportEmptyDBSchemaOnly
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT EXPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/empty-db-schema-only" (SCHEMA_ONLY=true);
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/empty-db-schema-only"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_special/empty-db-schema-only";
+---- ok
+
+-CASE ExportDBWithQuotedDelim
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT create node table Forum (id INT64, title STRING, creationDate INT64, PRIMARY KEY (id));
+---- ok
+-STATEMENT COPY Forum from "${LBUG_ROOT_DIRECTORY}/dataset/ldbc-sf01/Forum.csv";
+---- ok
+-STATEMENT EXPORT DATABASE '${LBUG_EXPORT_DB_DIRECTORY}_quoted_delim/delim-test';
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_quoted_delim/delim-test"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_quoted_delim/delim-test";
+---- ok
+
+-CASE ExportImportDBWithMultilineString
+-SKIP_WASM
+-SKIP_IN_MEM
+-STATEMENT CREATE NODE TABLE `mixed-newlines`(A STRING, B STRING, PRIMARY KEY(A));
+---- ok
+-STATEMENT COPY `mixed-newlines` FROM "${LBUG_ROOT_DIRECTORY}/dataset/csv-multiline-quote-tests/mixed-newlines.csv" (PARALLEL=FALSE);
+---- ok
+-STATEMENT EXPORT DATABASE '${LBUG_EXPORT_DB_DIRECTORY}_special/_multilinestring'
+---- ok
+-IMPORT_DATABASE '${LBUG_EXPORT_DB_DIRECTORY}_special/_multilinestring'
+-STATEMENT IMPORT DATABASE '${LBUG_EXPORT_DB_DIRECTORY}_special/_multilinestring';
+---- ok
+-STATEMENT MATCH (m:`mixed-newlines`) WHERE m.A CONTAINS 'abc' AND m.B CONTAINS 'ghi' RETURN count(*)
+---- 1
+1
+
+-CASE ExportDBWithOptions
+-STATEMENT CREATE NODE TABLE csvoptions(name STRING PRIMARY KEY, age UINT8);
+---- ok
+-STATEMENT CREATE (:csvoptions { name: 'First Last', age: 27 });
+---- ok
+-STATEMENT EXPORT DATABASE '${LBUG_EXPORT_DB_DIRECTORY}_options/with_options' (quote="'", delimiter=";", escape="\\");
+---- error
+Binder exception: Export database does not support copy options with the parquet (icebug-disk CSR) format.
+-STATEMENT EXPORT DATABASE '${LBUG_EXPORT_DB_DIRECTORY}_options/with_options';
+---- ok
+-IMPORT_DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_options/with_options"
+-STATEMENT IMPORT DATABASE "${LBUG_EXPORT_DB_DIRECTORY}_options/with_options";
+---- ok
+-STATEMENT MATCH (u:csvoptions) return u.*
+---- 1
+First Last|27

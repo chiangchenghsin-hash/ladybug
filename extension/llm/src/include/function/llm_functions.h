@@ -1,0 +1,21 @@
+#pragma once
+
+#include "function/function.h"
+
+namespace lbug {
+namespace llm_extension {
+
+struct CreateEmbedding {
+    static constexpr const char* name = "CREATE_EMBEDDING";
+
+    static function::function_set getFunctionSet();
+};
+
+struct AIExtract {
+    static constexpr const char* name = "AI_EXTRACT";
+
+    static function::function_set getFunctionSet();
+};
+
+} // namespace llm_extension
+} // namespace lbug

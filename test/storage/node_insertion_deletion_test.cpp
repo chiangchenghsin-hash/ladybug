@@ -1,0 +1,180 @@
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "common/constants.h"
+#include "common/system_config.h"
+#include "graph_test/private_graph_test.h"
+
+using namespace lbug::common;
+using namespace lbug::main;
+using namespace lbug::storage;
+using namespace lbug::testing;
+
+// Note: ID and nodeOffset in this test are equal for each node, so we use nodeID and nodeOffset
+// interchangeably.
+class NodeInsertionDeletionTests : public DBTest {
+
+public:
+    void SetUp() override {
+        DBTest::SetUp();
+        initDBAndConnection();
+    }
+
+    std::string getInputDir() override {
+        return TestHelper::appendLbugRootPath("dataset/node-insertion-deletion-tests/int64-pk/");
+    }
+
+    void initDBAndConnection() {
+        conn->query("CHECKPOINT");
+        readConn = std::make_unique<Connection>(database.get());
+        conn->query("BEGIN TRANSACTION");
+    }
+
+    void deleteNode(offset_t id) {
+        auto res = conn->query("MATCH (a:person) WHERE a.ID = " + std::to_string(id) + " DELETE a");
+        ASSERT_TRUE(res->isSuccess()) << res->toString();
+    }
+
+    void addNode(offset_t id) {
+        auto res = conn->query("CREATE (a:person {ID: " + std::to_string(id) + "})");
+        ASSERT_TRUE(res->isSuccess()) << res->toString();
+    }
+
+public:
+    std::unique_ptr<Connection> readConn;
+};
+
+TEST_F(NodeInsertionDeletionTests, DeleteAddMixedTest) {
+    for (offset_t nodeOffset = 10; nodeOffset < 90; ++nodeOffset) {
+        deleteNode(nodeOffset);
+    }
+    for (offset_t i = 10; i < 90; ++i) {
+        addNode(i);
+    }
+    // Add additional node offsets
+    for (int i = 0; i < 10; ++i) {
+        addNode(10000 + i);
+    }
+
+    std::string query = "MATCH (a:person) RETURN count(*)";
+    ASSERT_EQ(conn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10010);
+    ASSERT_EQ(readConn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10000);
+    conn->query("COMMIT");
+    conn->query("BEGIN TRANSACTION");
+    ASSERT_EQ(conn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10010);
+    ASSERT_EQ(readConn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10010);
+
+    for (offset_t nodeOffset = 0; nodeOffset < 10; ++nodeOffset) {
+        deleteNode(nodeOffset);
+    }
+
+    ASSERT_EQ(conn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10000);
+    ASSERT_EQ(readConn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10010);
+    conn->query("COMMIT");
+    conn->query("BEGIN TRANSACTION");
+    ASSERT_EQ(conn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10000);
+    ASSERT_EQ(readConn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10000);
+
+    for (int i = 0; i < 5; ++i) {
+        addNode(i);
+    }
+
+    ASSERT_EQ(conn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10005);
+    ASSERT_EQ(readConn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10000);
+    conn->query("COMMIT");
+    conn->query("BEGIN TRANSACTION");
+    ASSERT_EQ(conn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10005);
+    ASSERT_EQ(readConn->query(query)->getNext()->getValue(0)->getValue<int64_t>(), 10005);
+    conn->query("COMMIT");
+}
+
+TEST_F(NodeInsertionDeletionTests, InsertManyNodesTest) {
+    auto preparedStatement = conn->prepare("CREATE (:person {ID:$id});");
+    for (int64_t i = 0; i < (int64_t)LBUG_PAGE_SIZE; i++) {
+        auto result =
+            conn->execute(preparedStatement.get(), std::make_pair(std::string("id"), 10000 + i));
+        ASSERT_TRUE(result->isSuccess()) << result->toString();
+    }
+    auto result = conn->query("MATCH (a:person) WHERE a.ID >= 10000 RETURN COUNT(*);");
+    ASSERT_TRUE(result->hasNext());
+    auto tuple = result->getNext();
+    ASSERT_EQ(tuple->getValue(0)->getValue<int64_t>(), LBUG_PAGE_SIZE);
+    ASSERT_FALSE(result->hasNext());
+    result = conn->query("MATCH (a:person) WHERE a.ID=10000 RETURN a.ID;");
+    ASSERT_TRUE(result->hasNext());
+    tuple = result->getNext();
+    ASSERT_EQ(tuple->getValue(0)->getValue<int64_t>(), 10000);
+    result = conn->query("MATCH (a:person) WHERE a.ID>=10000 RETURN a.ID ORDER BY a.ID;");
+    int64_t i = 0;
+    while (result->hasNext()) {
+        tuple = result->getNext();
+        EXPECT_EQ(10000 + i++, tuple->getValue(0)->getValue<int64_t>());
+    }
+    ASSERT_EQ(i, LBUG_PAGE_SIZE);
+}
+
+#ifndef __SINGLE_THREADED__
+// A delete publishes a vector's deletion status before it allocates the per-row deletion
+// versions, and may create or grow the version info, so it must hold the chunked-groups lock that
+// scans hold. This test relies on a sanitizer or a crash to detect the race: the reader's count
+// cannot observe the torn state. Rolling back frees the deletion versions again, so every round
+// re-opens the first-deletion window.
+TEST_F(NodeInsertionDeletionTests, ScanConcurrentWithFirstDeletionInVector) {
+    ASSERT_TRUE(conn->query("COMMIT")->isSuccess());
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> scans{0};
+    std::atomic<bool> failed{false};
+    std::mutex failureMtx;
+    std::string failure;
+    auto fail = [&](std::string message) {
+        std::lock_guard<std::mutex> guard(failureMtx);
+        if (failure.empty()) {
+            failure = std::move(message);
+        }
+        failed = true;
+    };
+    std::thread reader([&] {
+        Connection scanConn(database.get());
+        while (!stop.load()) {
+            auto res = scanConn.query("MATCH (a:person) RETURN count(*)");
+            if (!res->isSuccess()) {
+                fail(res->getErrorMessage());
+                return;
+            }
+            auto count = res->getNext()->getValue(0)->getValue<int64_t>();
+            if (count != 10000) {
+                fail("reader saw count " + std::to_string(count));
+                return;
+            }
+            scans++;
+        }
+    });
+    for (auto round = 0; round < 200 && !failed.load(); round++) {
+        auto begin = conn->query("BEGIN TRANSACTION");
+        if (!begin->isSuccess()) {
+            fail(begin->getErrorMessage());
+            break;
+        }
+        for (offset_t id = 0; id < 10000; id += DEFAULT_VECTOR_CAPACITY) {
+            auto res =
+                conn->query("MATCH (a:person) WHERE a.ID = " + std::to_string(id) + " DELETE a");
+            if (!res->isSuccess()) {
+                fail(res->getErrorMessage());
+                break;
+            }
+        }
+        auto rollback = conn->query("ROLLBACK");
+        if (!rollback->isSuccess()) {
+            fail(rollback->getErrorMessage());
+            break;
+        }
+    }
+    stop = true;
+    reader.join();
+    EXPECT_GT(scans.load(), 0u);
+    std::lock_guard<std::mutex> guard(failureMtx);
+    EXPECT_TRUE(failure.empty()) << failure;
+}
+#endif

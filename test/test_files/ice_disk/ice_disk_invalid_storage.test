@@ -1,0 +1,36 @@
+-DATASET CSV empty
+--
+
+-CASE IceDiskNonExistentDirNodeFails
+
+-LOG IceDiskNonExistentDirMissingParquet
+-STATEMENT CREATE NODE TABLE t(id INT64 PRIMARY KEY) WITH (storage = '/nonexistent/dir/that/does/not/exist', format = 'icebug-disk')
+---- error(regex)
+.*[Nn]o such file.*|.*[Cc]annot open.*|.*nodes_t\.parquet.*
+
+-CASE IceDiskRemoteURINodeFails
+
+-LOG IceDiskRemoteURIMissingParquet
+-STATEMENT CREATE NODE TABLE t(id INT64 PRIMARY KEY) WITH (storage = 'https://example.com/path', format = 'icebug-disk')
+---- ok
+-STATEMENT MATCH (n:t) RETURN *
+---- error(regex)
+.*[Nn]o such file.*|.*[Cc]annot open.*|.*nodes_t\.parquet.*
+
+-CASE IceDiskS3URINodeFails
+
+-LOG IceDiskS3URIMissingParquet
+-STATEMENT CREATE NODE TABLE t(id INT64 PRIMARY KEY) WITH (storage = 's3://my-bucket/data', format = 'icebug-disk')
+---- ok
+-STATEMENT MATCH (n:t) RETURN *
+---- error(regex)
+.*[Nn]o such file.*|.*[Cc]annot open.*|.*nodes_t\.parquet.*
+
+-CASE IceDiskNoStorageRelFails
+
+-LOG IceDiskNoStorageRelMissingParquet
+-STATEMENT CREATE NODE TABLE upperversion(id INT64 PRIMARY KEY) WITH (storage = '${LBUG_ROOT_DIRECTORY}/dataset/ice-disk-test/', format = 'icebug-disk')
+---- ok
+-STATEMENT CREATE REL TABLE rel(FROM upperversion TO upperversion) WITH (format = 'icebug-disk')
+---- error(regex)
+.*[Nn]o such file.*|.*[Cc]annot open.*|.*indices_rel\.parquet.*

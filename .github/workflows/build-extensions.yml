@@ -1,0 +1,295 @@
+name: Build Extensions
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build-extensions:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            os_name: linux
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            os_name: linux
+            arch: aarch64
+          - os: macos-latest
+            os_name: osx
+            arch: arm64
+            cmake_osx_architectures: arm64
+          - os: macos-15-intel
+            os_name: osx
+            arch: x86_64
+            cmake_osx_architectures: x86_64
+          - os: windows-2022
+            os_name: win
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Mark workspace safe for git (Linux container)
+        if: runner.os == 'Linux'
+        run: git config --global --add safe.directory '*'
+
+      - name: Update submodules
+        run: git submodule update --init extension
+
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.68.1
+          cache: false
+          activate-environment: true
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled powertools
+          dnf install -y cmake ninja-build python3 python3-pip git wget unzip gcc-toolset-13 openssl3 openssl3-devel pkg-config libpq libpq-devel
+
+      - name: Install DuckDB (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ runner.arch }}" = "X64" ]; then
+            wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-amd64.zip
+            unzip libduckdb-linux-amd64.zip -d duckdb
+          else
+            wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-arm64.zip
+            unzip libduckdb-linux-arm64.zip -d duckdb
+          fi
+          cp duckdb/duckdb.h /usr/local/include/
+          cp duckdb/duckdb.hpp /usr/local/include/
+          cp duckdb/libduckdb.so /usr/local/lib/
+          ldconfig
+          # Create CMake config files
+          mkdir -p /usr/local/lib/cmake/DuckDB
+          tee /usr/local/lib/cmake/DuckDB/DuckDBConfig.cmake > /dev/null << 'EOF'
+          # DuckDB CMake configuration file
+
+          if(NOT TARGET DuckDB::duckdb)
+            add_library(DuckDB::duckdb SHARED IMPORTED)
+            set_target_properties(DuckDB::duckdb PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
+              IMPORTED_LOCATION "/usr/local/lib/libduckdb.so"
+            )
+          endif()
+
+          set(DuckDB_LIBRARIES DuckDB::duckdb)
+          set(DuckDB_INCLUDE_DIRS "/usr/local/include")
+          set(DuckDB_FOUND TRUE)
+          EOF
+
+      - name: Install DuckDB (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-osx-universal.zip
+          unzip libduckdb-osx-universal.zip -d duckdb
+          sudo mkdir -p /usr/local/include
+          sudo mkdir -p /usr/local/lib
+          sudo cp duckdb/duckdb.h /usr/local/include/
+          sudo cp duckdb/duckdb.hpp /usr/local/include/
+          sudo cp duckdb/libduckdb.dylib /usr/local/lib/
+          # Create CMake config files
+          sudo mkdir -p /usr/local/lib/cmake/DuckDB
+          sudo tee /usr/local/lib/cmake/DuckDB/DuckDBConfig.cmake > /dev/null << 'EOF'
+          # DuckDB CMake configuration file
+
+          if(NOT TARGET DuckDB::duckdb)
+            add_library(DuckDB::duckdb SHARED IMPORTED)
+            set_target_properties(DuckDB::duckdb PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
+              IMPORTED_LOCATION "/usr/local/lib/libduckdb.dylib"
+            )
+          endif()
+
+          set(DuckDB_LIBRARIES DuckDB::duckdb)
+          set(DuckDB_INCLUDE_DIRS "/usr/local/include")
+          set(DuckDB_FOUND TRUE)
+          EOF
+
+      - name: Install DuckDB (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          curl -L -o libduckdb-windows-amd64.zip https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-windows-amd64.zip
+          powershell -Command "Expand-Archive -Path libduckdb-windows-amd64.zip -DestinationPath duckdb"
+          if not exist "C:\local" mkdir "C:\local"
+          if not exist "C:\local\include" mkdir "C:\local\include"
+          if not exist "C:\local\lib" mkdir "C:\local\lib"
+          copy duckdb\duckdb.h C:\local\include\
+          copy duckdb\duckdb.hpp C:\local\include\
+          copy duckdb\duckdb.dll C:\local\lib\
+          copy duckdb\duckdb.lib C:\local\lib\
+          REM Create CMake config files
+          if not exist "C:\local\lib\cmake" mkdir "C:\local\lib\cmake"
+          if not exist "C:\local\lib\cmake\DuckDB" mkdir "C:\local\lib\cmake\DuckDB"
+          (
+          echo # DuckDB CMake configuration file
+          echo.
+          echo if^(NOT TARGET DuckDB::duckdb^)
+          echo   add_library^(DuckDB::duckdb SHARED IMPORTED^)
+          echo   set_target_properties^(DuckDB::duckdb PROPERTIES
+          echo     INTERFACE_INCLUDE_DIRECTORIES "C:/local/include"
+          echo     IMPORTED_LOCATION "C:/local/lib/duckdb.dll"
+          echo     IMPORTED_IMPLIB "C:/local/lib/duckdb.lib"
+          echo   ^)
+          echo endif^(^)
+          echo.
+          echo set^(DuckDB_LIBRARIES DuckDB::duckdb^)
+          echo set^(DuckDB_INCLUDE_DIRS "C:/local/include"^)
+          echo set^(DuckDB_FOUND TRUE^)
+          ) > C:\local\lib\cmake\DuckDB\DuckDBConfig.cmake
+
+      - name: Build precompiled extensions (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          source /opt/rh/gcc-toolset-13/enable
+          export CC=gcc
+          export CXX=g++
+          export EXTRA_CMAKE_FLAGS="-DOPENSSL_ROOT_DIR=/usr/lib64/openssl3 -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so"
+          make extension-release
+
+      - name: Install PostgreSQL client (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libpq
+          # libpq is keg-only — tell CMake where to find it via
+          # CMAKE_PREFIX_PATH and put pg_config on PATH as a fallback.
+          prefix="$(brew --prefix libpq)"
+          echo "CMAKE_PREFIX_PATH=${prefix}:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
+          echo "${prefix}/bin" >> "$GITHUB_PATH"
+
+      - name: Build precompiled extensions (macOS)
+        if: runner.os == 'macOS'
+        run: make extension-release
+        env:
+          MACOSX_DEPLOYMENT_TARGET: 13.3
+          CMAKE_OSX_ARCHITECTURES: ${{ matrix.cmake_osx_architectures }}
+
+      - name: Relocate libpq dependency for distribution (macOS)
+        if: runner.os == 'macOS'
+        # pg_client links against the keg-only standalone `libpq` Homebrew
+        # formula at /opt/homebrew/opt/libpq/lib/libpq.5.dylib, which is not
+        # present on machines that install libpq via `postgresql@18` instead.
+        # Relocate the dependency to @rpath with the common Homebrew locations
+        # as fallbacks so the released binary loads in either layout, and
+        # verify the result. See LadybugDB/extensions#48.
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' ext; do
+            extension/scripts/relocate-macos-libpq.sh "$ext"
+            extension/scripts/verify-macos-libpq-rpaths.sh "$ext"
+          done < <(find extension/pg_client/build -maxdepth 1 -name '*.lbug_extension' -print0)
+
+      - name: Relocate OpenSSL dependency for distribution (macOS)
+        if: runner.os == 'macOS'
+        # httpfs (and llm via httpfs crypto) link OpenSSL from the CI pixi
+        # environment, baking the runner's absolute path into LC_RPATH
+        # (e.g. /Users/runner/work/ladybug/ladybug/.pixi/envs/default/lib).
+        # The released binary then fails to `LOAD` on user machines without
+        # that env. Relocate the dependency to @rpath with the common
+        # Homebrew/MacPorts locations as fallbacks, drop the
+        # build-environment rpaths, and verify the result.
+        # See https://github.com/LadybugDB/ladybug/issues/1069.
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' ext; do
+            scripts/relocate-macos-openssl.sh "$ext"
+            scripts/verify-macos-openssl-rpaths.sh "$ext"
+          done < <(find extension/httpfs/build -maxdepth 1 -name '*.lbug_extension' -print0)
+          # llm links OpenSSL too when built; relocate when present.
+          for dir in extension/llm/build; do
+            [ -d "$dir" ] || continue
+            while IFS= read -r -d '' ext; do
+              scripts/relocate-macos-openssl.sh "$ext"
+              scripts/verify-macos-openssl-rpaths.sh "$ext"
+            done < <(find "$dir" -maxdepth 1 -name '*.lbug_extension' -print0)
+          done
+
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+        shell: pwsh
+
+      - name: Install ccache (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ccache -y
+        shell: cmd
+
+      - name: Setup ccache (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          echo "CCACHE_DIR=D:\c" >> $GITHUB_ENV
+          echo "CCACHE_TEMPDIR=D:\t" >> $GITHUB_ENV
+          mkdir -p /d/c /d/t
+          ccache --set-config=max_size=2G
+          ccache --set-config=compression=true
+          ccache --set-config=cache_dir=D:\c
+          ccache --set-config=temporary_dir=D:\t
+        shell: bash
+
+      - name: Restore ccache directory (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: D:\c
+          key: ${{ runner.os }}-ccache-${{ hashFiles('**/CMakeLists.txt', '**/*.cpp', '**/*.h') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Show ccache stats (before) (Windows)
+        if: runner.os == 'Windows'
+        run: ccache -s
+        shell: bash
+
+      - name: Install PostgreSQL client (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install postgresql --version=16 --params='/NoServer /NoTools' -y
+          echo "CMAKE_PREFIX_PATH=C:\Program Files\PostgreSQL\16;C:\local" >> $env:GITHUB_ENV
+
+      - name: Build precompiled extensions (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          powershell.exe -Command "Add-MpPreference -ExclusionPath '${{ github.workspace }}'"
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set "EXTRA_CMAKE_FLAGS=-DADBC_INCLUDE_DIR=%CONDA_PREFIX%\Library\include -DADBC_DRIVER_MANAGER_LIBRARY=%CONDA_PREFIX%\Library\lib\adbc_driver_manager.lib"
+          make extension-release
+        env:
+          CMAKE_PREFIX_PATH: C:\local
+
+      - name: Save ccache directory (Windows)
+        # Always save the ccache, even if the build failed, so the cache is
+        # preserved between runs.
+        if: ${{ always() && runner.os == 'Windows' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: D:\c
+          key: ${{ runner.os }}-ccache-${{ hashFiles('**/CMakeLists.txt', '**/*.cpp', '**/*.h') }}
+
+      - name: Show ccache stats (after) (Windows)
+        if: runner.os == 'Windows'
+        run: ccache -s
+        shell: bash
+
+      - name: Collect built artifacts
+        run: python3 scripts/collect-extensions.py
+
+      - name: Upload built artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lbug-extensions-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: extension-artifacts

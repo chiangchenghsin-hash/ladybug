@@ -1,0 +1,1107 @@
+#include <algorithm>
+#include <memory>
+#include <vector>
+
+#include "api_test/api_test.h"
+
+using namespace lbug::common;
+using namespace lbug::main;
+using namespace lbug::testing;
+
+static void checkTuple(lbug::processor::FlatTuple* tuple, const std::string& groundTruth) {
+    ASSERT_STREQ(tuple->toString().c_str(), groundTruth.c_str());
+}
+
+TEST_F(ApiTest, issueTest1) {
+    conn->query("CREATE NODE TABLE T(id SERIAL, name STRING, PRIMARY KEY(id));");
+    conn->query("CREATE (t:T {name: \"foo\"});");
+    auto preparedStatement = conn->prepare("MATCH (t:T {id: $p}) return t.name;");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("p"), 0));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "foo\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, issueTest2) {
+    conn->query("CREATE NODE TABLE NodeOne(id INT64, name STRING, PRIMARY KEY(id));");
+    conn->query("CREATE NODE TABLE NodeTwo(id INT64, name STRING, PRIMARY KEY(id));");
+    conn->query("CREATE Rel TABLE RelA(from NodeOne to NodeOne);");
+    conn->query("CREATE Rel TABLE RelB(from NodeTwo to NodeOne, name String);");
+    conn->query("CREATE (t: NodeOne {id:1, name: \"Alice\"});");
+    conn->query("CREATE (t: NodeOne {id:2, name: \"Jack\"});");
+    conn->query("CREATE (t: NodeTwo {id:3, name: \"Bob\"});");
+    auto preparedStatement = conn->prepare("MATCH (a:NodeOne { id: $a_id }),"
+                                           "(b:NodeTwo { id: $b_id }),"
+                                           "(c: NodeOne{ id: $c_id } )"
+                                           " MERGE"
+                                           " (a)-[:RelA]->(c),"
+                                           " (b)-[r:RelB { name: $my_param }]->(c)"
+                                           " return r.name;");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("a_id"), 1),
+        std::make_pair(std::string("b_id"), 3), std::make_pair(std::string("c_id"), 2),
+        std::make_pair(std::string("my_param"), "friend"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "friend\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, issueTest) {
+    auto preparedStatement = conn->prepare("RETURN $1 + 1;");
+    auto result =
+        conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), (int8_t)1));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "2\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, MultiParamsPrepare) {
+    auto preparedStatement = conn->prepare(
+        "MATCH (a:person) WHERE a.fName STARTS WITH $n OR a.fName CONTAINS $xx RETURN COUNT(*)");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("n"), "A"),
+        std::make_pair(std::string("xx"), "ooq"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "2\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareBool) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.isStudent = $1 RETURN COUNT(*)");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), true));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "3\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareInt) {
+    auto preparedStatement = conn->prepare("MATCH (a:person) WHERE a.age = 35 RETURN a.age + $1");
+    auto result =
+        conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), (int64_t)10));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "45\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareDouble) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.age = 35 RETURN a.eyeSight + $1");
+    auto result =
+        conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), (double)10.5));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "15.500000\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareString) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.fName STARTS WITH $n RETURN COUNT(*)");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("n"), "A"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "1\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareDate) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.birthdate = $n RETURN COUNT(*)");
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("n"), Date::fromDate(1900, 1, 1)));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "2\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareTimestamp) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.registerTime = $n RETURN COUNT(*)");
+    auto date = Date::fromDate(2011, 8, 20);
+    auto time = Time::fromTime(11, 25, 30);
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("n"), Timestamp::fromDateTime(date, time)));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "1\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareInterval) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.lastJobDuration = $n RETURN COUNT(*)");
+    std::string intervalStr = "3 years 2 days 13 hours 2 minutes";
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("n"),
+            Interval::fromCString(intervalStr.c_str(), intervalStr.length())));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "2\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareDefaultParam) {
+    auto preparedStatement = conn->prepare("RETURN to_int8($1)");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "1"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "1\n");
+    ASSERT_FALSE(result->hasNext());
+    preparedStatement = conn->prepare("RETURN size($1)");
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), 1));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "1\n");
+}
+
+TEST_F(ApiTest, PrepareDefaultListParam) {
+    auto preparedStatement = conn->prepare("RETURN [1, $1]");
+    auto result =
+        conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), (int64_t)1));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "[1,1]\n");
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "as"));
+    ASSERT_FALSE(result->isSuccess());
+    ASSERT_STREQ(result->getErrorMessage().c_str(),
+        "Binder exception: Expression $1 has data type STRING but expected INT64. Implicit cast is "
+        "not supported.");
+    preparedStatement = conn->prepare("RETURN [$1]");
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "as"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "[as]\n");
+    preparedStatement = conn->prepare("RETURN [to_int32($1)]");
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "10"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "[10]\n");
+}
+
+TEST_F(ApiTest, PrepareDefaultStructParam) {
+    auto preparedStatement = conn->prepare("RETURN {a:$1}");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "10"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "{a: 10}\n");
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), 1));
+    ASSERT_TRUE(result->isSuccess());
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "{a: 1}\n");
+}
+
+TEST_F(ApiTest, PrepareDefaultMapParam) {
+    auto preparedStatement = conn->prepare("RETURN map([$1], [$2])");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "10"),
+        std::make_pair(std::string("2"), "abc"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "{10=abc}\n");
+}
+
+TEST_F(ApiTest, PrepareDefaultUnionParam) {
+    auto preparedStatement = conn->prepare("RETURN union_value(a := $1)");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("1"), "10"));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "10\n");
+}
+
+TEST_F(ApiTest, PrepareLargeJoin) {
+    auto preparedStatement = conn->prepare(
+        " MATCH "
+        "(:person)-[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person)-"
+        "[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person)-[:knows]->"
+        "(:person)-[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person)-"
+        "[:knows]->(:person)-[:knows]->(:person)-[:knows]->(:person) RETURN COUNT(*)");
+    ASSERT_TRUE(preparedStatement->isSuccess());
+}
+
+TEST_F(ApiTest, ParamNotExist) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.fName STARTS WITH $n RETURN COUNT(*)");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("a"), "A"));
+    ASSERT_FALSE(result->isSuccess());
+    ASSERT_STREQ("Parameter n not found.", result->getErrorMessage().c_str());
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("a"), "A"),
+        std::make_pair(std::string("n"), "A"));
+    ASSERT_TRUE(result->isSuccess());
+    ASSERT_STREQ("1\n", result->getNext()->toString().c_str());
+}
+
+TEST_F(ApiTest, ParamTypeError) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.fName STARTS WITH $n RETURN COUNT(*)");
+    auto result =
+        conn->execute(preparedStatement.get(), std::make_pair(std::string("n"), (int64_t)36));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "0\n");
+}
+
+TEST_F(ApiTest, MultipleExecutionOfPreparedStatement) {
+    auto preparedStatement =
+        conn->prepare("MATCH (a:person) WHERE a.fName STARTS WITH $n RETURN a.ID, a.fName");
+    auto result = conn->execute(preparedStatement.get(), std::make_pair(std::string("n"), "A"));
+    auto groundTruth = std::vector<std::string>{"0|Alice"};
+    ASSERT_EQ(groundTruth, TestHelper::convertResultToString(*result));
+    result = conn->execute(preparedStatement.get(), std::make_pair(std::string("n"), "B"));
+    groundTruth = std::vector<std::string>{"2|Bob"};
+    ASSERT_EQ(groundTruth, TestHelper::convertResultToString(*result));
+}
+
+TEST_F(ApiTest, issueTest4) {
+    auto preparedStatement = conn->prepare("RETURN CAST($1, 'STRING')");
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("1"), int128_t((int32_t)-123456789)));
+    ASSERT_TRUE(result->hasNext());
+    checkTuple(result->getNext().get(), "-123456789\n");
+    ASSERT_FALSE(result->hasNext());
+}
+
+TEST_F(ApiTest, PrepareExport) {
+    if (databasePath == "" || databasePath == ":memory:") {
+        return;
+    }
+    auto newDBPath = TestHelper::getTempDir("export_db") + "/newdb";
+    auto preparedStatement = conn->prepare("EXPORT DATABASE '" + newDBPath + '\'');
+    auto result = conn->execute(preparedStatement.get());
+    ASSERT_TRUE(result->isSuccess());
+}
+
+TEST_F(ApiTest, ParameterWith) {
+    auto preparedStatement = conn->prepare("WITH $1 AS x RETURN x");
+    ASSERT_TRUE(preparedStatement->isSuccess());
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("1"), std::string("abc")));
+    auto groupTruth = std::vector<std::string>{"abc"};
+    ASSERT_EQ(groupTruth, TestHelper::convertResultToString(*result));
+}
+
+// Regression tests for re-executing prepared statements whose physical plan is cached.
+// The cached-plan fast path used to consume per-execution shared state on the first run,
+// so the second and later executions returned empty results for primary-key/index scans
+// and stale/truncated results once aggregates were involved.
+static void createItemTableWithArtIndex(lbug::main::Connection* conn) {
+    ASSERT_TRUE(conn->query("CALL enable_default_hash_index=false")->isSuccess());
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE Item(id INT64, name STRING, price DOUBLE, PRIMARY KEY(id))")
+            ->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE ART INDEX item_id_idx FOR (a:Item) ON (a.id)")->isSuccess());
+}
+
+TEST_F(ApiTest, RepeatedExecutePreparedStatementPrimaryKeyScan) {
+    createItemTableWithArtIndex(conn.get());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 50000, name: 'x'})")->isSuccess());
+
+    auto preparedStatement = conn->prepare("MATCH (i:Item) WHERE i.id = 50000 RETURN i.name");
+    ASSERT_TRUE(preparedStatement->isSuccess());
+    auto groundTruth = std::vector<std::string>{"x"};
+    for (auto run = 0u; run < 5; run++) {
+        auto result = conn->execute(preparedStatement.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(groundTruth,
+            TestHelper::convertResultToString(*result, true /* checkOutputOrder */))
+            << "run " << run;
+    }
+}
+
+TEST_F(ApiTest, RepeatedExecutePreparedStatementPrimaryKeyScanWithParams) {
+    createItemTableWithArtIndex(conn.get());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 50000, name: 'x'})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 1, name: 'y'})")->isSuccess());
+
+    auto preparedStatement = conn->prepare("MATCH (i:Item) WHERE i.id = $id RETURN i.name");
+    ASSERT_TRUE(preparedStatement->isSuccess());
+    struct ParamCase {
+        int64_t id;
+        std::vector<std::string> groundTruth;
+    };
+    const std::vector<ParamCase> cases = {{50000, {"x"}}, {1, {"y"}}, {50000, {"x"}},
+        // A key that is not in the index must return an empty result, also on repeats.
+        {9999, {}}};
+    for (auto run = 0u; run < cases.size(); run++) {
+        const auto& paramCase = cases[run];
+        auto result =
+            conn->execute(preparedStatement.get(), std::make_pair(std::string("id"), paramCase.id));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(paramCase.groundTruth, TestHelper::convertResultToString(*result))
+            << "run " << run;
+    }
+}
+
+TEST_F(ApiTest, RepeatedExecutePreparedStatementAggregateOverIndexScan) {
+    createItemTableWithArtIndex(conn.get());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 1, name: 'a', price: 1.0})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 2, name: 'b', price: 2.0})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 3, name: 'c', price: 3.0})")->isSuccess());
+
+    auto countPS = conn->prepare("MATCH (i:Item) WHERE i.id >= 1 AND i.id <= 3 RETURN COUNT(*)");
+    ASSERT_TRUE(countPS->isSuccess());
+    auto rangePS = conn->prepare("MATCH (i:Item) WHERE i.id >= 2 AND i.id <= 1000 RETURN i.id");
+    ASSERT_TRUE(rangePS->isSuccess());
+    auto countGroundTruth = std::vector<std::string>{"3"};
+    auto rangeGroundTruth = std::vector<std::string>{"2", "3"};
+    for (auto run = 0u; run < 5; run++) {
+        auto result = conn->execute(countPS.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(countGroundTruth, TestHelper::convertResultToString(*result)) << "run " << run;
+
+        result = conn->execute(rangePS.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(rangeGroundTruth,
+            TestHelper::convertResultToString(*result, true /* checkOutputOrder */))
+            << "run " << run;
+    }
+}
+
+TEST_F(ApiTest, RepeatedExecutePreparedStatementGroupByDistinctOrderBy) {
+    createItemTableWithArtIndex(conn.get());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 1, name: 'a', price: 1.0})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 2, name: 'b', price: 2.0})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 3, name: 'a', price: 3.0})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 4, name: 'b', price: 4.0})")->isSuccess());
+
+    auto groupByPS = conn->prepare("MATCH (i:Item) RETURN i.name, COUNT(*) AS c ORDER BY i.name");
+    ASSERT_TRUE(groupByPS->isSuccess());
+    auto distinctPS = conn->prepare("MATCH (i:Item) RETURN DISTINCT i.name ORDER BY i.name");
+    ASSERT_TRUE(distinctPS->isSuccess());
+    auto orderByLimitPS = conn->prepare("MATCH (i:Item) RETURN i.id ORDER BY i.id DESC LIMIT 3");
+    ASSERT_TRUE(orderByLimitPS->isSuccess());
+
+    auto groupByGroundTruth = std::vector<std::string>{"a|2", "b|2"};
+    auto distinctGroundTruth = std::vector<std::string>{"a", "b"};
+    auto orderByLimitGroundTruth = std::vector<std::string>{"4", "3", "2"};
+    // Interleave different prepared statements to exercise descriptor reuse across plans.
+    for (auto run = 0u; run < 5; run++) {
+        auto result = conn->execute(groupByPS.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(groupByGroundTruth,
+            TestHelper::convertResultToString(*result, true /* checkOutputOrder */))
+            << "run " << run;
+
+        result = conn->execute(distinctPS.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(distinctGroundTruth,
+            TestHelper::convertResultToString(*result, true /* checkOutputOrder */))
+            << "run " << run;
+
+        result = conn->execute(orderByLimitPS.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(orderByLimitGroundTruth,
+            TestHelper::convertResultToString(*result, true /* checkOutputOrder */))
+            << "run " << run;
+    }
+}
+
+// Regression test for https://github.com/LadybugDB/ladybug/issues/849: closing/destroying a
+// prepared statement must release its entry in CachedPreparedStatementManager (parsed
+// statement, logical plan and cached physical plan). Before the fix every successful
+// prepare() permanently registered the entry and memory grew with every prepare() call.
+TEST_F(ApiTest, PreparedStatementCloseUnregistersCachedPlan) {
+    auto& manager = conn->getClientContext()->getCachedPreparedStatementManager();
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE T849 (id INT64 PRIMARY KEY, name STRING)")->isSuccess());
+
+    constexpr auto numCycles = 100;
+    std::vector<std::string> names;
+    names.reserve(numCycles);
+    for (auto i = 0u; i < numCycles; i++) {
+        auto preparedStatement = conn->prepare("MATCH (t:T849) WHERE t.id = $id RETURN t.name");
+        ASSERT_TRUE(preparedStatement->isSuccess());
+        const auto name = preparedStatement->getName();
+        // The statement is registered while it is alive.
+        ASSERT_TRUE(manager.containsStatement(name)) << "cycle " << i;
+        auto result =
+            conn->execute(preparedStatement.get(), std::make_pair(std::string("id"), (int64_t)i));
+        ASSERT_TRUE(result->isSuccess()) << "cycle " << i;
+        names.push_back(name);
+        // Destroying the statement must unregister (free) its cached plan ...
+        preparedStatement.reset();
+        ASSERT_FALSE(manager.containsStatement(name)) << "cycle " << i;
+    }
+    // ... and none of the entries from earlier cycles may have accumulated.
+    for (auto& name : names) {
+        ASSERT_FALSE(manager.containsStatement(name));
+    }
+
+    // Statements that are prepared but never executed must be released as well.
+    auto preparedStatement = conn->prepare("RETURN $1 + 1");
+    ASSERT_TRUE(preparedStatement->isSuccess());
+    const auto name = preparedStatement->getName();
+    ASSERT_TRUE(manager.containsStatement(name));
+    preparedStatement.reset();
+    ASSERT_FALSE(manager.containsStatement(name));
+}
+
+TEST_F(ApiTest, FailedPrepareIsReleasedOnDestroy) {
+    auto& manager = conn->getClientContext()->getCachedPreparedStatementManager();
+
+    // Binder errors: the (mostly empty) cached statement is still registered, so destroying
+    // the failed statement must unregister it.
+    auto preparedStatement = conn->prepare("MATCH (n:NoSuchTable849) RETURN n");
+    ASSERT_FALSE(preparedStatement->isSuccess());
+    ASSERT_FALSE(preparedStatement->getName().empty());
+    const auto name = preparedStatement->getName();
+    preparedStatement.reset();
+    ASSERT_FALSE(manager.containsStatement(name));
+
+    // Parse errors return an unregistered error statement (empty name); destroying it must
+    // not touch the manager at all.
+    auto parseErrorStatement = conn->prepare("THIS IS NOT CYPHER");
+    ASSERT_FALSE(parseErrorStatement->isSuccess());
+    ASSERT_TRUE(parseErrorStatement->getName().empty());
+    parseErrorStatement.reset();
+}
+
+// Exercise the thread-local ResultSet reuse path with variable-length data: with the cached
+// plan (and cached ResultSet) reused across executions, string overflow buffers and null
+// masks from a prior execution must not leak into later ones.
+TEST_F(ApiTest, RepeatedExecutePreparedStatementVariableLengthResults) {
+    createItemTableWithArtIndex(conn.get());
+    // The long names force the use of out-of-line string overflow buffers.
+    const std::string longNameA(120, 'a');
+    const std::string longNameB(90, 'b');
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 1, name: 'short', price: 1.0})")->isSuccess());
+    ASSERT_TRUE(
+        conn->query("CREATE (:Item {id: 2, name: '" + longNameA + "', price: 2.5})")->isSuccess());
+    // No price: exercises null-mask reset across executions.
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 3, name: 'with_null_price'})")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 4, name: '" + longNameB + "'})")->isSuccess());
+
+    auto preparedStatement =
+        conn->prepare("MATCH (i:Item) WHERE i.id = $id RETURN i.name, i.price");
+    ASSERT_TRUE(preparedStatement->isSuccess());
+
+    struct ParamCase {
+        int64_t id;
+        std::vector<std::string> groundTruth;
+    };
+    const std::vector<ParamCase> cases = {{2, {longNameA + "|2.500000"}}, {1, {"short|1.000000"}},
+        {3, {"with_null_price|"}}, {4, {longNameB + "|"}}, {2, {longNameA + "|2.500000"}},
+        {1, {"short|1.000000"}}};
+    for (auto run = 0u; run < cases.size(); run++) {
+        const auto& paramCase = cases[run];
+        auto result =
+            conn->execute(preparedStatement.get(), std::make_pair(std::string("id"), paramCase.id));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(paramCase.groundTruth, TestHelper::convertResultToString(*result))
+            << "run " << run;
+    }
+}
+
+// Regression test for https://github.com/LadybugDB/ladybug/issues/862: re-executing the
+// prepared statement of the same parameterized write query string (which takes the cached
+// physical-plan fast path once the statement was prepared WITH its parameters) crashed with
+// SIGSEGV. The root ResultCollector of a write statement has an empty result schema, so its
+// FactorizedTable never allocates block collections or an overflow buffer; clear() in
+// prepareForReuse() dereferenced the null collection.
+static std::unordered_map<std::string, std::unique_ptr<Value>> makeIdValueParams(int64_t id,
+    std::string val) {
+    std::unordered_map<std::string, std::unique_ptr<Value>> params;
+    params["id"] = std::make_unique<Value>(id);
+    params["val"] = std::make_unique<Value>(std::move(val));
+    return params;
+}
+
+TEST_F(ApiTest, RepeatedExecuteCachedPlanParameterizedWrite) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE Log(id INT64, value STRING, PRIMARY KEY(id))")->isSuccess());
+
+    // Parameterized CREATE, same statement executed repeatedly (fast path on every run but
+    // the first).
+    const std::string createQuery = "CREATE (:Log {id: $id, value: $val})";
+    auto createStmt = conn->prepareWithParams(createQuery, makeIdValueParams(1, "a"));
+    ASSERT_TRUE(createStmt->isSuccess());
+    for (auto run = 0u; run < 3; run++) {
+        auto result = conn->executeWithParams(createStmt.get(),
+            makeIdValueParams(run + 1, "v" + std::to_string(run)));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+    }
+
+    // Parameterized MATCH ... SET, same statement executed repeatedly.
+    const std::string setQuery = "MATCH (l:Log) WHERE l.id = $id SET l.value = $val";
+    auto setStmt = conn->prepareWithParams(setQuery, makeIdValueParams(1, "x"));
+    ASSERT_TRUE(setStmt->isSuccess());
+    for (auto run = 0u; run < 2; run++) {
+        auto result = conn->executeWithParams(setStmt.get(),
+            makeIdValueParams(run + 1, "x" + std::to_string(run)));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+    }
+
+    // Same string writes inside an explicit transaction.
+    ASSERT_TRUE(conn->query("BEGIN TRANSACTION")->isSuccess());
+    auto txStmt = conn->prepareWithParams(createQuery, makeIdValueParams(10, "t1"));
+    ASSERT_TRUE(txStmt->isSuccess());
+    for (auto run = 0u; run < 2; run++) {
+        auto result = conn->executeWithParams(txStmt.get(),
+            makeIdValueParams(10 + run, "t" + std::to_string(run)));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+    }
+    ASSERT_TRUE(conn->query("COMMIT")->isSuccess());
+
+    ASSERT_EQ(std::vector<std::string>{"5"},
+        TestHelper::convertResultToString(*conn->query("MATCH (l:Log) RETURN COUNT(l)")));
+}
+
+TEST_F(ApiTest, RepeatedExecuteCachedPlanParameterizedRead) {
+    createItemTableWithArtIndex(conn.get());
+    ASSERT_TRUE(conn->query("CREATE (:Item {id: 1, name: 'a', price: 1.0})")->isSuccess());
+
+    // Reads through the fast path must keep working too (they were unaffected by #862, but
+    // guard the empty-schema fix against regressing the non-empty-schema case).
+    auto readStmt = conn->prepareWithParams("MATCH (i:Item) WHERE i.id = $id RETURN i.name",
+        makeIdValueParams(1, "a"));
+    ASSERT_TRUE(readStmt->isSuccess());
+    for (auto run = 0u; run < 3; run++) {
+        auto result = conn->executeWithParams(readStmt.get(), makeIdValueParams(1, "a"));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(std::vector<std::string>{"a"}, TestHelper::convertResultToString(*result))
+            << "run " << run;
+    }
+}
+
+// Regression test for issue #877: re-executing the same parameterized query string (the
+// recommended form, which reuses the cached physical plan) returned the first execution's
+// rows whenever the plan contained a sort, top-k, join, OPTIONAL MATCH, UNION, subquery or
+// a LIMIT/SKIP counter. Root causes: operator copy() dropped sub-pipelines from the cached
+// plan tree, and shared states kept per-execution state across executions.
+TEST_F(ApiTest, RepeatedParameterizedCachedPlanExecution877) {
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE N(id INT64, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE M(id INT64, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE REL TABLE E(FROM N TO M);")->isSuccess());
+    for (auto i = 1; i <= 3; ++i) {
+        auto id = std::to_string(i);
+        ASSERT_TRUE(conn->query("CREATE (:N {id: " + id + "});")->isSuccess());
+        ASSERT_TRUE(conn->query("CREATE (:M {id: " + id + "});")->isSuccess());
+        ASSERT_TRUE(conn->query("MATCH (a:N {id: " + id + "}), (b:M {id: " + id +
+                                "}) CREATE (a)-[:E]->(b);")
+                        ->isSuccess());
+    }
+
+    // Mirrors the recommended Python usage: execute(query, params) prepares the query string
+    // and executes it with parameters each time, taking the cached-physical-plan fast path
+    // from the second execution on.
+    // Mirrors the recommended Python usage: execute(query, params) implicitly prepares the
+    // query WITH typed parameters once, then re-executes the same prepared statement with
+    // different parameter values, taking the cached-physical-plan fast path from the second
+    // execution on.
+    auto prepareAndExecute = [&](const std::string& query, int64_t v) {
+        static std::unordered_map<std::string, std::unique_ptr<PreparedStatement>> cache;
+        auto it = cache.find(query);
+        if (it == cache.end()) {
+            std::unordered_map<std::string, std::unique_ptr<Value>> prepareParams;
+            prepareParams["v"] = std::make_unique<Value>(v);
+            auto prepared = conn->prepareWithParams(query, std::move(prepareParams));
+            EXPECT_TRUE(prepared->isSuccess()) << query;
+            it = cache.emplace(query, std::move(prepared)).first;
+        }
+        std::unordered_map<std::string, std::unique_ptr<Value>> params;
+        params["v"] = std::make_unique<Value>(v);
+        return conn->executeWithParams(it->second.get(), std::move(params));
+    };
+
+    // {query, expected result rows for v = 1, 2, 3}
+    const std::vector<std::tuple<std::string, std::vector<std::vector<std::string>>>> cases = {
+        {"MATCH (n:N) WHERE n.id = $v RETURN count(n)", {{"1"}, {"1"}, {"1"}}},
+        {"MATCH (n:N) WHERE n.id = $v RETURN n.id ORDER BY n.id", {{"1"}, {"2"}, {"3"}}},
+        {"MATCH (n:N) WHERE n.id <= $v RETURN n.id ORDER BY n.id LIMIT 2",
+            {{"1"}, {"1", "2"}, {"1", "2"}}},
+        {"MATCH (n:N) WHERE n.id = $v RETURN n.id ORDER BY n.id LIMIT 1", {{"1"}, {"2"}, {"3"}}},
+        {"MATCH (a:N)-[:E]->(b:M) WHERE a.id = $v RETURN b.id", {{"1"}, {"2"}, {"3"}}},
+        {"MATCH (a:N), (b:M) WHERE a.id = $v AND b.id = $v RETURN b.id", {{"1"}, {"2"}, {"3"}}},
+        {"MATCH (n:N) WHERE n.id = $v OPTIONAL MATCH (n)-[:E]->(m) RETURN n.id",
+            {{"1"}, {"2"}, {"3"}}},
+        {"MATCH (n:N) WHERE n.id = $v RETURN n.id UNION ALL MATCH (m:M) WHERE m.id = $v "
+         "RETURN m.id",
+            {{"1", "1"}, {"2", "2"}, {"3", "3"}}},
+        {"MATCH (n:N) WHERE n.id = $v AND EXISTS { MATCH (n)-[:E]->(m) } RETURN n.id",
+            {{"1"}, {"2"}, {"3"}}},
+        {"MATCH (a:N)-[:E*1..2]->(b:M) WHERE a.id = $v RETURN b.id", {{"1"}, {"2"}, {"3"}}},
+    };
+    for (auto& [query, expectedPerV] : cases) {
+        for (auto v = 1; v <= 3; ++v) {
+            // First execution populates the plan cache; the rest exercise the fast path.
+            prepareAndExecute(query, v);
+            auto result = prepareAndExecute(query, v);
+            ASSERT_TRUE(result->isSuccess()) << query;
+            ASSERT_EQ(expectedPerV[v - 1], TestHelper::convertResultToString(*result))
+                << query << " with v=" << v;
+        }
+    }
+}
+
+// Returns true iff the cached physical plan of the prepared statement named `ps.getName()`
+// has been populated (i.e. the statement is allowed to take the cached-plan fast path).
+static bool cachedPlanExists(Connection* conn, const PreparedStatement& ps);
+
+// Regression test for issue #906 (LDBC query 11 shape): re-executing a DISTINCT aggregate
+// through the cached-physical-plan fast path segfaulted in FactorizedTableSchema::copy.
+// Root cause: HashTableQueue::mergeInto() consumes a queue (nulling its headBlock), and
+// HashAggregateSharedState::resetForReuse() rebuilt the per-function distinct queues via
+// distinctQueue->copy(), dereferencing the nulled headBlock. The queues are now rebuilt
+// from schemas saved at construction time.
+TEST_F(ApiTest, RepeatedDistinctAggregateCachedPlanExecution906) {
+    // LDBC query 11 shape against the tinysnb graph loaded by the fixture: traversal join,
+    // DISTINCT hash aggregate grouped by key, ORDER BY plus LIMIT.
+    const std::string query = "MATCH (p:person)-[:workAt]->(o:organisation) WHERE o.ID > 0 "
+                              "RETURN COUNT(DISTINCT p.ID) AS num_e, o.name "
+                              "ORDER BY num_e DESC LIMIT 1;";
+    std::unordered_map<std::string, std::unique_ptr<Value>> noParams;
+    auto prepared = conn->prepareWithParams(query, std::move(noParams));
+    ASSERT_TRUE(prepared->isSuccess()) << prepared->getErrorMessage();
+    // First execution populates the plan cache; the second takes the fast path that crashed.
+    std::vector<std::string> first;
+    for (auto run = 0; run < 3; run++) {
+        std::unordered_map<std::string, std::unique_ptr<Value>> params;
+        auto result = conn->executeWithParams(prepared.get(), std::move(params));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        auto rows = TestHelper::convertResultToString(*result);
+        ASSERT_FALSE(rows.empty()) << "run " << run;
+        if (run == 0) {
+            first = rows;
+        } else {
+            ASSERT_EQ(first, rows) << "run " << run;
+        }
+    }
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *prepared));
+}
+
+// Regression test for issue #1030: re-running a cached parameterized rel scan after a
+// committed transaction that inserted a node segfaulted in NodeTable::initScanState.
+// Root cause: ScanNodeTableSharedState is shared across cached physical plan clones, but
+// initialize() never reset numUnCommittedNodeGroups. After the in-transaction execution
+// saw the new node's local group, a later read execution was handed an UNCOMMITTED morsel
+// whose local table was gone with the committed transaction, dereferencing null (+0x68).
+TEST_F(ApiTest, RepeatedScanAfterNodeInsertCachedPlanExecution1030) {
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE N(id STRING, PRIMARY KEY(id))")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE REL TABLE R(FROM N TO N, tag STRING)")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:N {id: 'a'}), (:N {id: 'b'})")->isSuccess());
+    ASSERT_TRUE(
+        conn->query("MATCH (a:N {id: 'a'}), (b:N {id: 'b'}) CREATE (a)-[:R {tag: 't'}]->(b)")
+            ->isSuccess());
+    const std::string scan = "MATCH ()-[r:R]->() WHERE r.tag = $tag RETURN count(r)";
+    std::unordered_map<std::string, std::unique_ptr<Value>> prepareParams;
+    prepareParams["tag"] = std::make_unique<Value>(std::string("x"));
+    auto prepared = conn->prepareWithParams(scan, std::move(prepareParams));
+    ASSERT_TRUE(prepared->isSuccess()) << prepared->getErrorMessage();
+    auto executeWithTag = [&](const std::string& tag) {
+        std::unordered_map<std::string, std::unique_ptr<Value>> params;
+        params["tag"] = std::make_unique<Value>(tag);
+        return conn->executeWithParams(prepared.get(), std::move(params));
+    };
+    // Execute inside an explicit write transaction that inserts a node, populating the
+    // shared scan state (and the plan cache) with uncommitted morsels.
+    ASSERT_TRUE(conn->query("BEGIN TRANSACTION")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:N {id: 'c'})")->isSuccess());
+    auto inTxnResult = executeWithTag("x");
+    ASSERT_TRUE(inTxnResult->isSuccess()) << inTxnResult->getErrorMessage();
+    ASSERT_TRUE(conn->query("COMMIT")->isSuccess());
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *prepared));
+    // Re-running the same cached plan after the commit must not touch the committed
+    // transaction's local storage. Before the fix this segfaulted.
+    for (auto run = 0; run < 3; run++) {
+        auto result = executeWithTag("t");
+        ASSERT_TRUE(result->isSuccess()) << "run " << run << ": " << result->getErrorMessage();
+        ASSERT_EQ(std::vector<std::string>{"1"}, TestHelper::convertResultToString(*result))
+            << "run " << run;
+        result = executeWithTag("x");
+        ASSERT_TRUE(result->isSuccess()) << "run " << run << ": " << result->getErrorMessage();
+        ASSERT_EQ(std::vector<std::string>{"0"}, TestHelper::convertResultToString(*result))
+            << "run " << run;
+    }
+    // The same shape as a write must also reuse the plan safely.
+    const std::string deleteShape = "MATCH ()-[r:R]->() WHERE r.tag = $tag DELETE r";
+    std::unordered_map<std::string, std::unique_ptr<Value>> deletePrepareParams;
+    deletePrepareParams["tag"] = std::make_unique<Value>(std::string("t"));
+    auto deletePrepared = conn->prepareWithParams(deleteShape, std::move(deletePrepareParams));
+    ASSERT_TRUE(deletePrepared->isSuccess()) << deletePrepared->getErrorMessage();
+    ASSERT_TRUE(conn->query("BEGIN TRANSACTION")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:N {id: 'd'})")->isSuccess());
+    {
+        std::unordered_map<std::string, std::unique_ptr<Value>> params;
+        params["tag"] = std::make_unique<Value>(std::string("z"));
+        auto inTxnDelete = conn->executeWithParams(deletePrepared.get(), std::move(params));
+        ASSERT_TRUE(inTxnDelete->isSuccess()) << inTxnDelete->getErrorMessage();
+    }
+    ASSERT_TRUE(conn->query("COMMIT")->isSuccess());
+    for (auto run = 0; run < 2; run++) {
+        std::unordered_map<std::string, std::unique_ptr<Value>> params;
+        params["tag"] = std::make_unique<Value>(std::string("z"));
+        auto result = conn->executeWithParams(deletePrepared.get(), std::move(params));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run << ": " << result->getErrorMessage();
+    }
+    // The rel from the setup is untouched by the 'z' deletes.
+    auto result = executeWithTag("t");
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    ASSERT_EQ(std::vector<std::string>{"1"}, TestHelper::convertResultToString(*result));
+}
+
+static bool cachedPlanExists(Connection* conn, const PreparedStatement& ps) {
+    const auto& manager = conn->getClientContext()->getCachedPreparedStatementManager();
+    if (!manager.containsStatement(ps.getName())) {
+        return false;
+    }
+    return manager.getCachedStatement(ps.getName())->physicalPlanCache != nullptr;
+}
+
+// Regression coverage for the `enable_cached_prepared_statement` setting: a kill switch for
+// latent state-reuse bugs in the cached-physical-plan fast path (see issue #877 and friends).
+TEST_F(ApiTest, EnableCachedPreparedStatementSetting) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE Log(id INT64, value STRING, PRIMARY KEY(id))")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:Log {id: 1, value: 'a'})")->isSuccess());
+    const std::string readQuery = "MATCH (l:Log) WHERE l.id = $id RETURN l.value";
+    const std::string writeQuery = "CREATE (:Log {id: $id, value: $val})";
+
+    // The setting round-trips and rejects invalid values.
+    ASSERT_TRUE(conn->query("CALL enable_cached_prepared_statement='reads';")->isSuccess());
+    ASSERT_EQ(std::vector<std::string>{"READS"},
+        TestHelper::convertResultToString(
+            *conn->query("CALL current_setting('enable_cached_prepared_statement') RETURN *")));
+    ASSERT_FALSE(conn->query("CALL enable_cached_prepared_statement='banana';")->isSuccess());
+    // The default is BOTH: read and write statements both populate the plan cache.
+    ASSERT_TRUE(conn->query("CALL enable_cached_prepared_statement='both';")->isSuccess());
+    ASSERT_EQ(std::vector<std::string>{"BOTH"},
+        TestHelper::convertResultToString(
+            *conn->query("CALL current_setting('enable_cached_prepared_statement') RETURN *")));
+    auto readStmt = conn->prepareWithParams(readQuery, makeIdValueParams(1, "a"));
+    ASSERT_TRUE(readStmt->isSuccess());
+    for (auto run = 0; run < 2; ++run) {
+        auto result = conn->executeWithParams(readStmt.get(), makeIdValueParams(1, "a"));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(std::vector<std::string>{"a"}, TestHelper::convertResultToString(*result))
+            << "run " << run;
+    }
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *readStmt));
+
+    auto writeStmt = conn->prepareWithParams(writeQuery, makeIdValueParams(100, "w0"));
+    ASSERT_TRUE(writeStmt->isSuccess());
+    for (auto run = 0; run < 2; ++run) {
+        auto result = conn->executeWithParams(writeStmt.get(),
+            makeIdValueParams(100 + run, "w" + std::to_string(run)));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+    }
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *writeStmt));
+
+    // READS: read plans are cached, write plans are not.
+    ASSERT_TRUE(conn->query("CALL enable_cached_prepared_statement='reads';")->isSuccess());
+    auto writeStmtReads = conn->prepareWithParams(writeQuery, makeIdValueParams(200, "r0"));
+    ASSERT_TRUE(writeStmtReads->isSuccess());
+    for (auto run = 0; run < 2; ++run) {
+        auto result = conn->executeWithParams(writeStmtReads.get(),
+            makeIdValueParams(200 + run, "r" + std::to_string(run)));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+    }
+    ASSERT_FALSE(cachedPlanExists(conn.get(), *writeStmtReads));
+
+    auto readStmtReads = conn->prepareWithParams(readQuery, makeIdValueParams(1, "a"));
+    ASSERT_TRUE(readStmtReads->isSuccess());
+    auto result = conn->executeWithParams(readStmtReads.get(), makeIdValueParams(1, "a"));
+    ASSERT_TRUE(result->isSuccess());
+    ASSERT_EQ(std::vector<std::string>{"a"}, TestHelper::convertResultToString(*result));
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *readStmtReads));
+
+    // WRITES: write plans are cached, read plans are not.
+    ASSERT_TRUE(conn->query("CALL enable_cached_prepared_statement='writes';")->isSuccess());
+    auto readStmtWrites = conn->prepareWithParams(readQuery, makeIdValueParams(1, "a"));
+    ASSERT_TRUE(readStmtWrites->isSuccess());
+    result = conn->executeWithParams(readStmtWrites.get(), makeIdValueParams(1, "a"));
+    ASSERT_TRUE(result->isSuccess());
+    ASSERT_EQ(std::vector<std::string>{"a"}, TestHelper::convertResultToString(*result));
+    ASSERT_FALSE(cachedPlanExists(conn.get(), *readStmtWrites));
+
+    auto writeStmtWrites = conn->prepareWithParams(writeQuery, makeIdValueParams(300, "s0"));
+    ASSERT_TRUE(writeStmtWrites->isSuccess());
+    for (auto run = 0; run < 2; ++run) {
+        result = conn->executeWithParams(writeStmtWrites.get(),
+            makeIdValueParams(300 + run, "s" + std::to_string(run)));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+    }
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *writeStmtWrites));
+
+    // NONE: no plan caching at all, but repeated executions still return correct results.
+    ASSERT_TRUE(conn->query("CALL enable_cached_prepared_statement='none';")->isSuccess());
+    auto readStmtNone = conn->prepareWithParams(readQuery, makeIdValueParams(1, "a"));
+    ASSERT_TRUE(readStmtNone->isSuccess());
+    for (auto run = 0; run < 3; ++run) {
+        result = conn->executeWithParams(readStmtNone.get(), makeIdValueParams(1, "a"));
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ(std::vector<std::string>{"a"}, TestHelper::convertResultToString(*result))
+            << "run " << run;
+    }
+    ASSERT_FALSE(cachedPlanExists(conn.get(), *readStmtNone));
+
+    // Restore the default.
+    ASSERT_TRUE(conn->query("CALL enable_cached_prepared_statement='both';")->isSuccess());
+}
+
+// A predicate built only from parameters reads nothing from the input, so it holds for every row
+// or for none. It used to hold for every row regardless: the join-order planner claimed such a
+// predicate for a query graph (its variable check passes vacuously for a variable-free predicate)
+// but never emitted it, because the same emptiness makes the join-order search report it as
+// already matched -- no FILTER was planned at all. The equivalent literal predicate is folded by
+// the binder and so never reached that path, which is why only the parameterised form was affected.
+TEST_F(ApiTest, ParameterOnlyPredicateFilters) {
+    auto falsePredicate = conn->prepare("MATCH (a:person) WHERE $depth >= 2 RETURN a.ID;");
+    ASSERT_TRUE(falsePredicate->isSuccess()) << falsePredicate->getErrorMessage();
+    auto excluded =
+        conn->execute(falsePredicate.get(), std::make_pair(std::string("depth"), (int64_t)1));
+    ASSERT_TRUE(excluded->isSuccess()) << excluded->getErrorMessage();
+    ASSERT_EQ(excluded->getNumTuples(), 0u);
+
+    // The same statement with a value that satisfies the predicate must still return everything.
+    auto included =
+        conn->execute(falsePredicate.get(), std::make_pair(std::string("depth"), (int64_t)5));
+    ASSERT_TRUE(included->isSuccess()) << included->getErrorMessage();
+    ASSERT_EQ(included->getNumTuples(), 8u);
+
+    // Mixed with a predicate that does read the input, in both conjunct orders.
+    auto mixed = conn->prepare("MATCH (a:person) WHERE $depth >= 2 AND a.ID >= 0 RETURN a.ID;");
+    ASSERT_TRUE(mixed->isSuccess()) << mixed->getErrorMessage();
+    auto mixedResult = conn->execute(mixed.get(), std::make_pair(std::string("depth"), (int64_t)1));
+    ASSERT_TRUE(mixedResult->isSuccess()) << mixedResult->getErrorMessage();
+    ASSERT_EQ(mixedResult->getNumTuples(), 0u);
+
+    auto mixedReversed =
+        conn->prepare("MATCH (a:person) WHERE a.ID >= 0 AND $depth >= 2 RETURN a.ID;");
+    ASSERT_TRUE(mixedReversed->isSuccess()) << mixedReversed->getErrorMessage();
+    auto mixedReversedResult =
+        conn->execute(mixedReversed.get(), std::make_pair(std::string("depth"), (int64_t)1));
+    ASSERT_TRUE(mixedReversedResult->isSuccess()) << mixedReversedResult->getErrorMessage();
+    ASSERT_EQ(mixedReversedResult->getNumTuples(), 0u);
+
+    // A bare boolean parameter, with no comparison to fold around.
+    auto boolParam = conn->prepare("MATCH (a:person) WHERE $flag RETURN a.ID;");
+    ASSERT_TRUE(boolParam->isSuccess()) << boolParam->getErrorMessage();
+    auto boolResult = conn->execute(boolParam.get(), std::make_pair(std::string("flag"), false));
+    ASSERT_TRUE(boolResult->isSuccess()) << boolResult->getErrorMessage();
+    ASSERT_EQ(boolResult->getNumTuples(), 0u);
+}
+
+// The same predicate placed after a WITH that projects only a constant. This gated a MATCH below
+// it and used to terminate the process rather than return rows.
+TEST_F(ApiTest, ParameterOnlyPredicateAfterConstantWith) {
+    auto statement =
+        conn->prepare("WITH 1 AS gate WHERE $depth >= 2 MATCH (a:person) RETURN a.ID;");
+    ASSERT_TRUE(statement->isSuccess()) << statement->getErrorMessage();
+    auto excluded =
+        conn->execute(statement.get(), std::make_pair(std::string("depth"), (int64_t)1));
+    ASSERT_TRUE(excluded->isSuccess()) << excluded->getErrorMessage();
+    ASSERT_EQ(excluded->getNumTuples(), 0u);
+
+    auto included =
+        conn->execute(statement.get(), std::make_pair(std::string("depth"), (int64_t)5));
+    ASSERT_TRUE(included->isSuccess()) << included->getErrorMessage();
+    ASSERT_EQ(included->getNumTuples(), 8u);
+}
+
+// Regression test for LadybugDB/ladybug-rust#32: a parameter used inside a COUNT subquery's
+// WHERE clause was invisible to the binder's parameter collection, because the parsed subquery
+// expression's where clause is not stored as a child expression and visitors did not descend
+// into it. When the statement was prepared without parameters, the subquery's parameters were
+// never registered, so at execute time the subquery's predicate was replaced by a placeholder
+// and changing the parameter values had no effect (stale results).
+TEST_F(ApiTest, ParameterizedCountSubqueryWithParameterizedComparison) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE IssueUser(id INT64, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE IssuePost(id INT64, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(
+        conn->query("CREATE REL TABLE IssueLikes(FROM IssueUser TO IssuePost);")->isSuccess());
+    for (auto id = 0; id < 3; id++) {
+        ASSERT_TRUE(
+            conn->query("CREATE (:IssueUser {id: " + std::to_string(id) + "});")->isSuccess());
+        ASSERT_TRUE(
+            conn->query("CREATE (:IssuePost {id: " + std::to_string(id) + "});")->isSuccess());
+    }
+    // u0 likes posts 0,1,2; u1 likes posts 0,1; u2 likes posts 1,2 (mirrors the issue dataset)
+    const std::vector<std::pair<int64_t, int64_t>> likes = {{0, 0}, {0, 1}, {0, 2}, {1, 0}, {1, 1},
+        {2, 1}, {2, 2}};
+    for (auto& [u, p] : likes) {
+        ASSERT_TRUE(conn->query("MATCH (u:IssueUser {id: " + std::to_string(u) +
+                                "}), (p:IssuePost {id: " + std::to_string(p) +
+                                "}) CREATE (u)-[:IssueLikes]->(p);")
+                        ->isSuccess());
+    }
+
+    // Users that like exactly the posts in $posts, i.e. COUNT{...} = $count.
+    const auto query = "MATCH (u:IssueUser) WHERE COUNT { "
+                       "MATCH (u)-[:IssueLikes]->(p:IssuePost) WHERE p.id IN $posts "
+                       "} = $count RETURN u.id;";
+    auto preparedStatement = conn->prepare(query);
+    ASSERT_TRUE(preparedStatement->isSuccess()) << preparedStatement->getErrorMessage();
+
+    auto makePostsParam = [](std::vector<int64_t> ids) {
+        std::vector<std::unique_ptr<Value>> children;
+        children.reserve(ids.size());
+        for (auto id : ids) {
+            children.push_back(std::make_unique<Value>(id));
+        }
+        return Value(LogicalType::LIST(LogicalType::INT64()), std::move(children));
+    };
+
+    // First execution: users liking exactly posts [1, 2] are u0 and u2.
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("posts"), makePostsParam({1, 2})),
+        std::make_pair(std::string("count"), (int64_t)2));
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    auto rows = TestHelper::convertResultToString(*result);
+    std::sort(rows.begin(), rows.end());
+    ASSERT_EQ((std::vector<std::string>{"0", "2"}), rows);
+
+    // Re-executing the SAME prepared statement with changed parameter values must pick up the
+    // new values: users liking exactly posts [0, 1] are u0 and u1. Before the fix the $posts
+    // parameter was never registered and its values were ignored (stale results).
+    result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("posts"), makePostsParam({0, 1})),
+        std::make_pair(std::string("count"), (int64_t)2));
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    rows = TestHelper::convertResultToString(*result);
+    std::sort(rows.begin(), rows.end());
+    ASSERT_EQ((std::vector<std::string>{"0", "1"}), rows);
+}
+
+// Regression test for issue #962: SUM over a CASE whose condition compares a TIMESTAMP column
+// against TIMESTAMP($param) must bind when the statement is prepared before parameter values are
+// known (the C API defers parameter binding to execute time). During that first bind pass the
+// parameter is replaced by an ANY-typed placeholder, so aggregate overload validation has to be
+// deferred to the mandatory re-bind instead of failing with "Function SUM did not receive
+// correct arguments".
+TEST_F(ApiTest, PrepareSumCaseWithTimestampParam) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE P (id INT64, ts TIMESTAMP, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:P {id: 1, ts: TIMESTAMP('2021-01-01')});")->isSuccess());
+    const auto query =
+        "MATCH (p:P) WITH CASE WHEN p.ts >= TIMESTAMP($s) THEN 1 ELSE 0 END AS v RETURN SUM(v)";
+    auto preparedStatement = conn->prepare(query);
+    ASSERT_TRUE(preparedStatement->isSuccess()) << preparedStatement->getErrorMessage();
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("s"), std::string("2020-01-01 00:00:00")));
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    auto rows = TestHelper::convertResultToString(*result);
+    ASSERT_EQ((std::vector<std::string>{"1"}), rows);
+}
+
+// Control: the same query shape with a timestamp literal needs no parameter resolution.
+TEST_F(ApiTest, SumCaseWithTimestampLiteral) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE P (id INT64, ts TIMESTAMP, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:P {id: 1, ts: TIMESTAMP('2021-01-01')});")->isSuccess());
+    const auto query = "MATCH (p:P) WITH CASE WHEN p.ts >= TIMESTAMP('2020-01-01 00:00:00') THEN 1 "
+                       "ELSE 0 END AS v RETURN SUM(v)";
+    auto result = conn->query(query);
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    auto rows = TestHelper::convertResultToString(*result);
+    ASSERT_EQ((std::vector<std::string>{"1"}), rows);
+}
+
+// Direct aggregate over a CASE mixing a stored column with a parameter-dependent call.
+TEST_F(ApiTest, SumDirectCaseWithTimestampParam) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE P (id INT64, ts TIMESTAMP, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:P {id: 1, ts: TIMESTAMP('2021-01-01')});")->isSuccess());
+    const auto query = "MATCH (p:P) RETURN SUM(CASE WHEN p.ts >= TIMESTAMP($s) THEN 1 ELSE 0 END)";
+    auto preparedStatement = conn->prepare(query);
+    ASSERT_TRUE(preparedStatement->isSuccess()) << preparedStatement->getErrorMessage();
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("s"), std::string("2020-01-01 00:00:00")));
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    auto rows = TestHelper::convertResultToString(*result);
+    ASSERT_EQ((std::vector<std::string>{"1"}), rows);
+}
+
+// Multi-argument aggregates must defer binding too when only some inputs are unresolved ANY
+// placeholders: here the aggregated value is ANY while the percentile literal is DOUBLE, so the
+// (ANY, DOUBLE) input has no exact overload during the first bind pass.
+TEST_F(ApiTest, PreparePercentileDiscMixedAnyWithTimestampParam) {
+    ASSERT_TRUE(
+        conn->query("CREATE NODE TABLE P (id INT64, ts TIMESTAMP, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:P {id: 1, ts: TIMESTAMP('2021-01-01')});")->isSuccess());
+    const auto query = "MATCH (p:P) WITH CASE WHEN p.ts >= TIMESTAMP($s) THEN 1 ELSE 0 END AS v "
+                       "RETURN PERCENTILEDISC(v, 0.5)";
+    auto preparedStatement = conn->prepare(query);
+    ASSERT_TRUE(preparedStatement->isSuccess()) << preparedStatement->getErrorMessage();
+    auto result = conn->execute(preparedStatement.get(),
+        std::make_pair(std::string("s"), std::string("2020-01-01 00:00:00")));
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    auto rows = TestHelper::convertResultToString(*result);
+    ASSERT_EQ((std::vector<std::string>{"1"}), rows);
+}
+
+// Regression test for https://github.com/LadybugDB/ladybug/issues/985: re-executing a query
+// with different SKIP/LIMIT parameter values returned the first call's page. Parameters
+// baked into a plan at plan-build time (skip/limit frozen to uint64_t by the mapper, or
+// evaluated numbers baked into operators by optimizers) go stale on the cached
+// physical-plan fast path, which only re-checks parameter types. Statements with baked
+// parameters now always rebind/replan and never populate or serve the plan cache; the
+// bake check is operator-agnostic (ParameterExpression::wasBakedIntoPlan), so future
+// baking operators are covered too.
+TEST_F(ApiTest, RepeatedExecuteParameterizedSkipLimit985) {
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE P985(id INT64, PRIMARY KEY(id))")->isSuccess());
+    for (auto i = 0; i < 6; ++i) {
+        ASSERT_TRUE(conn->query("CREATE (:P985 {id: " + std::to_string(i) + "})")->isSuccess());
+    }
+    auto makeSkipLimitParams = [](int64_t skip, int64_t limit) {
+        std::unordered_map<std::string, std::unique_ptr<Value>> params;
+        params["o"] = std::make_unique<Value>(skip);
+        params["l"] = std::make_unique<Value>(limit);
+        return params;
+    };
+    auto runPage = [&](PreparedStatement* ps, int64_t skip, int64_t limit) {
+        auto result = conn->executeWithParams(ps, makeSkipLimitParams(skip, limit));
+        EXPECT_TRUE(result->isSuccess()) << result->getErrorMessage();
+        return TestHelper::convertResultToString(*result, true /* checkOutputOrder */);
+    };
+
+    // ORDER BY + SKIP/LIMIT parameters: TopK path.
+    auto topKStmt = conn->prepareWithParams(
+        "MATCH (p:P985) RETURN p.id ORDER BY p.id SKIP $o LIMIT $l", makeSkipLimitParams(0, 2));
+    ASSERT_TRUE(topKStmt->isSuccess()) << topKStmt->getErrorMessage();
+    ASSERT_EQ((std::vector<std::string>{"0", "1"}), runPage(topKStmt.get(), 0, 2));
+    ASSERT_EQ((std::vector<std::string>{"0", "1", "2", "3", "4", "5"}),
+        runPage(topKStmt.get(), 0, 10));
+    ASSERT_EQ((std::vector<std::string>{"4", "5"}), runPage(topKStmt.get(), 4, 2));
+    ASSERT_EQ((std::vector<std::string>{"2", "3", "4"}), runPage(topKStmt.get(), 2, 3));
+    // Parameterized SKIP/LIMIT must stay off the physical-plan fast path.
+    ASSERT_FALSE(cachedPlanExists(conn.get(), *topKStmt));
+
+    // Bare SKIP/LIMIT parameters without ORDER BY: Skip/Limit path (unordered comparison:
+    // paging without ORDER BY has no defined row order).
+    auto limitStmt = conn->prepareWithParams("MATCH (p:P985) RETURN p.id SKIP $o LIMIT $l",
+        makeSkipLimitParams(0, 2));
+    ASSERT_TRUE(limitStmt->isSuccess()) << limitStmt->getErrorMessage();
+    auto runUnorderedPage = [&](int64_t skip, int64_t limit) {
+        auto result = conn->executeWithParams(limitStmt.get(), makeSkipLimitParams(skip, limit));
+        EXPECT_TRUE(result->isSuccess()) << result->getErrorMessage();
+        return TestHelper::convertResultToString(*result);
+    };
+    ASSERT_EQ((std::vector<std::string>{"0", "1"}), runUnorderedPage(0, 2));
+    ASSERT_EQ((std::vector<std::string>{"4", "5"}), runUnorderedPage(4, 2));
+    ASSERT_FALSE(cachedPlanExists(conn.get(), *limitStmt));
+
+    // DISTINCT + ORDER BY + SKIP/LIMIT parameters: the limit-push-down optimizer bakes
+    // evaluated numbers into the logical DISTINCT operator itself, so correctness here
+    // requires a full replan, not just skipping the physical-plan cache.
+    auto distinctStmt = conn->prepareWithParams(
+        "MATCH (p:P985) RETURN DISTINCT p.id ORDER BY p.id SKIP $o LIMIT $l",
+        makeSkipLimitParams(0, 2));
+    ASSERT_TRUE(distinctStmt->isSuccess()) << distinctStmt->getErrorMessage();
+    ASSERT_EQ((std::vector<std::string>{"0", "1"}), runPage(distinctStmt.get(), 0, 2));
+    ASSERT_EQ((std::vector<std::string>{"0", "1", "2", "3", "4", "5"}),
+        runPage(distinctStmt.get(), 0, 10));
+    ASSERT_EQ((std::vector<std::string>{"4", "5"}), runPage(distinctStmt.get(), 4, 2));
+    ASSERT_FALSE(cachedPlanExists(conn.get(), *distinctStmt));
+
+    // WITH + SKIP/LIMIT parameters (second shape from the issue report).
+    auto withStmt = conn->prepareWithParams(
+        "MATCH (p:P985) WITH p.id AS id ORDER BY id SKIP $o LIMIT $l RETURN count(id)",
+        makeSkipLimitParams(0, 2));
+    ASSERT_TRUE(withStmt->isSuccess()) << withStmt->getErrorMessage();
+    auto runCount = [&](int64_t skip, int64_t limit) {
+        auto result = conn->executeWithParams(withStmt.get(), makeSkipLimitParams(skip, limit));
+        EXPECT_TRUE(result->isSuccess()) << result->getErrorMessage();
+        return TestHelper::convertResultToString(*result);
+    };
+    ASSERT_EQ(std::vector<std::string>{"2"}, runCount(0, 2));
+    ASSERT_EQ(std::vector<std::string>{"6"}, runCount(0, 10));
+    ASSERT_EQ(std::vector<std::string>{"2"}, runCount(4, 2));
+
+    // Literal SKIP/LIMIT still goes through the fast path and stays correct.
+    auto literalStmt = conn->prepare("MATCH (p:P985) RETURN p.id ORDER BY p.id SKIP 0 LIMIT 3");
+    ASSERT_TRUE(literalStmt->isSuccess()) << literalStmt->getErrorMessage();
+    for (auto run = 0; run < 2; ++run) {
+        auto result = conn->execute(literalStmt.get());
+        ASSERT_TRUE(result->isSuccess()) << "run " << run;
+        ASSERT_EQ((std::vector<std::string>{"0", "1", "2"}),
+            TestHelper::convertResultToString(*result, true /* checkOutputOrder */))
+            << "run " << run;
+    }
+    ASSERT_TRUE(cachedPlanExists(conn.get(), *literalStmt));
+}

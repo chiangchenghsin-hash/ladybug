@@ -1,0 +1,33 @@
+-DATASET CSV empty
+--
+
+-CASE RelIceDiskNodeRegular
+
+-LOG CreateRegularNodeTable
+-STATEMENT CREATE NODE TABLE person(id INT64 PRIMARY KEY, name STRING)
+---- ok
+
+-LOG IceDiskRelWithRegularNodeFails
+-STATEMENT CREATE REL TABLE rel(FROM person TO person) WITH (storage = '${LBUG_ROOT_DIRECTORY}/dataset/ice-disk-test/', format = 'icebug-disk')
+---- error
+Binder exception: Cannot mix icebug-disk tables with non-icebug-disk tables in CREATE REL TABLE.
+
+-CASE NodeIceDiskRelRegular
+
+-LOG CreateIceDiskNodeTable
+-STATEMENT CREATE NODE TABLE upperversion(id INT64 PRIMARY KEY) WITH (storage = '${LBUG_ROOT_DIRECTORY}/dataset/ice-disk-test/', format = 'icebug-disk')
+---- ok
+
+-LOG CreateRegularNodeTable
+-STATEMENT CREATE NODE TABLE person(id INT64 PRIMARY KEY, name STRING)
+---- ok
+
+-LOG RegularRelWithIceDiskNodeFails
+-STATEMENT CREATE REL TABLE rel(FROM person TO upperversion)
+---- error
+Binder exception: Cannot mix icebug-disk tables with non-icebug-disk tables in CREATE REL TABLE.
+
+-LOG RegularRelWithBothIceDiskNodeFails
+-STATEMENT CREATE REL TABLE rel(FROM upperversion TO upperversion)
+---- error
+Binder exception: Cannot mix icebug-disk tables with non-icebug-disk tables in CREATE REL TABLE.

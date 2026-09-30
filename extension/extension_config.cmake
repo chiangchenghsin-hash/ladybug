@@ -1,0 +1,33 @@
+set(EXTENSION_LIST adbc azure delta duckdb ducklake fts httpfs iceberg json llm pg_client postgres sqlite unity_catalog vector neo4j algo gql)
+
+#set(EXTENSION_STATIC_LINK_LIST fts)
+foreach(extension IN LISTS EXTENSION_STATIC_LINK_LIST)
+    add_static_link_extension(${extension})
+endforeach()
+
+if(${BUILD_WASM})
+    message(STATUS "Building for WASM, extension static linking is enabled by default")
+    add_static_link_extension(fts)
+    add_static_link_extension(json)
+    add_static_link_extension(vector)
+    add_static_link_extension(algo)
+endif()
+
+if(ANDROID_ABI)
+    message(STATUS "Building for Android, extension static linking is enabled by default")
+    add_static_link_extension(fts)
+    add_static_link_extension(json)
+    add_static_link_extension(vector)
+    add_static_link_extension(algo)
+endif()
+
+if(${BUILD_SWIFT})
+    message(STATUS "Building for Swift binding, extension static linking is enabled by default")
+    add_static_link_extension(fts)
+    add_static_link_extension(json)
+    add_static_link_extension(vector)
+    add_static_link_extension(algo)
+endif()
+
+string(JOIN ", " joined_extensions ${STATICALLY_LINKED_EXTENSIONS})
+message(STATUS "Static link extensions: ${joined_extensions}")

@@ -1,0 +1,24 @@
+[submodule "extension"]
+	path = extension
+	url = https://github.com/ladybugdb/extensions.git
+[submodule "benchmark"]
+	path = benchmark
+	url = https://github.com/ladybugdb/benchmarks.git
+[submodule "dataset"]
+	path = dataset
+	url = https://github.com/ladybugdb/dataset.git
+[submodule "tools/java_api"]
+	path = tools/java_api
+	url = https://github.com/ladybugdb/ladybug-java
+[submodule "tools/nodejs_api"]
+	path = tools/nodejs_api
+	url = https://github.com/ladybugdb/ladybug-nodejs
+[submodule "tools/python_api"]
+	path = tools/python_api
+	url = https://github.com/ladybugdb/ladybug-python
+[submodule "tools/rust_api"]
+	path = tools/rust_api
+	url = https://github.com/ladybugdb/ladybug-rust
+[submodule "tools/wasm"]
+	path = tools/wasm
+	url = https://github.com/ladybugdb/ladybug-wasm

@@ -1,0 +1,1074 @@
+#include <cstring>
+#include <fstream>
+#include <mutex>
+#include <unordered_map>
+
+#include "api_test/api_test.h"
+#include "common/exception/io.h"
+#include "common/exception/runtime.h"
+#include "common/exception/storage.h"
+#include "common/file_system/virtual_file_system.h"
+#include "common/serializer/buffer_reader.h"
+#include "common/serializer/buffer_writer.h"
+#include "common/serializer/deserializer.h"
+#include "common/serializer/serializer.h"
+#include "gmock/gmock.h"
+#include "storage/buffer_manager/memory_manager.h"
+#include "storage/storage_utils.h"
+#include "storage/wal/local_wal.h"
+#include "storage/wal/wal.h"
+#include <format>
+
+using namespace lbug::common;
+using namespace lbug::testing;
+using namespace lbug::transaction;
+
+class WalTest : public ApiTest {
+protected:
+    void SetUp() override {
+        ApiTest::SetUp();
+        // Most of these tests are checking if partial recovery works correctly
+        systemConfig->throwOnWalReplayFailure = false;
+    }
+
+    void testStrayWALFile(const std::function<void()>& setupNewDBFunc);
+    void setupChecksumMismatchTest(std::function<void(std::ofstream&)> corruptFunc);
+};
+
+class FailingSyncFileSystem final : public FileSystem {
+public:
+    explicit FailingSyncFileSystem(bool failSync) : failSync{failSync} {}
+
+    void setFailSync(bool fail) {
+        std::unique_lock lck{mtx};
+        failSync = fail;
+    }
+
+    bool canHandleFile(const std::string_view path) const override {
+        return path.starts_with("failing-sync://");
+    }
+
+    std::unique_ptr<FileInfo> openFile(const std::string& path, FileOpenFlags flags,
+        lbug::main::ClientContext* /*context*/ = nullptr) override {
+        std::unique_lock lck{mtx};
+        if (flags.flags & FileFlags::CREATE_IF_NOT_EXISTS) {
+            files.try_emplace(path);
+        }
+        return std::make_unique<FileInfo>(path, this);
+    }
+
+    std::vector<std::string> glob(lbug::main::ClientContext* /*context*/,
+        const std::string& path) const override {
+        std::unique_lock lck{mtx};
+        return files.contains(path) ? std::vector<std::string>{path} : std::vector<std::string>{};
+    }
+
+    void renameFile(const std::string& from, const std::string& to) override {
+        std::unique_lock lck{mtx};
+        files[to] = std::move(files[from]);
+        files.erase(from);
+    }
+
+    void removeFileIfExists(const std::string& path,
+        const lbug::main::ClientContext* /*context*/ = nullptr) override {
+        std::unique_lock lck{mtx};
+        files.erase(path);
+    }
+
+    bool fileOrPathExists(const std::string& path,
+        lbug::main::ClientContext* /*context*/ = nullptr) override {
+        std::unique_lock lck{mtx};
+        return files.contains(path);
+    }
+
+    std::string expandPath(lbug::main::ClientContext* /*context*/,
+        const std::string& path) const override {
+        return path;
+    }
+
+    void syncFile(const FileInfo& /*fileInfo*/) const override {
+        std::unique_lock lck{mtx};
+        if (failSync) {
+            throw IOException{"Injected WAL sync failure."};
+        }
+    }
+
+protected:
+    void readFromFile(FileInfo& fileInfo, void* buffer, uint64_t numBytes,
+        uint64_t position) const override {
+        std::unique_lock lck{mtx};
+        const auto& file = files.at(fileInfo.path);
+        memcpy(buffer, file.data() + position, numBytes);
+    }
+
+    int64_t readFile(FileInfo& /*fileInfo*/, void* /*buf*/, size_t /*numBytes*/) const override {
+        UNREACHABLE_CODE;
+    }
+
+    void writeFile(FileInfo& fileInfo, const uint8_t* buffer, uint64_t numBytes,
+        uint64_t offset) const override {
+        std::unique_lock lck{mtx};
+        auto& file = files[fileInfo.path];
+        if (file.size() < offset + numBytes) {
+            file.resize(offset + numBytes);
+        }
+        memcpy(file.data() + offset, buffer, numBytes);
+    }
+
+    int64_t seek(FileInfo& /*fileInfo*/, uint64_t /*offset*/, int /*whence*/) const override {
+        UNREACHABLE_CODE;
+    }
+
+    void truncate(FileInfo& fileInfo, uint64_t size) const override {
+        std::unique_lock lck{mtx};
+        files[fileInfo.path].resize(size);
+    }
+
+    uint64_t getFileSize(const FileInfo& fileInfo) const override {
+        std::unique_lock lck{mtx};
+        const auto file = files.find(fileInfo.path);
+        return file == files.end() ? 0 : file->second.size();
+    }
+
+private:
+    bool failSync;
+    mutable std::mutex mtx;
+    mutable std::unordered_map<std::string, std::vector<uint8_t>> files;
+};
+
+TEST_F(WalTest, WALSyncFailurePoisonsWALAndReturnsAllocatedCommitSequence) {
+    VirtualFileSystem vfs;
+    auto failingFS = std::make_unique<FailingSyncFileSystem>(true /* failSync */);
+    auto* failingFSPtr = failingFS.get();
+    vfs.registerFileSystem(std::move(failingFS));
+
+    lbug::storage::WAL wal("failing-sync://db", false /* readOnly */, false /* enableChecksums */,
+        &vfs);
+    lbug::storage::LocalWAL localWAL(*lbug::storage::MemoryManager::Get(*conn->getClientContext()),
+        false /* enableChecksums */);
+    localWAL.logLoadExtension("dummy");
+    localWAL.logCommit();
+
+    uint64_t walCommitSequence = 0;
+    EXPECT_THROW(wal.logCommittedWAL(localWAL, conn->getClientContext(), walCommitSequence),
+        RuntimeException);
+    EXPECT_EQ(walCommitSequence, 1);
+
+    failingFSPtr->setFailSync(false);
+    lbug::storage::LocalWAL secondLocalWAL(
+        *lbug::storage::MemoryManager::Get(*conn->getClientContext()), false /* enableChecksums */);
+    secondLocalWAL.logLoadExtension("dummy2");
+    secondLocalWAL.logCommit();
+
+    walCommitSequence = 0;
+    EXPECT_THROW(wal.logCommittedWAL(secondLocalWAL, conn->getClientContext(), walCommitSequence),
+        RuntimeException);
+    EXPECT_EQ(walCommitSequence, 0);
+}
+
+TEST_F(WalTest, WALRecordDeserializeSkipsUnknownTrailingBytes) {
+    auto recordBuffer = std::make_shared<BufferWriter>();
+    Serializer recordSerializer{recordBuffer};
+    lbug::storage::CopyTableRecord record{123};
+    record.serialize(recordSerializer);
+    recordSerializer.write<uint64_t>(456);
+
+    auto walBuffer = std::make_shared<BufferWriter>();
+    Serializer walSerializer{walBuffer};
+    walSerializer.write(recordBuffer->getSize());
+    walSerializer.write(recordBuffer->getBlobData(), recordBuffer->getSize());
+
+    auto walData = walBuffer->getData();
+    Deserializer deserializer{std::make_unique<BufferReader>(walData.data.get(), walData.size)};
+    auto deserialized =
+        lbug::storage::WALRecord::deserialize(deserializer, *conn->getClientContext());
+
+    ASSERT_EQ(deserialized->type, lbug::storage::WALRecordType::COPY_TABLE_RECORD);
+    EXPECT_EQ(deserialized->constCast<lbug::storage::CopyTableRecord>().tableID, 123);
+    EXPECT_TRUE(deserializer.finished());
+}
+
+// Simulates the scenario where the declared record length is smaller than the actual serialized
+// record. This happens when an older writer (e.g. v42) wrote a WAL record with fewer fields than
+// the current reader (e.g. v43) expects. The deserializer must gracefully handle the size mismatch
+// by truncating reads at the declared record boundary and zero-filling any remaining bytes in the
+// new field. This allows silent forward-compatible migration without corrupting the next record.
+TEST_F(WalTest, WALRecordDeserializeHandlesSizeMismatch) {
+    auto recordBuffer = std::make_shared<BufferWriter>();
+    Serializer recordSerializer{recordBuffer};
+    lbug::storage::CopyTableRecord record{123};
+    record.serialize(recordSerializer);
+    recordSerializer.write<uint64_t>(456);
+
+    // Declare a record length one byte shorter than the actual serialized size, simulating
+    // an older version that wrote a smaller struct.
+    const auto realRecordSize = recordBuffer->getSize();
+    ASSERT_GT(realRecordSize, 1u);
+    const auto truncatedLength = realRecordSize - 1;
+
+    auto walBuffer = std::make_shared<BufferWriter>();
+    Serializer walSerializer{walBuffer};
+    walSerializer.write(truncatedLength);
+    walSerializer.write(recordBuffer->getBlobData(), realRecordSize);
+
+    auto walData = walBuffer->getData();
+    Deserializer deserializer{std::make_unique<BufferReader>(walData.data.get(), walData.size)};
+    // Should NOT throw: the deserializer truncates reads at the declared record boundary
+    // and zero-fills the rest, so the next record in the stream starts at the correct offset.
+    auto deserialized =
+        lbug::storage::WALRecord::deserialize(deserializer, *conn->getClientContext());
+    ASSERT_EQ(deserialized->type, lbug::storage::WALRecordType::COPY_TABLE_RECORD);
+    EXPECT_EQ(deserialized->constCast<lbug::storage::CopyTableRecord>().tableID, 123);
+    // The stream should be positioned at the declared record boundary, not past it.
+    EXPECT_FALSE(deserializer.finished());
+}
+
+TEST_F(WalTest, NoWALFile) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+    std::filesystem::remove(walFilePath);
+    // No WAL file, so no replay.
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name='test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+}
+
+TEST_F(WalTest, EmptyWALFile) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+    std::filesystem::resize_file(walFilePath, 0);
+    // Empty WAL file, so no replay.
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name='test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+}
+
+TEST_F(WalTest, NoWALAfterCheckpoint) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+    // Checkpoint should remove the WAL file.
+    conn->query("checkpoint;");
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+}
+
+TEST_F(WalTest, EmptyWriteTransactionDoesNotCreateWAL) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+    auto result = conn->query("CALL THREADS=1");
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+}
+
+TEST_F(WalTest, ShadowFileExistsWithoutWAL) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto shadowFilePath = lbug::storage::StorageUtils::getShadowFilePath(databasePath);
+    // Create a shadow file that is corrupted.
+    std::ofstream file(shadowFilePath);
+    file << "This is not a valid Lbug database file.";
+    file.close();
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+    std::filesystem::remove(walFilePath);
+    // No WAL file, but the shadow file exists. Should not replay the shadow file, and remove wal
+    // and shadow files.
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name='test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+    ASSERT_FALSE(std::filesystem::exists(shadowFilePath));
+}
+
+TEST_F(WalTest, ShadowFileExistsWithEmptyWAL) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto shadowFilePath = lbug::storage::StorageUtils::getShadowFilePath(databasePath);
+    // Create a shadow file that is corrupted.
+    std::ofstream file(shadowFilePath);
+    file << "This is not a valid Lbug database file.";
+    file.close();
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+    std::filesystem::resize_file(walFilePath, 0);
+    // Empty WAL file, but the shadow file exists. Should not replay the shadow file, and remove wal
+    // and shadow files.
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name='test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+    ASSERT_FALSE(std::filesystem::exists(shadowFilePath));
+}
+
+void WalTest::setupChecksumMismatchTest(std::function<void(std::ofstream&)> corruptFunc) {
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    // rewrite part of the wal
+    std::ofstream file(walFilePath, std::ios_base::in | std::ios_base::out | std::ios_base::ate);
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 13);
+    corruptFunc(file);
+    file.close();
+}
+
+// Simulation of a corrupted WAL tail by changing some data, this should trigger a checksum failure
+TEST_F(WalTest, CorruptedWALChecksumMismatchInHeader) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0 || !systemConfig->enableChecksums) {
+        GTEST_SKIP();
+    }
+    systemConfig->throwOnWalReplayFailure = true;
+    createDBAndConn();
+    setupChecksumMismatchTest([](std::ofstream& walFileToCorrupt) {
+        walFileToCorrupt.seekp(10);
+        // 10 bytes in will be the database ID's checksum
+        walFileToCorrupt << "abc";
+    });
+    EXPECT_THROW(createDBAndConn();, lbug::common::StorageException);
+}
+
+TEST_F(WalTest, CorruptedWALChecksumMismatchInHeaderNoThrow) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0 || !systemConfig->enableChecksums) {
+        GTEST_SKIP();
+    }
+    setupChecksumMismatchTest([](std::ofstream& walFileToCorrupt) {
+        walFileToCorrupt.seekp(10);
+        // 10 bytes in will be the database ID's checksum
+        walFileToCorrupt << "abc";
+    });
+
+    // The replay shouldn't complete but shouldn't throw either
+    createDBAndConn();
+    auto result = conn->query("match (t:test) return count(*)");
+    EXPECT_FALSE(result->isSuccess());
+}
+
+TEST_F(WalTest, CorruptedWALChecksumMismatchInBody) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0 || !systemConfig->enableChecksums) {
+        GTEST_SKIP();
+    }
+    systemConfig->throwOnWalReplayFailure = true;
+    createDBAndConn();
+    setupChecksumMismatchTest([](std::ofstream& walFileToCorrupt) {
+        walFileToCorrupt.seekp(30);
+        walFileToCorrupt << "abc";
+    });
+    EXPECT_THROW(createDBAndConn();, lbug::common::StorageException);
+}
+
+TEST_F(WalTest, CorruptedWALChecksumMismatchInBodyNoThrow) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0 || !systemConfig->enableChecksums) {
+        GTEST_SKIP();
+    }
+    setupChecksumMismatchTest([](std::ofstream& walFileToCorrupt) {
+        walFileToCorrupt.seekp(10);
+        // 10 bytes in will be the database ID's checksum
+        walFileToCorrupt << "abc";
+    });
+    // The replay shouldn't complete but shouldn't throw either
+    createDBAndConn();
+    auto result = conn->query("match (t:test) return count(*)");
+    EXPECT_FALSE(result->isSuccess());
+    EXPECT_STREQ("Binder exception: Table test does not exist.", result->getErrorMessage().c_str());
+}
+
+TEST_F(WalTest, WALChecksumConfigMismatch) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    ASSERT_TRUE(conn->query("call force_checkpoint_on_close=false")->isSuccess());
+    ASSERT_TRUE(conn->query("call auto_checkpoint=false")->isSuccess());
+    ASSERT_TRUE(conn->query("create node table test1(id int64 primary key)")->isSuccess());
+    ASSERT_TRUE(conn->query("create node table test2(id int64 primary key)")->isSuccess());
+    systemConfig->enableChecksums = !systemConfig->enableChecksums;
+    systemConfig->throwOnWalReplayFailure = true;
+    EXPECT_THROW(
+        {
+            try {
+                createDBAndConn();
+            } catch (std::exception& e) {
+                EXPECT_THAT(e.what(),
+                    testing::AnyOf(testing::StartsWith(
+                                       "Runtime exception: The database you are trying to open "
+                                       "was serialized with enableChecksums=True but you are "
+                                       "trying to open it with enableChecksums=False."),
+                        testing::StartsWith(
+                            "Runtime exception: The database you are trying to open "
+                            "was serialized with enableChecksums=False but you are "
+                            "trying to open it with enableChecksums=True.")));
+                throw;
+            }
+        },
+        lbug::common::RuntimeException);
+}
+
+TEST_F(WalTest, WALChecksumConfigMismatchNoThrow) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    ASSERT_TRUE(conn->query("call force_checkpoint_on_close=false")->isSuccess());
+    ASSERT_TRUE(conn->query("call auto_checkpoint=false")->isSuccess());
+    ASSERT_TRUE(conn->query("create node table test1(id int64 primary key)")->isSuccess());
+    ASSERT_TRUE(conn->query("create node table test2(id int64 primary key)")->isSuccess());
+    systemConfig->enableChecksums = !systemConfig->enableChecksums;
+    systemConfig->throwOnWalReplayFailure = false;
+    // We have throwOnWalReplayFailure=false so we essentially skip the replay
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+}
+
+// Simulation of a corrupted WAL tail by truncating the WAL file. Note that in this case, there
+// would only be a single write transaction. This would cause the last wal record to be corrupted
+// and the database should ignore the last record when recovering.
+TEST_F(WalTest, CorruptedWALTailTruncated) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 10);
+    // Truncate the last 10 bytes of the WAL file.
+    std::filesystem::resize_file(walFilePath, std::filesystem::file_size(walFilePath) - 10);
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+}
+
+// Simulation of a corrupted WAL tail by truncating the WAL file, but then continuing to write to
+// the WAL, and recover from the same WAL file again. This should recover the tables that were
+// created after the database's first recovering from the corrupted WAL.
+TEST_F(WalTest, CorruptedWALTailTruncatedAndRecoverTwice) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("BEGIN TRANSACTION;");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 10);
+    // Truncate the last 10 bytes of the WAL file.
+    std::filesystem::resize_file(walFilePath, std::filesystem::file_size(walFilePath) - 10);
+    // Restart to recover from the corrupted WAL file.
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+    // Continue with some more writes to the WAL.
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    // Recover again from the same WAL file.
+    createDBAndConn();
+    res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 2);
+}
+
+// Similar to CorruptedWALTailTruncated, but with multiple transactions.
+TEST_F(WalTest, CorruptedWALTailTruncated2) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 10);
+    // Truncate the last 10 bytes of the WAL file.
+    std::filesystem::resize_file(walFilePath, std::filesystem::file_size(walFilePath) - 10);
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 3);
+}
+
+TEST_F(WalTest, WALFileLeftoverFromPreviousDBNewReadOnlyDB) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+
+    // Delete the DB file but keep the WAL
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    conn.reset();
+    database.reset();
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::exists(databasePath));
+    std::filesystem::remove(databasePath);
+
+    // Recreate the DB then close it
+    ASSERT_FALSE(std::filesystem::exists(databasePath));
+    auto createEmptyDB = [&]() {
+        database = std::make_unique<lbug::main::Database>(databasePath, *systemConfig);
+    };
+    // When opening an empty read-only DB we don't write the header
+    // This shouldn't cause any crashes when deserializing
+    systemConfig->readOnly = true;
+    // Creating a new empty DB file bypasses the empty read-only DB check
+    std::ofstream ofs(databasePath);
+    ofs.close();
+
+    // When loading the DB, replaying should fail
+    EXPECT_THROW(createEmptyDB(), RuntimeException);
+}
+
+void WalTest::testStrayWALFile(const std::function<void()>& setupNewDBFunc) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+
+    // Delete the DB file but keep the WAL
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    conn.reset();
+    database.reset();
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::exists(databasePath));
+    std::filesystem::remove(databasePath);
+
+    // temporarily rename the WAL file so that replay doesn't immediately trigger
+    auto tmpWALPath = walFilePath + "__";
+    std::filesystem::rename(walFilePath, tmpWALPath);
+
+    // Recreate the DB then close it
+    createDBAndConn();
+    setupNewDBFunc();
+    conn.reset();
+    database.reset();
+
+    // Rename the WAL to the original
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+    std::filesystem::rename(tmpWALPath, walFilePath);
+
+    // When loading the DB, replaying should fail
+    EXPECT_THROW(createDBAndConn(), RuntimeException);
+}
+
+TEST_F(WalTest, WALFileLeftoverFromPreviousDBExistingDB) {
+    testStrayWALFile([]() {});
+}
+
+TEST_F(WalTest, WALFileLeftoverFromPreviousDBNewDBCOPYWithoutCheckpoint) {
+    testStrayWALFile([this]() {
+        conn->query("CALL force_checkpoint_on_close=false");
+        conn->query("create node table Comment (id int64, creationDate INT64, locationIP STRING, "
+                    "browserUsed STRING, content STRING, length INT32, PRIMARY KEY (id));");
+        conn->query(std::format("COPY Comment FROM '{}/dataset/ldbc-sf01/Comment.csv'",
+            LBUG_ROOT_DIRECTORY));
+    });
+}
+
+TEST_F(WalTest, WALFileLeftoverFromPreviousDBNewDBCOPYWithoutCheckpointReadOnly) {
+    testStrayWALFile([this]() {
+        conn->query("CALL force_checkpoint_on_close=false");
+        conn->query("create node table Comment (id int64, creationDate INT64, locationIP STRING, "
+                    "browserUsed STRING, content STRING, length INT32, PRIMARY KEY (id));");
+        conn->query(std::format("COPY Comment FROM '{}/dataset/ldbc-sf01/Comment.csv'",
+            LBUG_ROOT_DIRECTORY));
+        systemConfig->readOnly = true;
+    });
+}
+
+// Similar to CorruptedWALTailTruncated2, but with multiple transactions and then recovering from
+// the WAL file again. This should recover the tables that were created after the database's first
+// recovering from the corrupted WAL.
+TEST_F(WalTest, CorruptedWALTailTruncated2RecoverTwice) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test2(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test3(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test4(id INT64 PRIMARY KEY, name STRING);");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 10);
+    // Truncate the last 10 bytes of the WAL file.
+    std::filesystem::resize_file(walFilePath, std::filesystem::file_size(walFilePath) - 10);
+    // Restart to recover from the corrupted WAL file.
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 3);
+    // Continue with some more writes to the WAL.
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test5(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE NODE TABLE test6(id INT64 PRIMARY KEY, name STRING);");
+    // Recover again from the same WAL file.
+    createDBAndConn();
+    res = conn->query("CALL show_tables() WHERE name STARTS WITH 'test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 5);
+}
+
+TEST_F(WalTest, ReadOnlyRecoveryFromExistingWAL) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE (:test {id: 1, name: 'Alice'});");
+    conn->query("CREATE (:test {id: 2, name: 'Bob'});");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+
+    // Restart in read-only mode
+    systemConfig->readOnly = true;
+    createDBAndConn();
+    auto res = conn->query("MATCH (n:test) RETURN n.id ORDER BY n.id;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 2);
+    // WAL file should still exist in read-only mode
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+}
+
+TEST_F(WalTest, ReadOnlyRecoveryFromCorruptedWALTail) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE (:test {id: 1, name: 'Alice'});");
+    conn->query("CREATE (:test {id: 2, name: 'Bob'});");
+    conn->query("CREATE (:test {id: 3, name: 'Charlie'});");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 10);
+
+    // Truncate the last 10 bytes of the WAL file to simulate corruption
+    std::filesystem::resize_file(walFilePath, std::filesystem::file_size(walFilePath) - 10);
+
+    // Restart in read-only mode
+    systemConfig->readOnly = true;
+    createDBAndConn();
+    auto res = conn->query("MATCH (n:test) RETURN n.id ORDER BY n.id;");
+    ASSERT_TRUE(res->isSuccess());
+    // Should still recover up to the last valid record
+    ASSERT_GE(res->getNumTuples(), 0);
+    // WAL file should remain unchanged in read-only mode
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+}
+
+TEST_F(WalTest, ReadOnlyRecoveryWithShadowFile) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    conn->query("CREATE (:test {id: 1, name: 'Alice'});");
+    conn->query("COMMIT;");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    auto shadowFilePath = lbug::storage::StorageUtils::getShadowFilePath(databasePath);
+
+    // Create a shadow file (simulating checkpoint in progress)
+    std::ofstream file(shadowFilePath);
+    file << "shadow file content";
+    file.close();
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::exists(shadowFilePath));
+
+    // Restart in read-only mode
+    systemConfig->readOnly = true;
+    EXPECT_THROW(createDBAndConn(), RuntimeException);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::exists(shadowFilePath));
+}
+
+TEST_F(WalTest, ReadOnlyRecoveryWithCheckpointWAL) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    auto checkpointWalFilePath =
+        lbug::storage::StorageUtils::getCheckpointWALFilePath(databasePath);
+
+    std::ofstream file(checkpointWalFilePath);
+    file.close();
+    ASSERT_TRUE(std::filesystem::exists(checkpointWalFilePath));
+
+    systemConfig->readOnly = true;
+    EXPECT_THROW(createDBAndConn(), RuntimeException);
+    ASSERT_TRUE(std::filesystem::exists(checkpointWalFilePath));
+}
+
+TEST_F(WalTest, ReadOnlyRecoveryEmptyWALFile) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+
+    // Make WAL file empty
+    std::filesystem::resize_file(walFilePath, 0);
+
+    // Restart in read-only mode
+    systemConfig->readOnly = true;
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name='test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+    // Empty WAL file should still exist in read-only mode
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+}
+
+TEST_F(WalTest, ReadOnlyRecoveryNoWALFile) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, name STRING);");
+    auto walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+    ASSERT_TRUE(std::filesystem::file_size(walFilePath) > 0);
+
+    // Remove WAL file
+    std::filesystem::remove(walFilePath);
+    ASSERT_FALSE(std::filesystem::exists(walFilePath));
+
+    // Restart in read-only mode
+    systemConfig->readOnly = true;
+    createDBAndConn();
+    auto res = conn->query("CALL show_tables() WHERE name='test' RETURN *;");
+    ASSERT_TRUE(res->isSuccess());
+    ASSERT_EQ(res->getNumTuples(), 0);
+}
+
+// Regression test for https://github.com/LadybugDB/ladybug/issues/771.
+// A single WAL record larger than the 4KB checksum entry buffer must survive
+// WAL replay. ChecksumWriter/ChecksumReader used to discard the already
+// buffered bytes when growing the entry buffer, corrupting the record framing
+// (writer) and failing checksum verification (reader).
+TEST_F(WalTest, LargeWALRecordReplay) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    systemConfig->throwOnWalReplayFailure = true;
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, content STRING);");
+    const std::string big(5000, 'x');
+    {
+        // Destroy the result before tearing down the DB below.
+        auto insertRes = conn->query(std::format("CREATE (:test {{id: 1, content: '{}'}});", big));
+        ASSERT_TRUE(insertRes->isSuccess()) << insertRes->getErrorMessage();
+    }
+    conn.reset();
+    database.reset();
+
+    createDBAndConn();
+    auto res = conn->query("MATCH (n:test) RETURN n.content;");
+    ASSERT_TRUE(res->isSuccess()) << res->getErrorMessage();
+    ASSERT_EQ(res->getNumTuples(), 1);
+    ASSERT_TRUE(res->hasNext());
+    EXPECT_EQ(res->getNext()->getValue(0)->getValue<std::string>(), big);
+}
+
+// Same as above, but the original Database is still alive when the second one
+// replays the WAL (e.g. undisposed handles keeping the first instance around).
+TEST_F(WalTest, LargeWALRecordReplayWithPreviousDBAlive) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false");
+    conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY, content STRING);");
+    const std::string big(5000, 'x');
+    {
+        auto insertRes = conn->query(std::format("CREATE (:test {{id: 1, content: '{}'}});", big));
+        ASSERT_TRUE(insertRes->isSuccess()) << insertRes->getErrorMessage();
+    }
+
+    lbug::main::SystemConfig roConfig = *systemConfig;
+    roConfig.readOnly = true;
+    roConfig.throwOnWalReplayFailure = true;
+    auto db2 = std::make_unique<lbug::main::Database>(databasePath, roConfig);
+    auto conn2 = std::make_unique<lbug::main::Connection>(db2.get());
+    auto res = conn2->query("MATCH (n:test) RETURN n.content;");
+    ASSERT_TRUE(res->isSuccess()) << res->getErrorMessage();
+    ASSERT_EQ(res->getNumTuples(), 1);
+    ASSERT_TRUE(res->hasNext());
+    EXPECT_EQ(res->getNext()->getValue(0)->getValue<std::string>(), big);
+}
+
+class FrozenWALRecoveryTest : public WalTest {
+protected:
+    void SetUp() override {
+        WalTest::SetUp();
+        if (inMemMode || systemConfig->checkpointThreshold == 0) {
+            GTEST_SKIP();
+        }
+        walFilePath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+        frozenWALFilePath = lbug::storage::StorageUtils::getCheckpointWALFilePath(databasePath);
+        ASSERT_TRUE(conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY);")->isSuccess());
+        ASSERT_TRUE(conn->query("CHECKPOINT;")->isSuccess());
+        // From here on nothing is checkpointed unless a test (or recovery) asks for it, so the
+        // WAL files are the only durable copy of the writes below.
+        systemConfig->autoCheckpoint = false;
+        systemConfig->forceCheckpointOnClose = false;
+        createDBAndConn();
+    }
+
+    void closeDB() {
+        conn.reset();
+        database.reset();
+    }
+
+    void insertRange(int64_t start, int64_t end) const {
+        auto res = conn->query(
+            std::format("UNWIND range({}, {}) AS i CREATE (:test {{id: i}});", start, end - 1));
+        ASSERT_TRUE(res->isSuccess()) << res->getErrorMessage();
+    }
+
+    int64_t countTestNodes() const {
+        auto res = conn->query("MATCH (n:test) RETURN COUNT(n);");
+        EXPECT_TRUE(res->isSuccess()) << res->getErrorMessage();
+        if (!res->isSuccess() || !res->hasNext()) {
+            return -1;
+        }
+        return res->getNext()->getValue(0)->getValue<int64_t>();
+    }
+
+    int64_t queryCount(const std::string& query) const {
+        auto res = conn->query(query);
+        EXPECT_TRUE(res->isSuccess()) << query << ": " << res->getErrorMessage();
+        if (!res->isSuccess() || !res->hasNext()) {
+            return -1;
+        }
+        return res->getNext()->getValue(0)->getValue<int64_t>();
+    }
+
+    void runQuery(const std::string& query) const {
+        auto res = conn->query(query);
+        ASSERT_TRUE(res->isSuccess()) << query << ": " << res->getErrorMessage();
+    }
+
+    std::string walFilePath;
+    std::string frozenWALFilePath;
+};
+
+// A crash after a checkpoint rotated the WAL but before it wrote its CHECKPOINT record leaves a
+// frozen WAL without a CHECKPOINT record. Recovery replays it; its records must stay durable
+// until a checkpoint commits them, even if the recovered database is closed without one.
+TEST_F(FrozenWALRecoveryTest, FrozenWALWithoutCheckpointRecordSurvivesSecondRecovery) {
+    systemConfig->throwOnWalReplayFailure = true;
+    insertRange(0, 100);
+    closeDB();
+    ASSERT_FALSE(std::filesystem::exists(frozenWALFilePath));
+    std::filesystem::rename(walFilePath, frozenWALFilePath);
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 100);
+    EXPECT_FALSE(std::filesystem::exists(frozenWALFilePath));
+    closeDB();
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 100);
+    insertRange(100, 150);
+    closeDB();
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 150);
+}
+
+// Same as above, but writes committed after the interrupted checkpoint are in an active WAL next
+// to the frozen one. Recovery must apply the frozen WAL first and keep both durable.
+TEST_F(FrozenWALRecoveryTest, FrozenAndActiveWALSurviveSecondRecovery) {
+    systemConfig->throwOnWalReplayFailure = true;
+    const auto dataFileCopy = databasePath + ".before_frozen";
+    const auto frozenWALCopy = databasePath + ".frozen_wal";
+    insertRange(0, 100);
+    closeDB();
+    // The data file as of the interrupted checkpoint, and the WAL that checkpoint froze.
+    std::filesystem::copy_file(databasePath, dataFileCopy);
+    std::filesystem::copy_file(walFilePath, frozenWALCopy);
+
+    // Produce an active WAL that holds only writes made after the frozen WAL's records.
+    createDBAndConn();
+    ASSERT_TRUE(conn->query("CHECKPOINT;")->isSuccess());
+    insertRange(100, 150);
+    closeDB();
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+
+    std::filesystem::copy_file(dataFileCopy, databasePath,
+        std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(frozenWALCopy, frozenWALFilePath);
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 150);
+    EXPECT_FALSE(std::filesystem::exists(frozenWALFilePath));
+    closeDB();
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 150);
+    insertRange(150, 160);
+    closeDB();
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 160);
+}
+
+// A frozen WAL without a CHECKPOINT record whose last transaction is torn. Only the committed
+// prefix is recovered, and it must recover the same way on every later open.
+TEST_F(FrozenWALRecoveryTest, FrozenWALWithTornTailRecoversConsistently) {
+    systemConfig->throwOnWalReplayFailure = false;
+    insertRange(0, 100);
+    insertRange(100, 200);
+    closeDB();
+    ASSERT_GT(std::filesystem::file_size(walFilePath), 10u);
+    std::filesystem::resize_file(walFilePath, std::filesystem::file_size(walFilePath) - 10);
+    std::filesystem::rename(walFilePath, frozenWALFilePath);
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 100);
+    closeDB();
+
+    systemConfig->throwOnWalReplayFailure = true;
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 100);
+    insertRange(100, 200);
+    closeDB();
+
+    createDBAndConn();
+    EXPECT_EQ(countTestNodes(), 200);
+}
+
+// The frozen WAL creates tables and data that the active WAL then deletes, updates and links to.
+// Replaying the active WAL without the frozen WAL's records does not just lose rows: it refers to
+// tables that do not exist. A stale shadow file models the interrupted checkpoint's pages.
+TEST_F(FrozenWALRecoveryTest, FrozenWALWithDDLAndDependentActiveWALSurvivesRecoveries) {
+    systemConfig->throwOnWalReplayFailure = true;
+    const auto dataFileCopy = databasePath + ".before_frozen";
+    const auto frozenWALCopy = databasePath + ".frozen_wal";
+    const auto shadowFilePath = lbug::storage::StorageUtils::getShadowFilePath(databasePath);
+
+    runQuery("CREATE NODE TABLE P(id INT64 PRIMARY KEY, v INT64);");
+    runQuery("CREATE REL TABLE K(FROM P TO P);");
+    runQuery("UNWIND range(0, 2999) AS i CREATE (:P {id: i, v: 0});");
+    runQuery("UNWIND range(0, 2998) AS i MATCH (a:P {id: i}), (b:P {id: i + 1}) "
+             "CREATE (a)-[:K]->(b);");
+    closeDB();
+    std::filesystem::copy_file(databasePath, dataFileCopy);
+    std::filesystem::copy_file(walFilePath, frozenWALCopy);
+
+    createDBAndConn();
+    ASSERT_TRUE(conn->query("CHECKPOINT;")->isSuccess());
+    runQuery("MATCH (p:P {id: 0}) DETACH DELETE p;");
+    runQuery("MATCH (p:P) WHERE p.id >= 1 AND p.id <= 100 SET p.v = 7;");
+    runQuery("CREATE (:P {id: 3000, v: 1});");
+    runQuery("MATCH (a:P {id: 3000}), (b:P {id: 5}) CREATE (a)-[:K]->(b);");
+    runQuery("UNWIND range(3001, 3099) AS i CREATE (:P {id: i, v: 2});");
+    closeDB();
+    ASSERT_TRUE(std::filesystem::exists(walFilePath));
+
+    std::filesystem::copy_file(dataFileCopy, databasePath,
+        std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(frozenWALCopy, frozenWALFilePath);
+    {
+        std::ofstream shadow(shadowFilePath, std::ios::binary);
+        const std::string garbage(2 * LBUG_PAGE_SIZE, '\xAB');
+        shadow.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    }
+
+    const auto checkState = [&]() {
+        EXPECT_EQ(queryCount("MATCH (p:P) RETURN COUNT(p);"), 3099);
+        EXPECT_EQ(queryCount("MATCH (:P)-[k:K]->(:P) RETURN COUNT(k);"), 2999);
+        EXPECT_EQ(queryCount("MATCH (p:P) WHERE p.v = 7 RETURN COUNT(p);"), 100);
+        EXPECT_EQ(queryCount("MATCH (p:P) WHERE p.v = 2 RETURN COUNT(p);"), 99);
+        EXPECT_EQ(queryCount("MATCH (p:P {id: 0}) RETURN COUNT(p);"), 0);
+        EXPECT_EQ(queryCount("MATCH (:P {id: 3000})-[:K]->(b:P {id: 5}) RETURN COUNT(b);"), 1);
+        EXPECT_EQ(queryCount("MATCH (a:P {id: 0})-[:K]->() RETURN COUNT(a);"), 0);
+    };
+    for (auto reopen = 0; reopen < 3; reopen++) {
+        createDBAndConn();
+        checkState();
+        EXPECT_FALSE(std::filesystem::exists(frozenWALFilePath));
+        EXPECT_FALSE(std::filesystem::exists(shadowFilePath));
+        closeDB();
+    }
+
+    createDBAndConn();
+    runQuery("CREATE (:P {id: 0, v: 3});");
+    EXPECT_FALSE(conn->query("CREATE (:P {id: 1, v: 3});")->isSuccess());
+    closeDB();
+    createDBAndConn();
+    EXPECT_EQ(queryCount("MATCH (p:P) RETURN COUNT(p);"), 3100);
+    EXPECT_EQ(queryCount("MATCH (p:P {id: 0}) WHERE p.v = 3 RETURN COUNT(p);"), 1);
+}

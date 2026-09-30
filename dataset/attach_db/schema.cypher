@@ -1,0 +1,2 @@
+CREATE NODE TABLE Person(name STRING, PRIMARY KEY(name));
+CREATE REL TABLE Knows(FROM Person TO Person);

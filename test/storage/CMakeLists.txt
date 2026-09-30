@@ -1,0 +1,18 @@
+add_lbug_test(node_insertion_deletion_test node_insertion_deletion_test.cpp)
+add_lbug_test(compression_test compression_test.cpp compress_chunk_test.cpp
+    float_nan_constant_test.cpp)
+add_lbug_test(alp_exception_chunk_test alp_exception_chunk_test.cpp)
+add_lbug_test(column_chunk_metadata_test column_chunk_metadata_test.cpp)
+add_lbug_test(local_hash_index_test local_hash_index_test.cpp)
+add_lbug_test(pk_index_checkpoint_test pk_index_checkpoint_test.cpp)
+add_lbug_test(disk_array_collection_test disk_array_collection_test.cpp)
+add_lbug_test(buffer_manager_test buffer_manager_test.cpp)
+add_lbug_test(rel_tests rel_scan_test.cpp rel_delete_test.cpp)
+add_lbug_test(node_update_test node_update_test.cpp)
+add_lbug_test(detach_delete_test detach_delete_test.cpp)
+add_lbug_test(storage_utils_test storage_utils_test.cpp)
+add_lbug_test(string_chunk_scan_test string_chunk_scan_test.cpp)
+add_lbug_test(dictionary_offset_validation_test dictionary_offset_validation_test.cpp)
+add_lbug_test(ice_disk_utils_test ice_disk_utils_test.cpp)
+
+target_include_directories(compression_test PRIVATE ${PROJECT_SOURCE_DIR}/third_party/alp/include)
