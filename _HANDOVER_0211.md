@@ -46,10 +46,9 @@
 | 核心 e2e（`_build_v0211t.bat`） | ✅ BUILD_EXIT=0 | `build_v0211t/src/Release/e2e_test.exe` |
 | 扩展+shell（`_build_fts_vector.bat`） | ✅ BUILD_OK | `build_v0211/src/Release/lbug_shell.exe`；`extension/{algo,fts,vector,timeseries}/build/Release/lib*.lbug_extension` |
 | hyperalgo（`_build_hyperalgo.bat`） | ✅ BUILD_EXIT=0 | `build_hyperalgo/`（libhyperalgo 待拷入 dist） |
-| wasm（`_build_wasm.bat`） | ⏳ **未跑** | `build\wasm`（emsdk 在 C:\emsdk） |
+| wasm（`_build_wasm.bat`） | ✅ NINJA_EXIT=0（需 PYTHONUTF8=1） | `tools/wasm/package/`（bundle.mjs 产物）→ `dist-ladybug-0.21.1/wasm-deploy/` |
 
-**dist-ladybug-0.21.1/** 已装：lbug_shell.exe + libalgo/libfts/libtimeseries/libvector.lbug_extension + fts_dict/ + fts_dict-ipadic/ + README.md/FIXES.md/ladybug-api-reference.md（均为 0.20.2 版本，**版本标注待更新**）+ smoke-0.21.1.js。
-**待装**：libhyperalgo.lbug_extension、wasm-deploy/（wasm 构建后）。
+**dist-ladybug-0.21.1/** 已装齐：lbug_shell.exe + libalgo/libfts/libtimeseries/libvector/libhyperalgo.lbug_extension + fts_dict/ + fts_dict-ipadic/ + wasm-deploy/ + README.md/FIXES.md/ladybug-api-reference.md（**版本标注已更新至 0.21.1**）+ smoke-0.21.1.js（12/12）。已打包 releases/0.21.1/。
 
 ## 五、卡点：MERGE 规划死循环（✅ 已解决 2026-09-30）
 
@@ -81,9 +80,11 @@ tinysnb 数据集即可。`_hang_repro/variants.js|repro_official.js` 是当时�
 1. ~~根因~~ ✅ 已定位：`getVarNames()` 双调用 UB（见第五节）。
 2. ~~修复~~ ✅ 本地 `32cf881`。
 3. ~~上报上游~~ ✅ PR LadybugDB/ladybug#1083（英文礼貌，含复现/根因/测试）。跟进 review 即可。相关 landscape：#1059（COPY 未 checkpoint CSR 扫描越界，open）、#1082（参数化 QUERY_FTS_INDEX 同连接第 2 次 SIGSEGV，0.21.0/0.21.1 都中——会影响 fts 冒烟！）、#1062（#1046 的 Q6 性能回归修复，open）。
-4. **恢复测试**：merge e2e 26/26 ✅；**全量 e2e**（注意：`e2e_test.exe` 必须带 `--gtest_filter="*"` 才会注册用例，裸跑是 0 tests）与 hyperalgo e2e+golden（`hyperalgo-core/tools/ci_hyperalgo.sh`/`golden_check.py`/`p0_acceptance.py`）；`dist-ladybug-0.21.1/` 里 `npm i @ladybugdb/core@0.21.1 && node smoke-0.21.1.js`。
-5. **补完 dist**：拷 `build_hyperalgo/` 的 libhyperalgo.lbug_extension；跑 `_build_wasm.bat` → wasm-deploy/（参考 0.20.2 的 dist/wasm-deploy 结构）；README/FIXES/api-reference 版本标注 0.20.2→0.21.1。
-6. **打包**：`python _pack_0211.py` → releases/0.21.1/ladybug-0.21.1-{windows,ubuntu}.zip。
+4. **恢复测试**：merge e2e 26/26 ✅；**全量 e2e** ≈1500+ 通过、仅 4 失败——3 个 `extension~extension.*`（需联网 `INSTALL HTTPFS/sqlitescanner`，环境问题）+ 1 个 `AnonymousParquetDeleteReload`（**fixture 缺失**：`python scripts/generate-dictionary-bug-fixture.py` 生成 A/B/A_TO_B.parquet 后转绿；需 pyarrow——Python 3.14 记得 `pip install pyarrow -i https://pypi.org/simple`，清华源无轮子）。注意：`e2e_test.exe` 必须带 `--gtest_filter="*"` 才会注册用例，裸跑是 0 tests。dist 冒烟 **12/12**（core@0.21.1，含 hyperalgo 链图金测）；hyperalgo-core 单测 BUILD_OK/ALL TESTS PASSED。
+5. ~~补完 dist~~ ✅：libhyperalgo 已入 dist；wasm 已构建（注意两点：`collect-single-file-header.py` 需 `PYTHONUTF8=1` 否则 GBK 解码炸；ninja 用 VS CMake Ninja）→ `node tools/wasm/bundle.mjs`（先 `npm i`）→ `package/`（worker 25.1MB）→ `wasm-deploy/`（结构同 0.20.2 dist，桥接层文件取自 `ladybug-0.20.2/dist-ladybug-0.20.2/wasm-deploy/`）；README/FIXES/api-reference/wasm-deploy 文档版本均已更新。
+6. ~~打包~~ ✅：`python _pack_0211.py` → releases/0.21.1/ladybug-0.21.1-windows.zip(116.9MB) + -ubuntu.zip(181.8MB)。已抽验 windows zip 含全部更新文件（README/FIXES/api-reference 0.21.1 口径、libhyperalgo、smoke-0.21.1.js、wasm-deploy）。
+
+**终态补充**：hyperalgo 金测 CI **ALL CHECKS PASSED**（3/3；注意 CI 用 `build_hyperalgo/src/Release/e2e_test.exe`，改 core 源后必须重编它；`LOAD_DYNAMIC_EXTENSION hyperalgo` 在 `extension/hyperalgo/build/` 找扩展，MSVC 产物在 `build/Release/`，需拷一份过去）。hyperalgo-core 单测 ALL TESTS PASSED。api-reference.md 已由 subagent 更新（26 处编辑：版本口径/算法数 57/FTS 上游收编说明/存储兼容表等）。
 
 ## 七、环境备忘
 
