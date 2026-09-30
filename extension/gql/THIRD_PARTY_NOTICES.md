@@ -21,6 +21,10 @@ acknowledge their authors.
     `*`→0..∞, `+`→1..∞, `{m,n}`→m..n) and path-mode uniqueness semantics
     (WALK/TRAIL/ACYCLIC), adapted for the single-hop QPPI → var-length mapping
     in `gql_transformer.cpp` `quantifierRange`.
+  - `GraphTypeCanonicalizer.scala` — canonical graph-type form (named node
+    types with property types + named edge types with endpoint pairs, local
+    aliases stripped), adapted for the `GraphTypeSpec` model in
+    `gql_transformer.cpp` (CREATE GRAPH TYPE → node/rel table schema bridge).
   - `front-end/expressions/.../PathMode.scala` — GQL path-mode semantics
     reference (`PathMode.effectivePathMode`).
   - `community/neo4j-gql-status/` — GQL-status error envelope conventions.

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <utility>
@@ -219,11 +220,11 @@ std::string GqlToCypherTransformer::translateLinearCatalog(
     if (prim->dropSchemaStatement()) {
         unsupported("DROP SCHEMA");
     }
-    if (prim->createGraphTypeStatement()) {
-        unsupported("CREATE GRAPH TYPE (typed graphs are not mapped yet)");
+    if (auto *createGraphType = prim->createGraphTypeStatement()) {
+        return translateCreateGraphTypeStatement(createGraphType);
     }
-    if (prim->dropGraphTypeStatement()) {
-        unsupported("DROP GRAPH TYPE (typed graphs are not mapped yet)");
+    if (auto *dropGraphType = prim->dropGraphTypeStatement()) {
+        return translateDropGraphTypeStatement(dropGraphType);
     }
     unsupported("catalog statement");
 }
@@ -1471,6 +1472,532 @@ std::string GqlToCypherTransformer::translateDeleteStatement(
 }
 
 // =============================================================================
+// Graph types (Phase 4): CREATE GRAPH TYPE / typed CREATE GRAPH → node/rel
+// table schema DDL.
+//
+// A GQL graph type is canonicalized to named node types (property types) plus
+// named edge types (endpoint pair + property types), local aliases stripped —
+// the canonical form Neo4j's GraphTypeCanonicalizer normalizes to (adapted from
+// neo4j/neo4j GraphTypeCanonicalizer.scala, Apache-2.0; see
+// THIRD_PARTY_NOTICES.md). LadybugDB has no graph-type catalog object, so
+// CREATE GRAPH TYPE keeps the canonical spec in a process-local registry and
+// "CREATE GRAPH g TYPE t" expands it to CREATE GRAPH + CREATE NODE/REL TABLE
+// DDL inside that graph's schema. The registry lives for the lifetime of the
+// process (documented limitation).
+// =============================================================================
+
+namespace {
+
+struct GraphTypeProp {
+    std::string name;
+    std::string type; // LadybugDB column type text (INT64, STRING, ...)
+};
+
+struct GraphTypeNode {
+    std::string name;
+    std::vector<GraphTypeProp> props;
+};
+
+struct GraphTypeEdge {
+    std::string name;
+    std::string from; // endpoint node type name
+    std::string to;
+    std::vector<GraphTypeProp> props;
+};
+
+struct GraphTypeSpec {
+    std::vector<GraphTypeNode> nodes;
+    std::vector<GraphTypeEdge> edges;
+};
+
+struct FillerInfo {
+    std::vector<std::string> labels;
+    std::string labelName; // single label, "" when the label set is empty
+    std::vector<GraphTypeProp> props;
+};
+
+std::string upperCopy(const std::string &s) {
+    std::string out(s.size(), '\0');
+    std::transform(s.begin(), s.end(), out.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
+    return out;
+}
+
+// Span-based source text (mirrors GqlToCypherTransformer::sourceText, which is
+// a member and not reachable from these file-local helpers).
+std::string ctxText(const std::string &query, antlr4::ParserRuleContext *ctx) {
+    if (!ctx) return "";
+    auto *startToken = ctx->getStart();
+    auto *stopToken = ctx->getStop();
+    if (!startToken || !stopToken) return "";
+    size_t startIdx = startToken->getStartIndex();
+    size_t stopIdx = stopToken->getStopIndex();
+    if (startIdx > query.size() || stopIdx + 1 > query.size() || stopIdx < startIdx) {
+        return "";
+    }
+    return query.substr(startIdx, stopIdx - startIdx + 1);
+}
+
+// Process-local graph-type registry (see section comment). Keyed by upper-cased
+// type name; the declaration spelling is preserved in the stored spec's
+// element names for DDL emission.
+std::map<std::string, GraphTypeSpec> &graphTypeRegistry() {
+    static std::map<std::string, GraphTypeSpec> registry;
+    return registry;
+}
+
+const GraphTypeSpec *findGraphType(const std::string &name) {
+    auto it = graphTypeRegistry().find(upperCopy(name));
+    return it == graphTypeRegistry().end() ? nullptr : &it->second;
+}
+
+// GQL property value type → LadybugDB column type text (ISO GQL predefined
+// types; spellings per GQL.g4 §18.7-18.9). A trailing NOT NULL is accepted and
+// dropped: LadybugDB DDL has no NOT NULL constraint (documented approximation).
+std::string mapGqlPropertyType(const std::string &raw) {
+    std::string text;
+    bool pendingSpace = false;
+    for (char c : raw) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            pendingSpace = !text.empty();
+            continue;
+        }
+        if (pendingSpace) {
+            text += ' ';
+            pendingSpace = false;
+        }
+        text += c;
+    }
+    std::string upper = upperCopy(text);
+
+    auto endsWith = [&](const char *suffix) {
+        size_t n = std::char_traits<char>::length(suffix);
+        return upper.size() > n && upper.compare(upper.size() - n, n, suffix) == 0 &&
+               upper[upper.size() - n - 1] == ' ';
+    };
+    if (endsWith("NOT NULL")) {
+        upper.erase(upper.size() - 8);
+        text.erase(text.size() - 8);
+        while (!upper.empty() && upper.back() == ' ') {
+            upper.pop_back();
+            text.pop_back();
+        }
+    }
+
+    std::string name = upper;
+    std::string args;
+    auto paren = upper.find('(');
+    if (paren != std::string::npos) {
+        name = upper.substr(0, paren);
+        args = text.substr(paren); // digits/commas only — case-free
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+    }
+    // GQL "SIGNED?/UNSIGNED <verbose integer type>" spellings.
+    if (name.rfind("UNSIGNED ", 0) == 0) name = name.substr(9);
+    if (name.rfind("SIGNED ", 0) == 0) name = name.substr(7);
+
+    if (name == "BOOL" || name == "BOOLEAN") return "BOOL";
+    if (name == "STRING" || name == "CHAR" || name == "CHARACTER" || name == "VARCHAR") {
+        return "STRING";
+    }
+    if (name == "BYTES" || name == "BINARY" || name == "VARBINARY") return "BLOB";
+    if (name == "INT8" || name == "INTEGER8") return "INT8";
+    if (name == "INT16" || name == "INTEGER16" || name == "SMALLINT" ||
+        name == "SMALL INTEGER") {
+        return "INT16";
+    }
+    if (name == "INT32" || name == "INTEGER32") return "INT32";
+    if (name == "INT64" || name == "INTEGER64" || name == "BIGINT" ||
+        name == "BIG INTEGER" || name == "INTEGER") {
+        return "INT64";
+    }
+    if (name == "INT128" || name == "INTEGER128") return "INT128";
+    if (name == "INT") return "INT32";
+    if (name == "UINT8") return "UINT8";
+    if (name == "UINT16" || name == "USMALLINT") return "UINT16";
+    if (name == "UINT32" || name == "UINT") return "UINT32";
+    if (name == "UINT64" || name == "UBIGINT") return "UINT64";
+    if (name == "UINT128") return "UINT128";
+    if (name == "FLOAT32" || name == "FLOAT" || name == "REAL") return "FLOAT";
+    if (name == "FLOAT64" || name == "DOUBLE" || name == "DOUBLE PRECISION") return "DOUBLE";
+    if (name == "DECIMAL" || name == "DEC") {
+        if (args.empty()) {
+            GqlToCypherTransformer::unsupported("DECIMAL without precision");
+        }
+        return "DECIMAL" + args;
+    }
+    if (name == "DATE") return "DATE";
+    if (name == "TIMESTAMP" || name == "TIMESTAMP WITHOUT TIME ZONE" ||
+        name == "LOCAL DATETIME") {
+        return "TIMESTAMP";
+    }
+    if (name == "TIMESTAMP WITH TIME ZONE" || name == "ZONED DATETIME") return "TIMESTAMP_TZ";
+    if (name == "DURATION") return "INTERVAL";
+    if (name == "TIME" || name == "TIME WITH TIME ZONE" || name == "TIME WITHOUT TIME ZONE" ||
+        name == "LOCAL TIME" || name == "ZONED TIME") {
+        // GQL has no bare TIME (spelled LOCAL TIME / TIME [WITH|WITHOUT TIME ZONE]
+        // / ZONED TIME); LadybugDB has no TIME type at all.
+        GqlToCypherTransformer::unsupported("TIME type (LadybugDB has no TIME type)");
+    }
+    GqlToCypherTransformer::unsupported("property type " + text);
+}
+
+// Labels of a <label set phrase>: LABEL x | LABELS x [& y]... | :x [& y]...
+std::vector<std::string> labelSetLabels(GQLParser::LabelSetPhraseContext *ctx,
+                                        const std::string &query) {
+    std::vector<std::string> labels;
+    if (!ctx) return labels;
+    if (ctx->labelName()) {
+        labels.push_back(ctxText(query, ctx->labelName()));
+        return labels;
+    }
+    if (auto *spec = ctx->labelSetSpecification()) {
+        for (auto *l : spec->labelName()) {
+            labels.push_back(ctxText(query, l));
+        }
+    }
+    return labels;
+}
+
+std::string singleLabel(const std::vector<std::string> &labels, const std::string &what) {
+    if (labels.empty()) return "";
+    if (labels.size() > 1) {
+        GqlToCypherTransformer::unsupported(
+            "multi-label " + what + " (LadybugDB nodes have a single label)");
+    }
+    return labels[0];
+}
+
+std::vector<GraphTypeProp> parsePropertyTypes(
+    GQLParser::PropertyTypesSpecificationContext *ctx, const std::string &query) {
+    std::vector<GraphTypeProp> props;
+    if (!ctx || !ctx->propertyTypeList()) return props;
+    for (auto *p : ctx->propertyTypeList()->propertyType()) {
+        GraphTypeProp prop;
+        prop.name = ctxText(query, p->propertyName());
+        prop.type = mapGqlPropertyType(ctxText(query, p->propertyValueType()));
+        if (iequals(prop.name, "_gql_id")) {
+            GqlToCypherTransformer::unsupported(
+                "property name '_gql_id' (reserved for the synthetic primary key)");
+        }
+        props.push_back(std::move(prop));
+    }
+    return props;
+}
+
+FillerInfo parseNodeTypeFiller(GQLParser::NodeTypeFillerContext *ctx,
+                               const std::string &query) {
+    FillerInfo info;
+    if (!ctx) return info;
+    GQLParser::NodeTypeKeyLabelSetContext *key = ctx->nodeTypeKeyLabelSet();
+    if (key && key->labelSetPhrase()) {
+        // The key label set names the identifying label of the node type.
+        auto labels = labelSetLabels(key->labelSetPhrase(), query);
+        info.labelName = singleLabel(labels, "key label set");
+        info.labels = labels;
+    }
+    if (auto *content = ctx->nodeTypeImpliedContent()) {
+        if (content->nodeTypeLabelSet()) {
+            auto labels = labelSetLabels(content->nodeTypeLabelSet()->labelSetPhrase(), query);
+            std::string label = singleLabel(labels, "label set");
+            if (!label.empty()) {
+                if (info.labelName.empty()) info.labelName = label;
+                info.labels.insert(info.labels.end(), labels.begin(), labels.end());
+            }
+        }
+        if (content->nodeTypePropertyTypes()) {
+            info.props = parsePropertyTypes(
+                content->nodeTypePropertyTypes()->propertyTypesSpecification(), query);
+        }
+    }
+    return info;
+}
+
+FillerInfo parseEdgeTypeFiller(GQLParser::EdgeTypeFillerContext *ctx,
+                               const std::string &query) {
+    FillerInfo info;
+    if (!ctx) return info;
+    if (auto *key = ctx->edgeTypeKeyLabelSet()) {
+        if (key->labelSetPhrase()) {
+            auto labels = labelSetLabels(key->labelSetPhrase(), query);
+            info.labelName = singleLabel(labels, "key label set");
+            info.labels = labels;
+        }
+    }
+    if (auto *content = ctx->edgeTypeImpliedContent()) {
+        if (content->edgeTypeLabelSet()) {
+            auto labels = labelSetLabels(content->edgeTypeLabelSet()->labelSetPhrase(), query);
+            std::string label = singleLabel(labels, "label set");
+            if (!label.empty()) {
+                if (info.labelName.empty()) info.labelName = label;
+                info.labels.insert(info.labels.end(), labels.begin(), labels.end());
+            }
+        }
+        if (content->edgeTypePropertyTypes()) {
+            info.props = parsePropertyTypes(
+                content->edgeTypePropertyTypes()->propertyTypesSpecification(), query);
+        }
+    }
+    return info;
+}
+
+// Element-type names (node type names, their aliases and labels) all resolve
+// to the canonical node type name — the same alias-stripped form
+// GraphTypeCanonicalizer produces.
+void registerTypeName(std::map<std::string, std::string> &names, const std::string &key,
+                      const std::string &canonical) {
+    if (key.empty()) return;
+    auto [it, inserted] = names.emplace(upperCopy(key), canonical);
+    if (!inserted && !iequals(it->second, canonical)) {
+        GqlToCypherTransformer::unsupported("name '" + key +
+                                            "' used for multiple element types in a graph type");
+    }
+}
+
+std::string resolveTypeName(const std::map<std::string, std::string> &names,
+                            const std::string &key, const std::string &what) {
+    auto it = names.find(upperCopy(key));
+    if (it == names.end()) {
+        GqlToCypherTransformer::unsupported(what + " references undefined node type " + key);
+    }
+    return it->second;
+}
+
+// Endpoint reference in an edge type pattern: (alias) | (label filler) | ().
+std::string resolveEndpointRef(const std::string &query,
+                               const std::map<std::string, std::string> &names,
+                               const std::string &aliasText,
+                               GQLParser::NodeTypeFillerContext *filler,
+                               const std::string &what) {
+    if (!aliasText.empty()) {
+        return resolveTypeName(names, aliasText, what);
+    }
+    if (filler) {
+        FillerInfo info = parseNodeTypeFiller(filler, query);
+        if (!info.labelName.empty()) {
+            return resolveTypeName(names, info.labelName, what);
+        }
+    }
+    GqlToCypherTransformer::unsupported(
+        what + " with an anonymous endpoint reference (name the node type)");
+}
+
+void parseNodeTypeSpecification(GQLParser::NodeTypeSpecificationContext *ctx,
+                                const std::string &query, GraphTypeSpec &spec,
+                                std::map<std::string, std::string> &names) {
+    std::string name;
+    std::string alias;
+    FillerInfo filler;
+
+    if (auto *pattern = ctx->nodeTypePattern()) {
+        if (pattern->nodeTypeName()) name = ctxText(query, pattern->nodeTypeName());
+        if (pattern->localNodeTypeAlias()) {
+            alias = ctxText(query, pattern->localNodeTypeAlias());
+        }
+        filler = parseNodeTypeFiller(pattern->nodeTypeFiller(), query);
+    } else {
+        auto *phrase = ctx->nodeTypePhrase();
+        auto *phraseFiller = phrase->nodeTypePhraseFiller();
+        if (phraseFiller->nodeTypeName()) name = ctxText(query, phraseFiller->nodeTypeName());
+        if (phrase->localNodeTypeAlias()) alias = ctxText(query, phrase->localNodeTypeAlias());
+        filler = parseNodeTypeFiller(phraseFiller->nodeTypeFiller(), query);
+    }
+    if (name.empty()) name = filler.labelName;
+    if (name.empty()) {
+        GqlToCypherTransformer::unsupported("anonymous node type in a graph type");
+    }
+    for (const auto &n : spec.nodes) {
+        if (iequals(n.name, name)) {
+            GqlToCypherTransformer::unsupported("duplicate node type name " + name +
+                                                " in a graph type");
+        }
+    }
+    spec.nodes.push_back({name, std::move(filler.props)});
+    registerTypeName(names, name, name);
+    registerTypeName(names, alias, name);
+    for (const auto &label : filler.labels) {
+        registerTypeName(names, label, name);
+    }
+}
+
+void parseEdgeTypeSpecification(GQLParser::EdgeTypeSpecificationContext *ctx,
+                                const std::string &query, GraphTypeSpec &spec,
+                                const std::map<std::string, std::string> &names) {
+    const std::string what = "edge type";
+    std::string name;
+    std::string from;
+    std::string to;
+    FillerInfo filler;
+
+    auto rejectUndirected = []() {
+        GqlToCypherTransformer::unsupported(
+            "undirected edge type (LadybugDB rel tables are directed)");
+    };
+
+    if (auto *pattern = ctx->edgeTypePattern()) {
+        if (pattern->edgeTypePatternUndirected()) rejectUndirected();
+        if (pattern->edgeKind() &&
+            upperCopy(ctxText(query, pattern->edgeKind())) == "UNDIRECTED") {
+            rejectUndirected();
+        }
+        if (pattern->edgeTypeName()) name = ctxText(query, pattern->edgeTypeName());
+        auto *directed = pattern->edgeTypePatternDirected();
+        if (auto *right = directed->edgeTypePatternPointingRight()) {
+            filler = parseEdgeTypeFiller(right->arcTypePointingRight()->edgeTypeFiller(), query);
+            auto *srcRef = right->sourceNodeTypeReference();
+            auto *dstRef = right->destinationNodeTypeReference();
+            from = resolveEndpointRef(query, names,
+                srcRef->sourceNodeTypeAlias() ? ctxText(query, srcRef->sourceNodeTypeAlias()) : "",
+                srcRef->nodeTypeFiller(), what);
+            to = resolveEndpointRef(query, names,
+                dstRef->destinationNodeTypeAlias()
+                    ? ctxText(query, dstRef->destinationNodeTypeAlias())
+                    : "",
+                dstRef->nodeTypeFiller(), what);
+        } else {
+            // (destination)<-[filler]-(source)
+            auto *left = directed->edgeTypePatternPointingLeft();
+            filler = parseEdgeTypeFiller(left->arcTypePointingLeft()->edgeTypeFiller(), query);
+            auto *dstRef = left->destinationNodeTypeReference();
+            auto *srcRef = left->sourceNodeTypeReference();
+            to = resolveEndpointRef(query, names,
+                dstRef->destinationNodeTypeAlias()
+                    ? ctxText(query, dstRef->destinationNodeTypeAlias())
+                    : "",
+                dstRef->nodeTypeFiller(), what);
+            from = resolveEndpointRef(query, names,
+                srcRef->sourceNodeTypeAlias() ? ctxText(query, srcRef->sourceNodeTypeAlias()) : "",
+                srcRef->nodeTypeFiller(), what);
+        }
+    } else {
+        auto *phrase = ctx->edgeTypePhrase();
+        if (phrase->edgeKind() && upperCopy(ctxText(query, phrase->edgeKind())) == "UNDIRECTED") {
+            rejectUndirected();
+        }
+        auto *phraseFiller = phrase->edgeTypePhraseFiller();
+        if (phraseFiller->edgeTypeName()) name = ctxText(query, phraseFiller->edgeTypeName());
+        filler = parseEdgeTypeFiller(phraseFiller->edgeTypeFiller(), query);
+
+        auto *pair = phrase->endpointPairPhrase()->endpointPair();
+        if (pair->endpointPairUndirected()) rejectUndirected();
+        auto *directed = pair->endpointPairDirected();
+        if (auto *right = directed->endpointPairPointingRight()) {
+            from = resolveTypeName(names, ctxText(query, right->sourceNodeTypeAlias()), what);
+            to = resolveTypeName(names, ctxText(query, right->destinationNodeTypeAlias()), what);
+        } else {
+            // (destination, <- source)
+            auto *left = directed->endpointPairPointingLeft();
+            to = resolveTypeName(names, ctxText(query, left->destinationNodeTypeAlias()), what);
+            from = resolveTypeName(names, ctxText(query, left->sourceNodeTypeAlias()), what);
+        }
+    }
+
+    if (name.empty()) name = filler.labelName;
+    if (name.empty()) {
+        GqlToCypherTransformer::unsupported("edge type without a name in a graph type");
+    }
+    // Same edge type name over several endpoint pairs is one rel table with
+    // multiple FROM/TO connections; its property types must agree.
+    for (const auto &e : spec.edges) {
+        if (!iequals(e.name, name)) continue;
+        if (e.props.size() != filler.props.size()) {
+            GqlToCypherTransformer::unsupported(
+                "edge type " + name + " with conflicting property types across endpoint pairs");
+        }
+        for (size_t i = 0; i < e.props.size(); i++) {
+            if (e.props[i].name != filler.props[i].name || e.props[i].type != filler.props[i].type) {
+                GqlToCypherTransformer::unsupported(
+                    "edge type " + name + " with conflicting property types across endpoint pairs");
+            }
+        }
+    }
+    spec.edges.push_back({name, from, to, std::move(filler.props)});
+}
+
+GraphTypeSpec parseGraphTypeSpecification(
+    GQLParser::NestedGraphTypeSpecificationContext *ctx, const std::string &query) {
+    GraphTypeSpec spec;
+    auto *body = ctx->graphTypeSpecificationBody();
+    if (!body || !body->elementTypeList()) {
+        GqlToCypherTransformer::unsupported("empty graph type specification");
+    }
+    auto elements = body->elementTypeList()->elementTypeSpecification();
+    // Two passes: edge endpoints may forward-reference node types.
+    std::map<std::string, std::string> names;
+    std::vector<GQLParser::EdgeTypeSpecificationContext *> edges;
+    for (auto *el : elements) {
+        if (el->nodeTypeSpecification()) {
+            parseNodeTypeSpecification(el->nodeTypeSpecification(), query, spec, names);
+        } else if (el->edgeTypeSpecification()) {
+            edges.push_back(el->edgeTypeSpecification());
+        } else {
+            GqlToCypherTransformer::unsupported("element type specification");
+        }
+    }
+    for (auto *e : edges) {
+        parseEdgeTypeSpecification(e, query, spec, names);
+    }
+    return spec;
+}
+
+// "CREATE GRAPH g" + per-element "CREATE NODE TABLE"/"CREATE REL TABLE" DDL.
+// Node tables carry a synthetic "_gql_id SERIAL PRIMARY KEY": GQL node types
+// have no key property and LadybugDB node tables require a primary key. The
+// column is auto-filled on INSERT (documented approximation). "_gql_id" is not
+// one of the engine's reserved column names (InternalKeyword::_ID etc.).
+std::string emitGraphTypeDdl(const std::string &graphName, const GraphTypeSpec &spec) {
+    std::string out = "CREATE GRAPH " + graphName + "; USE GRAPH " + graphName;
+    for (const auto &node : spec.nodes) {
+        out += "; CREATE NODE TABLE " + node.name + "(_gql_id SERIAL PRIMARY KEY";
+        for (const auto &p : node.props) {
+            out += ", " + p.name + " " + p.type;
+        }
+        out += ")";
+    }
+    // Group edge types by name (first-seen order): one rel table per edge type,
+    // one FROM/TO connection per endpoint pair.
+    std::vector<std::string> order;
+    std::map<std::string, std::vector<const GraphTypeEdge *>> groups;
+    for (const auto &e : spec.edges) {
+        std::string key = upperCopy(e.name);
+        if (!groups.contains(key)) order.push_back(e.name);
+        groups[key].push_back(&e);
+    }
+    for (const auto &name : order) {
+        const auto &pairs = groups.at(upperCopy(name));
+        out += "; CREATE REL TABLE " + name + "(";
+        for (size_t i = 0; i < pairs.size(); i++) {
+            if (i) out += ", ";
+            out += "FROM " + pairs[i]->from + " TO " + pairs[i]->to;
+        }
+        if (!pairs[0]->props.empty()) {
+            out += ", ";
+            for (size_t i = 0; i < pairs[0]->props.size(); i++) {
+                if (i) out += ", ";
+                out += pairs[0]->props[i].name + " " + pairs[0]->props[i].type;
+            }
+        }
+        out += ")";
+    }
+    return out;
+}
+
+// Graph type reference → type name ("$param" and qualified names rejected).
+std::string graphTypeRefName(const std::string &query,
+                             GQLParser::GraphTypeReferenceContext *ref) {
+    if (!ref || !ref->catalogGraphTypeParentAndName()) {
+        GqlToCypherTransformer::unsupported("graph type reference parameter");
+    }
+    auto *parentAndName = ref->catalogGraphTypeParentAndName();
+    if (parentAndName->catalogObjectParentReference()) {
+        GqlToCypherTransformer::unsupported("qualified graph type name");
+    }
+    return ctxText(query, parentAndName->graphTypeName());
+}
+
+} // namespace
+
+// =============================================================================
 // Catalog / session
 // =============================================================================
 
@@ -1479,18 +2006,127 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
     if (ctx->OR() || ctx->REPLACE()) {
         unsupported("CREATE OR REPLACE GRAPH");
     }
-    // GQL "IF NOT EXISTS" is enforced at rewrite time (LadybugDB Cypher has no
-    // IF NOT EXISTS for CREATE GRAPH).
-    sawIfNotExistsCreateGraph = ctx->IF() && ctx->NOT();
 
     auto parentAndName = ctx->catalogGraphParentAndName();
     if (!parentAndName || !parentAndName->graphName()) {
         unsupported("CREATE GRAPH without a graph name");
     }
     std::string name = sourceText(parentAndName->graphName());
+
+    // The GQL grammar lets a regular identifier be the keyword TYPE, so
+    // "CREATE GRAPH TYPE <t> AS COPY OF <u>" is ambiguous with a graph named
+    // TYPE and ANTLR resolves it to CREATE GRAPH. Detect that mis-parse and
+    // reinterpret it as the CREATE GRAPH TYPE statement it clearly is.
+    if (iequals(name, "TYPE")) {
+        auto *of = ctx->ofGraphType();
+        if (!of || !of->graphTypeReference() || !ctx->graphSource()) {
+            unsupported("CREATE GRAPH named TYPE (quote the name: CREATE GRAPH \"TYPE\" ...)");
+        }
+        std::string typeName = graphTypeRefName(query, of->graphTypeReference());
+        std::string other = sourceText(ctx->graphSource()->graphExpression());
+        const GraphTypeSpec *srcSpec = findGraphType(other);
+        if (!srcSpec) {
+            throw common::RuntimeException{"Graph type " + other + " is not defined"};
+        }
+        auto &registry = graphTypeRegistry();
+        if (registry.contains(upperCopy(typeName))) {
+            throw common::RuntimeException{"Graph type " + typeName + " already exists"};
+        }
+        registry[upperCopy(typeName)] = *srcSpec;
+        return "RETURN 0";
+    }
+
+    if (ctx->graphSource()) {
+        unsupported("CREATE GRAPH ... AS COPY OF <graph>");
+    }
+    // GQL "IF NOT EXISTS" is enforced at rewrite time (LadybugDB Cypher has no
+    // IF NOT EXISTS for CREATE GRAPH).
+    sawIfNotExistsCreateGraph = ctx->IF() && ctx->NOT();
     createGraphName = name;
-    // PROPERTY / ANY / IF NOT EXISTS modifiers don't exist in LadybugDB Cypher.
-    return "CREATE GRAPH " + name;
+
+    // Open ("ANY") property graph → LadybugDB's ANY graph: arbitrary labels and
+    // properties without a schema, the same open-graph semantics.
+    if (ctx->openGraphType()) {
+        return "CREATE GRAPH " + name + " ANY";
+    }
+
+    // Typed graph: expand the graph type into node/rel table DDL.
+    auto *of = ctx->ofGraphType();
+    if (!of) {
+        unsupported("CREATE GRAPH without a graph type clause");
+    }
+    if (of->graphTypeLikeGraph()) {
+        unsupported("CREATE GRAPH ... LIKE <graph>");
+    }
+    GraphTypeSpec spec;
+    if (of->graphTypeReference()) {
+        std::string typeName = graphTypeRefName(query, of->graphTypeReference());
+        const GraphTypeSpec *src = findGraphType(typeName);
+        if (!src) {
+            throw common::RuntimeException{"Graph type " + typeName + " is not defined"};
+        }
+        spec = *src;
+    } else if (of->nestedGraphTypeSpecification()) {
+        spec = parseGraphTypeSpecification(of->nestedGraphTypeSpecification(), query);
+    } else {
+        unsupported("CREATE GRAPH type reference (parameter)");
+    }
+    return emitGraphTypeDdl(name, spec);
+}
+
+std::string GqlToCypherTransformer::translateCreateGraphTypeStatement(
+    GQLParser::CreateGraphTypeStatementContext *ctx) {
+    auto *parentAndName = ctx->catalogGraphTypeParentAndName();
+    if (!parentAndName || !parentAndName->graphTypeName()) {
+        unsupported("CREATE GRAPH TYPE without a type name");
+    }
+    if (parentAndName->catalogObjectParentReference()) {
+        unsupported("qualified graph type name");
+    }
+    std::string name = sourceText(parentAndName->graphTypeName());
+    bool orReplace = ctx->OR() && ctx->REPLACE();
+    bool ifNotExists = ctx->IF() && ctx->NOT();
+
+    auto *src = ctx->graphTypeSource();
+    GraphTypeSpec spec;
+    if (src->nestedGraphTypeSpecification()) {
+        spec = parseGraphTypeSpecification(src->nestedGraphTypeSpecification(), query);
+    } else if (src->copyOfGraphType()) {
+        std::string other = graphTypeRefName(query, src->copyOfGraphType()->graphTypeReference());
+        const GraphTypeSpec *srcSpec = findGraphType(other);
+        if (!srcSpec) {
+            throw common::RuntimeException{"Graph type " + other + " is not defined"};
+        }
+        spec = *srcSpec;
+    } else {
+        unsupported("CREATE GRAPH TYPE ... LIKE <graph>");
+    }
+
+    auto &registry = graphTypeRegistry();
+    std::string key = upperCopy(name);
+    if (registry.contains(key) && !orReplace) {
+        if (ifNotExists) return "RETURN 0";
+        throw common::RuntimeException{"Graph type " + name + " already exists"};
+    }
+    registry[key] = std::move(spec);
+    return "RETURN 0";
+}
+
+std::string GqlToCypherTransformer::translateDropGraphTypeStatement(
+    GQLParser::DropGraphTypeStatementContext *ctx) {
+    auto *parentAndName = ctx->catalogGraphTypeParentAndName();
+    if (!parentAndName || !parentAndName->graphTypeName()) {
+        unsupported("DROP GRAPH TYPE without a type name");
+    }
+    if (parentAndName->catalogObjectParentReference()) {
+        unsupported("qualified graph type name");
+    }
+    std::string name = sourceText(parentAndName->graphTypeName());
+    if (graphTypeRegistry().erase(upperCopy(name)) == 0) {
+        if (ctx->IF()) return "RETURN 0";
+        throw common::RuntimeException{"Graph type " + name + " does not exist"};
+    }
+    return "RETURN 0";
 }
 
 std::string GqlToCypherTransformer::translateDropGraphStatement(

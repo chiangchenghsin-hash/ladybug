@@ -48,7 +48,8 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 | 13.3 | SET | ✓ (approx.) | order-independent assignment emulated via `WITH` snapshot when needed; `SET n:Label` ✗ |
 | 13.4 | REMOVE | △ approx. | property → `SET n.prop = NULL` (fixed-schema approximation of "property removed"); label removal ✗ |
 | 13.5 | DELETE / DETACH DELETE | ✓ | → `DELETE` / `DETACH DELETE` |
-| 12.4–12.5 | CREATE GRAPH / DROP GRAPH | ✓ | → native `CREATE GRAPH` / `DROP GRAPH`; `IF NOT EXISTS` emulated; `CREATE OR REPLACE` ✗ |
+| 12.4–12.5 | CREATE GRAPH / DROP GRAPH | ✓ | `ANY` → native `CREATE GRAPH g ANY` (open graph); typed (`CREATE GRAPH g t` / inline `{ ... }`) → `CREATE GRAPH` + `CREATE NODE/REL TABLE` DDL; `IF NOT EXISTS` emulated; `CREATE OR REPLACE` ✗; `LIKE <graph>` / `AS COPY OF <graph>` ✗ |
+| 12.6–12.7 | CREATE GRAPH TYPE / DROP GRAPH TYPE | ✓ (basic) | graph type registered in extension memory (see notes); `AS { spec }` / `AS COPY OF <type>` ✓; `LIKE <graph>` ✗ |
 | 7 | Session management | △ partial | `SESSION SET GRAPH` → `USE GRAPH`; SCHEMA / TIME ZONE / PARAMETER ✗ |
 
 ### Optional features (selected)
@@ -62,7 +63,7 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 | G100 | ELEMENT_ID | ✓ | → `internal_id()` |
 | G115 | PROPERTY_EXISTS | ✓ | GQL native predicate (parsed as-is) |
 | GA05 | Cast specification | ✓ | `CAST` shared syntax |
-| GC03 | CREATE GRAPH TYPE | ✗ | rejected explicitly (schema bridge planned) |
+| GC03 | CREATE GRAPH TYPE | ✓ (basic) | graph type → node/rel table schema bridge; multi-label node types and `LIKE <graph>` ✗ |
 
 Quantifier bounds follow the GQL/Neo4j semantics — note that GQL `*` is
 **zero**-or-more (`[e*0..]` in Cypher; Cypher's bare `*` is one-or-more), `+`
@@ -119,6 +120,49 @@ see `THIRD_PARTY_NOTICES.md`):
    (`~[e]~`, `<-[e]~`, `~[e]->`, `<->[e]`, ...) collapse to LadybugDB's
    any-direction `-[e]-` (a directed property graph has no undirected edges to
    distinguish).
+10. **Graph types are process-local**: `CREATE GRAPH TYPE` registers the
+    canonicalized type in the extension's memory (LadybugDB has no graph-type
+    catalog object). Types survive across `CALL GQL` calls and database reopen
+    within one process, but not across process restarts — re-run
+    `CREATE GRAPH TYPE` after a restart. Graph *names* and their schemas are
+    durable; only the type registry is not.
+11. **Synthetic primary key**: expanding a graph type adds
+    `_gql_id SERIAL PRIMARY KEY` to every node table (GQL node types have no key
+    property; LadybugDB node tables require one). The column is auto-filled on
+    INSERT and is a regular hidden-ish property; `_gql_id` is rejected as a
+    user property name.
+12. **`NOT NULL` is dropped**: GQL property types may carry `NOT NULL`; LadybugDB
+    DDL has no NOT NULL constraint, so it is accepted and ignored.
+13. **Multi-label node types** (`:A&B`) are rejected — LadybugDB nodes carry a
+    single label (= table name). Undirected edge types are rejected too
+    (LadybugDB rel tables are directed).
+14. **`CREATE GRAPH g t` spelling**: ISO GQL references a graph type by bare
+    name; the commonly generated `CREATE GRAPH g TYPE t` is accepted as a
+    lenient pre-parse normalization (same idea as `FROM GRAPH`).
+    `CREATE GRAPH TYPE t AS COPY OF u` is reinterpreted past a grammar
+    ambiguity (unquoted `TYPE` can be a graph name).
+15. **GQL has no bare `TIME` type** — only `LOCAL TIME`, `ZONED TIME`,
+    `TIME [WITH|WITHOUT TIME ZONE]`. LadybugDB has no TIME type at all; all
+    spellings are rejected.
+
+### Graph type → schema mapping
+
+| GQL graph type | LadybugDB DDL |
+|---|---|
+| `CREATE GRAPH g ANY` | `CREATE GRAPH g ANY` (open graph) |
+| `NODE Person {name STRING, age INT64}` / `(:Person {name STRING, age INT64})` | `CREATE NODE TABLE Person(_gql_id SERIAL PRIMARY KEY, name STRING, age INT64)` |
+| `EDGE KNOWS CONNECTING (Person TO Person) {since INT64}` / `(:Person)-[:KNOWS {since INT64}]->(:Person)` | `CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)` |
+| `CREATE GRAPH TYPE t AS { ... }` | registered in the extension's type registry |
+| `CREATE GRAPH g t` / `CREATE GRAPH g { ... }` | `CREATE GRAPH g; USE GRAPH g;` + the table DDL above |
+
+Property value types map as: `BOOL`/`BOOLEAN`→BOOL, `STRING`/`CHAR`/`VARCHAR`→STRING,
+`BYTES`/`BINARY`/`VARBINARY`→BLOB, `INT8..64`/`INTEGER8..64`/`SMALLINT`/`INT`/
+`BIGINT`/`INTEGER`→INT8..64/INT16/INT32/INT64, `UINT*` likewise, `FLOAT32`/`FLOAT`/
+`REAL`→FLOAT, `FLOAT64`/`DOUBLE`→DOUBLE, `DECIMAL(p,s)`→DECIMAL(p,s), `DATE`→DATE,
+`TIMESTAMP`/`LOCAL DATETIME`→TIMESTAMP, `TIMESTAMP WITH TIME ZONE`/`ZONED DATETIME`
+→TIMESTAMP_TZ, `DURATION(...)`→INTERVAL. Length/precision qualifiers on strings and
+`FLOAT` are ignored. Everything else (TIME forms, lists, structs, ANY, ...) is
+rejected explicitly.
 
 ## Architecture
 

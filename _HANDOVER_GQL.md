@@ -1,4 +1,4 @@
-# GQL ↔ openCypher 衔接补全 — 交接文档（2026-10-01 Phase 3 收工存档）
+# GQL ↔ openCypher 衔接补全 — 交接文档（2026-10-01 Phase 4 收工存档）
 
 > 会话目标：把 `extension/gql` 从"薄翻译+整段透传"补成诚实可用的 ISO GQL 兼容层——
 > **GQL 语句翻译成等价 Cypher 在引擎执行，结果与等价 Cypher 一致**（双跑对照验收）。
@@ -22,6 +22,17 @@
   COLLECT_LIST→COLLECT、PERCENTILE_*→PERCENTILE*、CHAR_LENGTH→SIZE、LOCAL_DATETIME/ZONED_DATETIME→TIMESTAMP、
   PATH_LENGTH→LENGTH、ELEMENT_ID→internal_id；`||`→`+`。UPPER/LOWER/CEILING/LN 等 Ladybug 已内建同名。
 - pattern 安全检查：量词路径/路径模式/搜索前缀/标签表达式 `&!%`→显式 unsupported。
+
+### Phase 4 schema 桥（`gql_transformer.cpp` "Graph types" 段，2026-10-01）
+- `GraphTypeSpec` 规范模型 + 进程内图类型注册表；`CREATE GRAPH TYPE`（嵌套规格/
+  COPY OF/IF NOT EXISTS/OR REPLACE/DROP）与 typed `CREATE GRAPH`（裸类型引用/
+  内联规格）→ `CREATE NODE TABLE`/`CREATE REL TABLE` DDL 展开；`ANY` → 原生 ANY 图。
+- 合成主键 `_gql_id SERIAL PRIMARY KEY`；属性类型映射表（GQL predefined types →
+  Ladybug 类型，NOT NULL 丢弃，TIME 系拒绝）。
+- 预解析宽容：`normalizeCreateGraphTypeRef`（`CREATE GRAPH g TYPE t` → 裸引用）；
+  `CREATE GRAPH TYPE t AS COPY OF u` 文法歧义误解析的检测与重解释。
+- **引擎侧**：`Catalog::setFunctionFallback`（图 catalog 函数查找回退 main——
+  否则 USE GRAPH 后 CALL GQL 报 function 不存在）。
 
 ### 引擎侧两处小修
 - `src/parser/visitor/standalone_call_rewriter.cpp`：**脏 rewrite 真 bug 修复**（`rewriteQuery` 不清空→
@@ -50,10 +61,38 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 67/67 全绿**（2026-10-01 Phase 3 收工）：
-basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 /
-**path 16**（QPPI/量词、WALK·TRAIL·ACYCLIC、ANY·ALL SHORTEST、无向边、IS 标签、内联 WHERE 提升）/
-unsupported 19。
+**✅ 79/79 全绿**（2026-10-01 Phase 4 收工）：
+basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
+**schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
+unsupported 25。
+
+### Phase 4（schema 桥）交付记录（2026-10-01）
+- **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
+  `GraphTypeSpec`（节点类型 = 名字+属性类型；边类型 = 名字+端点对+属性类型，别名剥除——
+  抄 Neo4j `GraphTypeCanonicalizer.scala` 规范形，Apache-2.0 已署名登记）。
+  `CREATE GRAPH g t` / `CREATE GRAPH g { … }` 展开为
+  `CREATE GRAPH g; USE GRAPH g; CREATE NODE TABLE …; CREATE REL TABLE …` 多语句。
+  拼写实证来自 opengql/tck：`(Person :Person {…})`、`(Person)-[:KNOWS]->(Person)`、
+  `CREATE GRAPH mygraph mygraphtype`（**图类型引用是裸名字**，无 TYPE 关键字）。
+- **合成主键 `_gql_id SERIAL PRIMARY KEY`**：GQL 节点类型无键、Ladybug 节点表必须有主键；
+  INSERT 自动填充。`_ID` 是引擎保留字（property lookup 隐藏）故不能用 `_id`。
+- **图类型注册表在扩展进程内存**（Ladybug 无 graph-type catalog 对象）：同进程跨 CALL/跨库
+  存活，进程重启丢失（README 已记）。CREATE/IF NOT EXISTS/OR REPLACE/COPY OF/DROP 语义齐全。
+- **引擎侧修复（重要）**：扩展函数只注册进 main catalog，`USE GRAPH` 到别的图后
+  `CALL GQL` 报 "function GQL does not exist"。修复：`Catalog::setFunctionFallback`——
+  图 catalog 函数查找回退 main catalog（`catalog.h/.cpp` + `database_manager.cpp` 两处挂钩）。
+- **GQL 语言事实（勿重复踩）**：
+  - **属性名 `at` 是关键字**（AT SCHEMA）——`{at INT64}`/`e.at` 都是语法错，测试用 `ts`。
+  - **没有裸 `TIME` 类型**（只有 LOCAL TIME / ZONED TIME / TIME WITH|WITHOUT TIME ZONE）；
+    Ladybug 无 TIME 类型，全部显式拒绝。
+  - **`CREATE GRAPH TYPE t AS COPY OF u` 文法歧义**：TYPE 是 nonReservedWord，会被
+    解析成"名为 TYPE 的图"（ANTLR 取 createGraphStatement 优先）——已在 transformer
+    检测误解析并重解释为 CREATE GRAPH TYPE（否则会静默建出名为 TYPE 的图！）。
+  - ISO 引用图类型用裸名 `CREATE GRAPH g t`；工具常写 `CREATE GRAPH g TYPE t`——
+    预解析宽容归一化删掉 TYPE 一个词（同 FROM GRAPH 套路，`normalizeCreateGraphTypeRef`）。
+  - GQL 图类型支持多标签节点类型（`:A&B`）——Ladybug 单标签，显式拒绝；NOT NULL 静默丢弃。
+- 测试拼写注意：edgeTypePhrase 的 `DIRECTED|UNDIRECTED` **强制**（`REL KNOWS CONNECTING (…)`
+  无 DIRECTED 是语法错；`REL` 也不是合法 edgeSynonym，只用 EDGE/RELATIONSHIP）。
 
 ### Phase 3（路径模式）交付记录（2026-10-01）
 - **量词映射**（bounds 抄 Neo4j `AddElementUniquenessPredicates.getLowerBound/UpperBound`）：
@@ -95,9 +134,9 @@ unsupported 19。
   `PropertyExistsToIsNotNull.scala`、ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。
   Neo4j GQL 合规附录（网页）是语义差异清单的权威参考。
 
-## 五、Phase 4+ 路线（Phase 3 已完成，后续未做）
+## 五、Phase 5+ 路线（Phase 4 已完成，后续未做）
 
-CREATE GRAPH TYPE→NODE/REL TABLE schema 桥（抄 `GraphTypeCanonicalizer`）、
 多跳路径模式的 TRAIL/ACYCLIC 唯一性谓词（抄 `AddElementUniquenessPredicates` 的
 DifferentRelationships/NoneOfNodes 谓词生成——引擎无现成谓子，需评估）、
+图类型注册表持久化（进 catalog/落盘，替代进程内存）、
 opengql/tck 通过率、原生执行/双向互通。

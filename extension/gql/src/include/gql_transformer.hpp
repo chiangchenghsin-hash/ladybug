@@ -122,6 +122,9 @@ private:
     // ---------- catalog / session ----------
     std::string translateCreateGraphStatement(GQLParser::CreateGraphStatementContext *ctx);
     std::string translateDropGraphStatement(GQLParser::DropGraphStatementContext *ctx);
+    std::string translateCreateGraphTypeStatement(
+        GQLParser::CreateGraphTypeStatementContext *ctx);
+    std::string translateDropGraphTypeStatement(GQLParser::DropGraphTypeStatementContext *ctx);
     std::string translateSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *ctx);
 
     // ---------- helpers ----------

@@ -27,14 +27,74 @@ Runtime exception: GQL feature not supported: LET statement
 Runtime exception: GQL feature not supported: CREATE OR REPLACE GRAPH
 
 
--CASE UnsupportedCreateGraphType
+-CASE UnsupportedUndirectedEdgeType
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 ---- ok
 
--STATEMENT CALL GQL("CREATE GRAPH TYPE PersonType AS { NODE Person {name STRING} }")
+-STATEMENT CALL GQL("CREATE GRAPH TYPE utGt1 { (:A), (:A)~[:E]~(:A) }")
 ---- error
-Runtime exception: GQL feature not supported: CREATE GRAPH TYPE (typed graphs are not mapped yet)
+Runtime exception: GQL feature not supported: undirected edge type (LadybugDB rel tables are directed)
+
+
+-CASE UnsupportedMultiLabelNodeType
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH TYPE mlGt1 { (:A&B) }")
+---- error
+Runtime exception: GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
+
+
+-CASE UnsupportedTimePropertyType
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH TYPE ttGt1 { (:A {t LOCAL TIME}) }")
+---- error
+Runtime exception: GQL feature not supported: TIME type (LadybugDB has no TIME type)
+
+
+-CASE UnsupportedAnonymousNodeType
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH TYPE anGt1 { ({x INT64}) }")
+---- error
+Runtime exception: GQL feature not supported: anonymous node type in a graph type
+
+
+-CASE UnsupportedCreateGraphLike
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH gg1 LIKE gg2")
+---- error
+Runtime exception: GQL feature not supported: CREATE GRAPH ... LIKE <graph>
+
+
+-CASE UnsupportedCreateGraphTypeLike
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH TYPE tlGt1 LIKE gg2")
+---- error
+Runtime exception: GQL feature not supported: CREATE GRAPH TYPE ... LIKE <graph>
+
+
+-CASE UnsupportedUndefinedGraphTypeReference
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH ug1 notDefinedGt")
+---- error
+Runtime exception: Graph type notDefinedGt is not defined
 
 
 -CASE UnsupportedSetLabel

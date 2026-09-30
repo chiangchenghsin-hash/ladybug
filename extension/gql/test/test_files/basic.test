@@ -120,7 +120,7 @@ Runtime exception: GQL query string must not be empty
 
 -STATEMENT CALL SHOW_GRAPHS() RETURN *
 ---- 1
-mygraph|STANDARD
+mygraph|ANY
 
 
 -CASE GqlCreateGraphAnyIfNotExists
@@ -136,7 +136,7 @@ mygraph|STANDARD
 
 -STATEMENT CALL SHOW_GRAPHS() RETURN *
 ---- 1
-mygraph2|STANDARD
+mygraph2|ANY
 
 
 -CASE GqlCreatePropertyGraph
@@ -149,7 +149,7 @@ mygraph2|STANDARD
 
 -STATEMENT CALL SHOW_GRAPHS() RETURN *
 ---- 1
-pg|STANDARD
+pg|ANY
 
 
 -CASE GqlDdlFallbackCreateNodeTable
