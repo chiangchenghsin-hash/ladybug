@@ -1,8 +1,6 @@
 #pragma once
 
-#include "gql_ast.hpp"
-
-#include "GQLBaseVisitor.h"
+#include "GQLParser.h"
 
 // ANTLR exposes this implementation detail as a macro.
 #ifdef INVALID_INDEX
@@ -10,24 +8,41 @@
 #endif
 
 #include <string>
-#include <any>
+#include <vector>
 
 namespace lbug {
 namespace gql_extension {
 
-// GQL → Cypher transformer. Uses the ANTLR-generated GQL parser and visitor
-// to walk the parse tree and produce equivalent Cypher query strings.
+// GQL → Cypher translator (the dialect bridge for LadybugDB's Cypher engine).
 //
-// Strategy: For common query shapes (MATCH...RETURN, INSERT), GQL and Cypher
-// syntax are nearly identical. We extract the source text from the parse tree
-// and apply minimal keyword-level transformations (e.g., INSERT → CREATE).
-// For unsupported GQL features (CREATE GRAPH, DROP GRAPH, etc.), we return
-// an informational RETURN message.
-class GqlToCypherTransformer : private GQLBaseVisitor {
+// Design: explicit top-level dispatch over the GQL parse tree — every statement
+// kind is either translated, routed to an equivalent native Cypher statement,
+// or rejected with a clear "GQL feature not supported" error. There is no
+// whole-text pass-through fallback: a GQL statement that we do not understand
+// must never reach the Cypher parser and fail there with a misleading error.
+//
+// Composition model: one CALL GQL statement translates to one (occasionally
+// multi-statement, ';'-separated) Cypher query string, re-parsed by the
+// standalone-call rewrite path in ClientContext. The last Cypher statement is
+// the visible one.
+//
+// Function-name mappings are adapted from Neo4j's Cypher front-end
+// (GQLAliasFunctionNameRewriter, Apache-2.0) and re-targeted to LadybugDB's
+// own function catalog. See THIRD_PARTY_NOTICES.md.
+class GqlToCypherTransformer {
 public:
     explicit GqlToCypherTransformer(const std::string &query_p) : query(query_p) {}
 
-    // Walk the GQL parse tree and return an equivalent Cypher query string.
+    // Absolute source span in `query`, with the replacement text to use when
+    // the span is rewritten (aggregate → alias etc.).
+    struct Span {
+        size_t start = 0;
+        size_t stop = 0; // inclusive
+        std::string replacement;
+    };
+
+    // Walk the GQL parse tree and return the equivalent Cypher query string.
+    // Throws common::RuntimeException on unsupported GQL constructs.
     std::string Transform(GQLParser::GqlProgramContext &root);
 
     // Set when the statement is "CREATE [PROPERTY] GRAPH IF NOT EXISTS <name>".
@@ -36,27 +51,80 @@ public:
     bool sawIfNotExistsCreateGraph = false;
     std::string createGraphName;
 
+    [[noreturn]] static void unsupported(const std::string &feature);
+
 private:
-    const std::string &query;
-    std::string cypherResult;
+    struct SelectItemInfo {
+        antlr4::ParserRuleContext *exprCtx = nullptr;
+        std::string exprText; // expression source text (unmodified)
+        std::string alias;    // user alias, empty when absent
+        size_t exprStart = 0;
+        size_t exprStop = 0;
+        bool hasAggregate = false;
+    };
 
-    // --- Visitor overrides for top-level statements ---
-    std::any visitMatchStatement(GQLParser::MatchStatementContext *ctx) override;
-    std::any visitInsertStatement(GQLParser::InsertStatementContext *ctx) override;
-    std::any visitCreateGraphStatement(GQLParser::CreateGraphStatementContext *ctx) override;
-    std::any visitDropGraphStatement(GQLParser::DropGraphStatementContext *ctx) override;
-    std::any visitSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *ctx) override;
+    // ---------- top-level dispatch ----------
+    std::string translateSessionActivity(GQLParser::SessionActivityContext *ctx);
+    std::string translateTransactionActivity(GQLParser::TransactionActivityContext *ctx);
+    std::string translateProcedureSpecification(GQLParser::ProcedureSpecificationContext *ctx);
+    std::string translateStatementBlock(GQLParser::StatementBlockContext *ctx);
+    std::string translateStatement(GQLParser::StatementContext *ctx);
+    std::string translateCompositeQuery(GQLParser::CompositeQueryStatementContext *ctx);
+    std::string translateLinearCatalog(GQLParser::LinearCatalogModifyingStatementContext *ctx);
+    std::string translateLinearQuery(GQLParser::LinearQueryStatementContext *ctx);
+    std::string translateLinearData(GQLParser::LinearDataModifyingStatementContext *ctx);
 
-    // Default — called for all other statement types.
-    // Extracts the full source text since GQL and Cypher share syntax.
-    std::any visitChildren(antlr4::tree::ParseTree *node) override;
+    // ---------- statement primitives ----------
+    std::string translateQueryPrimitive(GQLParser::PrimitiveQueryStatementContext *ctx);
+    std::string translateDataPrimitive(GQLParser::PrimitiveDataModifyingStatementContext *ctx);
+    std::string translatePrimitiveResult(GQLParser::PrimitiveResultStatementContext *ctx);
 
-    // --- Helpers ---
+    // ---------- query primitives ----------
+    std::string translateSelectStatement(GQLParser::SelectStatementContext *ctx);
+    std::string translateMatchStatement(GQLParser::MatchStatementContext *ctx);
+    std::string translateReturnStatement(GQLParser::ReturnStatementContext *ctx,
+                                         GQLParser::OrderByAndPageStatementContext *page);
+    std::string translateFilterStatement(GQLParser::FilterStatementContext *ctx);
+    std::string translateForStatement(GQLParser::ForStatementContext *ctx);
+    std::string translateOrderByAndPage(GQLParser::OrderByAndPageStatementContext *ctx);
+
+    // ---------- write primitives ----------
+    std::string translateInsertStatement(GQLParser::InsertStatementContext *ctx);
+    std::string translateSetStatement(GQLParser::SetStatementContext *ctx);
+    std::string translateRemoveStatement(GQLParser::RemoveStatementContext *ctx);
+    std::string translateDeleteStatement(GQLParser::DeleteStatementContext *ctx);
+
+    // ---------- catalog / session ----------
+    std::string translateCreateGraphStatement(GQLParser::CreateGraphStatementContext *ctx);
+    std::string translateDropGraphStatement(GQLParser::DropGraphStatementContext *ctx);
+    std::string translateSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *ctx);
+
+    // ---------- helpers ----------
     std::string sourceText(antlr4::ParserRuleContext *ctx) const;
+    std::string renderSelectItems(const std::vector<SelectItemInfo> &items,
+                                  const std::vector<Span> &replacements) const;
 
-    // Case-insensitive word-boundary replacement.
+    // Reject GQL-only pattern features (quantified paths, path modes/search
+    // prefixes, exotic label expressions) with a named error.
+    void checkPatternSupported(antlr4::ParserRuleContext *ctx);
+
+    // Collect absolute spans of every aggregateFunction subtree under ctx.
+    static void collectAggregates(antlr4::tree::ParseTree *node,
+                                  std::vector<Span> &out, int &counter);
+    static bool containsAggregate(antlr4::tree::ParseTree *node);
+
+    // Literal-aware identifier rewrite (GQL function spellings → LadybugDB).
+    static std::string mapIdentifiers(const std::string &text);
+    // Literal-aware operator rewrite (`||` → `+`).
+    static std::string mapOperators(const std::string &text);
+    // Apply expression-level mappings to a source-text fragment.
+    std::string finishExpr(const std::string &text) const;
+
+    static std::string snippet(const std::string &text);
     static std::string replaceWord(const std::string &str, const std::string &from,
                                    const std::string &to);
+
+    const std::string &query;
 };
 
 } // namespace gql_extension

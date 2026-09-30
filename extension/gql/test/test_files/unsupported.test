@@ -1,0 +1,149 @@
+-DATASET CSV empty
+-BUFFER_POOL_SIZE 1024000000
+
+--
+
+# Explicit "GQL feature not supported" errors — unmapped GQL constructs must
+# fail at translation time with a clear message, never with a misleading Cypher
+# error from silent pass-through.
+
+-CASE UnsupportedLetStatement
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("LET x = 1 RETURN x")
+---- error
+Runtime exception: GQL feature not supported: LET statement
+
+
+-CASE UnsupportedCreateOrReplaceGraph
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE OR REPLACE GRAPH g1 ANY")
+---- error
+Runtime exception: GQL feature not supported: CREATE OR REPLACE GRAPH
+
+
+-CASE UnsupportedCreateGraphType
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE GRAPH TYPE PersonType AS {name STRING}")
+---- error
+Runtime exception: GQL feature not supported: CREATE GRAPH TYPE (typed graphs are not mapped yet)
+
+
+-CASE UnsupportedSetLabel
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH (n:T) SET n:Extra")
+---- error
+Runtime exception: GQL feature not supported: SET label (labels are table types in LadybugDB)
+
+
+-CASE UnsupportedRemoveLabel
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH (n:T) REMOVE n:T")
+---- error
+Runtime exception: GQL feature not supported: REMOVE label (labels are table types in LadybugDB)
+
+
+-CASE UnsupportedNextComposition
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("MATCH (n:T) RETURN n NEXT RETURN 1")
+---- error
+Runtime exception: GQL feature not supported: NEXT statement composition
+
+
+-CASE UnsupportedSessionSetSchema
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("SESSION SET SCHEMA main")
+---- error
+Runtime exception: GQL feature not supported: SESSION SET SCHEMA
+
+
+-CASE UnsupportedLabelExpressionOperator
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH (n:(T&B)) RETURN n.v")
+---- error
+Runtime exception: GQL feature not supported: label expression operator (&, !, |, %, parentheses)
+
+
+-CASE UnsupportedQuantifiedPathPattern
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH ((a:T)-[r]->(b:T)){2} RETURN a.v")
+---- error(regex)
+Runtime exception: GQL feature not supported: quantified path pattern .+
+
+
+-CASE UnsupportedSelectDistinctWithAggregation
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("SELECT DISTINCT n.v AS v, count(*) AS c FROM GRAPH main MATCH (n:T)")
+---- error
+Runtime exception: GQL feature not supported: SELECT DISTINCT with aggregation
+
+
+-CASE UnsupportedMergeIsNotGql
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+# MERGE is a Cypher extension, not ISO GQL — a GQL parser rejects it.
+-STATEMENT CALL GQL("MERGE (n:T {v: 1})")
+---- error(regex)
+Runtime exception: Failed to parse GQL query: MERGE .+
+
+
+-CASE UnsupportedTransactionWrappedProgram
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("START TRANSACTION MATCH (n:T) RETURN n COMMIT")
+---- error
+Runtime exception: GQL feature not supported: transaction-wrapped program in a single CALL GQL (issue BEGIN/COMMIT as separate CALL GQL statements)

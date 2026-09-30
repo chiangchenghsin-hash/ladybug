@@ -144,12 +144,13 @@ static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
         throw common::RuntimeException{"Failed to parse GQL query: " + trimmed};
     }
 
-    // Transform GQL AST to Cypher
+    // Transform GQL to Cypher. The transformer reports unmapped GQL constructs
+    // as "GQL feature not supported" — there is no silent pass-through.
     GqlToCypherTransformer transformer(trimmed);
     auto cypherQuery = transformer.Transform(*tree);
 
     if (cypherQuery.empty()) {
-        return std::make_unique<GqlBindData>(trimmed);
+        throw common::RuntimeException{"GQL translation produced no Cypher query: " + trimmed};
     }
 
     return std::make_unique<GqlBindData>(std::move(cypherQuery),

@@ -17,6 +17,18 @@ function(set_extension_properties target_name output_name extension_name)
             PREFIX "lib"
             SUFFIX ".lbug_extension"
     )
+    # Multi-config generators (Visual Studio) append a per-config subdirectory
+    # (e.g. build/Release/) unless the config-specific properties are pinned.
+    # Tests load the extension from extension/<name>/build directly, so pin
+    # every config to the same output directory.
+    foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(${target_name}
+                PROPERTIES
+                ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${PROJECT_SOURCE_DIR}/extension/${extension_name}/build"
+                LIBRARY_OUTPUT_DIRECTORY_${cfg} "${PROJECT_SOURCE_DIR}/extension/${extension_name}/build"
+                RUNTIME_OUTPUT_DIRECTORY_${cfg} "${PROJECT_SOURCE_DIR}/extension/${extension_name}/build"
+        )
+    endforeach()
 endfunction()
 
 function(set_apple_dynamic_lookup target_name)
