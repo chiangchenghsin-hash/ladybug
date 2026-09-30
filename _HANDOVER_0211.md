@@ -1,7 +1,7 @@
 # 交接：LadybugDB fork 升级到 0.21.1（2026-09-30）
 
 > 给下一个会话：工作目录建议切到 `C:\Users\chian\Documents\trae_projects\ladybug-0.21.1`。
-> 本文是唯一交接入口；先读完再动手。
+> 本文是唯一交接入口；先读完再动手。**下次升级前先读 [docs/ladybug-fork-upgrade-pitfalls.md](docs/ladybug-fork-upgrade-pitfalls.md)（本次踩坑手册：UB 诊断法/构建测试打包全阶段坑位）。**
 
 ## 一、任务与结论（TL;DR）
 
