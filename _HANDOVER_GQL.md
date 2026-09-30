@@ -1,4 +1,4 @@
-# GQL ↔ openCypher 衔接补全 — 交接文档（2026-10-01 Phase 4 收工存档）
+# GQL ↔ openCypher 衔接补全 — 交接文档（2026-10-01 Phase 5 收工存档）
 
 > 会话目标：把 `extension/gql` 从"薄翻译+整段透传"补成诚实可用的 ISO GQL 兼容层——
 > **GQL 语句翻译成等价 Cypher 在引擎执行，结果与等价 Cypher 一致**（双跑对照验收）。
@@ -65,6 +65,27 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 unsupported 25。
+**TCK 合规：206 场景 = 151 过 / 44 挂 / 11 跳**（Phase 5，明细 `extension/gql/test/tck/REPORT.md`）。
+
+### Phase 5（合规收尾）交付记录（2026-10-01）
+- **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
+  `extension/gql/test/tck/`（Apache-2.0 + openCypher Neo 署名头保留，NOTICE 已登记）；
+  `run_tck.py` 把 Gherkin 场景转成 .test 用例走 e2e 跑批 + 生成分类通过率报告。
+  - 转换器要点：程序切分（FOR/MATCH/FILTER/WITH 链到结果部前是一条语句；CREATE/INSERT 等另起）、
+    结果表→Value::toString 格式（True/False、%.6f、空串=null）、Scenario Outline 展开、
+    能力标签过滤（@MinNodeLabelsZero 等=实现能力参数，不适用即跳过）。
+  - **异常场景断言"有错误抛出"即可**（GQLSTATUS 码未实现）；副作用只在空图可观察时校验 +nodes/+edges。
+- **TCK 打出的真 bug 修复**（翻译层）：
+  - `FILTER` 原来翻成裸 `WHERE`（跟在 FOR 后是 Cypher 语法错）→ `WITH * WHERE`；
+  - 未别名结果列名没按 GQL 惯例取源文本（引擎会把 `max(x)` 大写成 `MAX(x)`）→ 全部投影出口补 `AS \`源文本\``。
+- **图类型注册表改每库**：原进程级静态表会跨场景泄漏（TCK 场景独立性直接被打破——
+  `CREATE GRAPH TYPE mygraphtype` 第二次报 already exists）。新增引擎
+  `ExtensionManager::setData/getData`（每库 k/v 槽），注册表挂库生命周期，序列化存储。
+- **TCK 失败分类**（44）：rejected-by-layer 19（CREATE/DROP SCHEMA 命名空间、LIKE/AS COPY OF、
+  多标签节点——设计内不支持）、expected-exception-not-raised 15（**Ladybug 布尔运算不校验操作数类型**，
+  `123 AND true` 不报错——语义差已记 README）、parse-error 4（TCK 填充脚本用了 openCypher
+  `CREATE (...)`，GQL 只有 INSERT——TCK 语料自身问题）、result-mismatch 3（异构列表 max/min 类型语义）。
+- 跳过 11：能力标签（MinNodeLabelsZero/MaxNodeLabelsGTOne 等）+ TCK 未随包的 catalog-1 样例数据。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
@@ -134,9 +155,9 @@ unsupported 25。
   `PropertyExistsToIsNotNull.scala`、ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。
   Neo4j GQL 合规附录（网页）是语义差异清单的权威参考。
 
-## 五、Phase 5+ 路线（Phase 4 已完成，后续未做）
+## 五、Phase 6+ 路线（Phase 5 已完成，后续未做）
 
 多跳路径模式的 TRAIL/ACYCLIC 唯一性谓词（抄 `AddElementUniquenessPredicates` 的
 DifferentRelationships/NoneOfNodes 谓词生成——引擎无现成谓子，需评估）、
-图类型注册表持久化（进 catalog/落盘，替代进程内存）、
-opengql/tck 通过率、原生执行/双向互通。
+图类型注册表 WAL 持久化（现为每库内存）、布尔操作数类型校验（TCK 15 例）、
+GQLSTATUS 错误码信封、原生执行/双向互通。

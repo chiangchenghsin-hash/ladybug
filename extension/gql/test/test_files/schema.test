@@ -17,8 +17,7 @@
 # Graph type in the TCK-canonical pattern form: named node type + pattern edge.
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE GRAPH TYPE socialPat1 { (Person :Person {name STRING, age INT64}), (Person)-[:KNOWS {since INT64}]->(Person) }")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH socialPat1_g socialPat1")
 ---- ok
@@ -85,8 +84,7 @@ Alice|2020|Bob
 # Phrase form: named node/edge types with CONNECTING endpoints.
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE GRAPH TYPE socialPhr1 AS { NODE Person {name STRING}, NODE Post {content STRING}, DIRECTED EDGE KNOWS CONNECTING (Person TO Person), DIRECTED EDGE POSTED {ts INT64} CONNECTING (Person TO Post) }")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH socialPhr1_g socialPhr1")
 ---- ok
@@ -195,16 +193,14 @@ A1|B2
 
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE GRAPH TYPE lifeGt1 AS { NODE A {x INT64} }")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH TYPE lifeGt1 AS { NODE B {x INT64} }")
 ---- error
 Runtime exception: Graph type lifeGt1 already exists
 
 -STATEMENT CALL GQL("CREATE GRAPH TYPE IF NOT EXISTS lifeGt1 AS { NODE B {x INT64} }")
----- 1
-0
+---- 0
 
 # IF NOT EXISTS keeps the original definition (node type A).
 -STATEMENT CALL GQL("CREATE GRAPH life_g1 lifeGt1")
@@ -218,8 +214,7 @@ Runtime exception: Graph type lifeGt1 already exists
 # OR REPLACE swaps in the new definition (node type B).
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE OR REPLACE GRAPH TYPE lifeGt1 AS { NODE B {x INT64} }")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH life_g2 lifeGt1")
 ---- ok
@@ -232,8 +227,7 @@ Runtime exception: Graph type lifeGt1 already exists
 # COPY OF duplicates a registered type.
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE GRAPH TYPE lifeGt2 AS COPY OF lifeGt1")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH life_g3 lifeGt2")
 ---- ok
@@ -244,16 +238,14 @@ Runtime exception: Graph type lifeGt1 already exists
 0
 
 -STATEMENT CALL GQL("DROP GRAPH TYPE lifeGt2")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH life_g4 lifeGt2")
 ---- error
 Runtime exception: Graph type lifeGt2 is not defined
 
 -STATEMENT CALL GQL("DROP GRAPH TYPE IF EXISTS lifeGtGone")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("DROP GRAPH TYPE lifeGtGone")
 ---- error
@@ -267,8 +259,7 @@ Runtime exception: Graph type lifeGtGone does not exist
 
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE GRAPH TYPE tdGt1 AS { (P :P {v INT64}), (P)-[:REL]->(P) }")
----- 1
-0
+---- 0
 
 -STATEMENT CALL GQL("CREATE GRAPH td_g tdGt1")
 ---- ok
@@ -344,8 +335,7 @@ Runtime exception: Graph type lifeGtGone does not exist
 
 -CHECK_ORDER
 -STATEMENT CALL GQL("CREATE GRAPH TYPE glGt1 AS { NODE A {x INT64} }")
----- 1
-0
+---- 0
 
 # Tools often write "CREATE GRAPH g TYPE t"; ISO GQL spells it "CREATE GRAPH g t".
 # The pre-parse normalization drops that one keyword (same leniency as FROM GRAPH).

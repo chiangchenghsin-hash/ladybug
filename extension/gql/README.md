@@ -120,12 +120,13 @@ see `THIRD_PARTY_NOTICES.md`):
    (`~[e]~`, `<-[e]~`, `~[e]->`, `<->[e]`, ...) collapse to LadybugDB's
    any-direction `-[e]-` (a directed property graph has no undirected edges to
    distinguish).
-10. **Graph types are process-local**: `CREATE GRAPH TYPE` registers the
-    canonicalized type in the extension's memory (LadybugDB has no graph-type
-    catalog object). Types survive across `CALL GQL` calls and database reopen
-    within one process, but not across process restarts — re-run
-    `CREATE GRAPH TYPE` after a restart. Graph *names* and their schemas are
-    durable; only the type registry is not.
+10. **Graph types are per-database memory**: `CREATE GRAPH TYPE` registers the
+    canonicalized type in extension state attached to the open database
+    (LadybugDB has no graph-type catalog object). Types survive across
+    `CALL GQL` calls and follow catalog semantics within one database (so
+    independent sessions/tests do not leak types into each other), but they are
+    not persisted to WAL — re-run `CREATE GRAPH TYPE` after a restart. Graph
+    *names* and their schemas are durable; only the type registry is not.
 11. **Synthetic primary key**: expanding a graph type adds
     `_gql_id SERIAL PRIMARY KEY` to every node table (GQL node types have no key
     property; LadybugDB node tables require one). The column is auto-filled on
@@ -144,6 +145,15 @@ see `THIRD_PARTY_NOTICES.md`):
 15. **GQL has no bare `TIME` type** — only `LOCAL TIME`, `ZONED TIME`,
     `TIME [WITH|WITHOUT TIME ZONE]`. LadybugDB has no TIME type at all; all
     spellings are rejected.
+16. **Unnamed result columns** are named after their GQL source text
+    (`RETURN max(x)` → column `max(x)`), which is the GQL convention;
+    LadybugDB's engine alone would uppercase function names.
+17. **Boolean operators on non-boolean operands**: GQL requires an error
+    (e.g. `123 AND true`); LadybugDB coerces truthy values and returns a
+    result. Related three-valued-logic edges (`null` propagation) follow
+    LadybugDB's boolean semantics.
+18. **`FILTER` maps to `WITH * WHERE`** so it composes after `FOR`/`MATCH`;
+    result semantics are unchanged.
 
 ### Graph type → schema mapping
 
@@ -175,6 +185,37 @@ GQL text → ANTLR GQL parser (vendored opengql grammar, ISO-derived)
 See `src/gql_transformer.cpp` for the mapping logic and
 `THIRD_PARTY_NOTICES.md` for adapted upstream work.
 
+## Conformance (opengql/tck)
+
+The vendored [opengql/tck](https://github.com/opengql/tck) suite (Apache-2.0,
+see `test/tck/NOTICE.md`) is executed by `test/tck/run_tck.py`, which converts
+the Gherkin scenarios to the same e2e harness the hand-written suite uses.
+
+Measured on 2026-10-01 (untyped-graph mode; `python extension/gql/test/tck/run_tck.py`):
+
+| Feature area | run | passed | failed | skipped |
+|---|---|---|---|---|
+| expressions / boolean | 149 | 126 | 23 | 1 |
+| expressions / aggregation | 16 | 7 | 9 | 0 |
+| catalog / create graph types | 7 | 5 | 2 | 8 |
+| catalog / create graphs | 8 | 4 | 4 | 0 |
+| catalog / create+drop schemas | 15 | 1 | 14 | 2 |
+| debug | 1 | 0 | 1 | 0 |
+| **total** | **195** | **151** | **44** | **11** of 206 |
+
+Failure classes: rejected-by-layer 19 (schema namespaces, `LIKE`/`AS COPY OF`,
+multi-label node types — unsupported by design), expected-exception-not-raised
+15 (LadybugDB coerces non-boolean operands of AND/OR/XOR/NOT instead of
+raising), parse-error 4 (TCK setup uses openCypher `CREATE (...)`, which is not
+GQL — GQL writes `INSERT`), result-mismatch 3 (mixed-type `max`/`min` over
+heterogeneous lists). See `test/tck/REPORT.md` for the per-scenario listing and
+methodology (exception scenarios assert that *an* error is raised — GQLSTATUS
+codes are not emitted yet; side effects are checked only where observable).
+
+Skipped scenarios are either capability-tagged for features LadybugDB does not
+have (`@MinNodeLabelsZero`, `@MaxNodeLabelsGTOne`, ...) or reference sample data
+the TCK repo does not ship.
+
 ## Tests
 
 Dual-run parity tests: every GQL case runs next to the equivalent Cypher and
@@ -185,4 +226,7 @@ asserts the same expected result.
 E2E_TEST_FILES_DIRECTORY=extension ./build/.../e2e_test --gtest_filter="gql~test~test_files~*"
 # or
 make extension-test
+
+# TCK conformance run (writes test/tck/REPORT.md)
+python extension/gql/test/tck/run_tck.py
 ```

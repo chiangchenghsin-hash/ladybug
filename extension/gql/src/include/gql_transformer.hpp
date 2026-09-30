@@ -7,11 +7,40 @@
 #undef INVALID_INDEX
 #endif
 
+#include <map>
 #include <string>
 #include <vector>
 
 namespace lbug {
 namespace gql_extension {
+
+// Canonical graph type model (aliases stripped — the form Neo4j's
+// GraphTypeCanonicalizer normalizes to; see THIRD_PARTY_NOTICES.md).
+struct GraphTypeProp {
+    std::string name;
+    std::string type; // LadybugDB column type text (INT64, STRING, ...)
+};
+
+struct GraphTypeNode {
+    std::string name;
+    std::vector<GraphTypeProp> props;
+};
+
+struct GraphTypeEdge {
+    std::string name;
+    std::string from; // endpoint node type name
+    std::string to;
+    std::vector<GraphTypeProp> props;
+};
+
+struct GraphTypeSpec {
+    std::vector<GraphTypeNode> nodes;
+    std::vector<GraphTypeEdge> edges;
+};
+
+// Graph-type registry keyed by upper-cased type name. Owned by the caller
+// (per-database state — see GqlExtension::load / ExtensionManager::setData).
+using GraphTypeRegistry = std::map<std::string, GraphTypeSpec>;
 
 // GQL → Cypher translator (the dialect bridge for LadybugDB's Cypher engine).
 //
@@ -31,7 +60,8 @@ namespace gql_extension {
 // own function catalog. See THIRD_PARTY_NOTICES.md.
 class GqlToCypherTransformer {
 public:
-    explicit GqlToCypherTransformer(const std::string &query_p) : query(query_p) {}
+    explicit GqlToCypherTransformer(const std::string &query_p, GraphTypeRegistry *registry_p)
+        : query(query_p), registry(registry_p) {}
 
     // Absolute source span in `query`, with the replacement text to use when
     // the span is rewritten (aggregate → alias etc.).
@@ -52,6 +82,16 @@ public:
     std::string createGraphName;
 
     [[noreturn]] static void unsupported(const std::string &feature);
+
+    // (De)serialization of the graph-type registry for per-database storage.
+    static std::string serializeGraphTypes(const GraphTypeRegistry &registry);
+    static GraphTypeRegistry deserializeGraphTypes(const std::string &data);
+
+    // GQL catalog statements produce empty results; LadybugDB DDL returns a
+    // message row, so catalog translations end with this zero-row tail (TCK:
+    // "Then the result should be empty").
+    static constexpr const char *EMPTY_RESULT_CYPHER =
+        "WITH 0 AS _gql_r WHERE false RETURN _gql_r";
 
 private:
     struct SelectItemInfo {
@@ -153,6 +193,7 @@ private:
                                    const std::string &to);
 
     const std::string &query;
+    GraphTypeRegistry *registry;
 };
 
 } // namespace gql_extension

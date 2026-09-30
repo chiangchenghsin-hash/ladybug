@@ -45,6 +45,97 @@ static bool iequals(const std::string &a, const std::string &b) {
 }
 
 // =============================================================================
+// Graph-type registry (de)serialization for per-database storage
+// =============================================================================
+
+std::string GqlToCypherTransformer::serializeGraphTypes(const GraphTypeRegistry &registry) {
+    constexpr char TAB = '\t';
+    constexpr char NL = '\n';
+    std::string out;
+    for (const auto &[key, spec] : registry) {
+        out += "T";
+        out += TAB;
+        out += key;
+        out += NL;
+        for (const auto &n : spec.nodes) {
+            out += "N";
+            out += TAB;
+            out += n.name;
+            for (const auto &p : n.props) {
+                out += TAB;
+                out += p.name + ":" + p.type;
+            }
+            out += NL;
+        }
+        for (const auto &e : spec.edges) {
+            out += "E";
+            out += TAB;
+            out += e.name;
+            out += TAB;
+            out += e.from;
+            out += TAB;
+            out += e.to;
+            for (const auto &p : e.props) {
+                out += TAB;
+                out += p.name + ":" + p.type;
+            }
+            out += NL;
+        }
+    }
+    return out;
+}
+
+GraphTypeRegistry GqlToCypherTransformer::deserializeGraphTypes(const std::string &data) {
+    GraphTypeRegistry registry;
+    GraphTypeSpec *current = nullptr;
+    std::istringstream in(data);
+    std::string line;
+    auto splitTabs = [](const std::string &text) {
+        std::vector<std::string> parts;
+        std::string cur;
+        for (char c : text) {
+            if (c == '	') {
+                parts.push_back(cur);
+                cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+        parts.push_back(cur);
+        return parts;
+    };
+    while (std::getline(in, line)) {
+        auto parts = splitTabs(line);
+        if (parts.empty() || parts[0].empty()) continue;
+        if (parts[0] == "T" && parts.size() >= 2) {
+            current = &registry[parts[1]];
+            *current = GraphTypeSpec{};
+        } else if (parts[0] == "N" && current && parts.size() >= 2) {
+            GraphTypeNode node;
+            node.name = parts[1];
+            for (size_t i = 2; i < parts.size(); i++) {
+                auto colon = parts[i].find(':');
+                if (colon == std::string::npos) continue;
+                node.props.push_back({parts[i].substr(0, colon), parts[i].substr(colon + 1)});
+            }
+            current->nodes.push_back(std::move(node));
+        } else if (parts[0] == "E" && current && parts.size() >= 4) {
+            GraphTypeEdge edge;
+            edge.name = parts[1];
+            edge.from = parts[2];
+            edge.to = parts[3];
+            for (size_t i = 4; i < parts.size(); i++) {
+                auto colon = parts[i].find(':');
+                if (colon == std::string::npos) continue;
+                edge.props.push_back({parts[i].substr(0, colon), parts[i].substr(colon + 1)});
+            }
+            current->edges.push_back(std::move(edge));
+        }
+    }
+    return registry;
+}
+
+// =============================================================================
 // Public entry point
 // =============================================================================
 
@@ -522,7 +613,10 @@ std::string GqlToCypherTransformer::translateFilterStatement(
     if (!cond && ctx->whereClause()) {
         cond = ctx->whereClause()->searchCondition();
     }
-    return "WHERE " + finishExpr(sourceText(cond));
+    // GQL FILTER == Cypher post-filter: "WITH * WHERE ..." keeps every binding
+    // (a bare WHERE only parses as part of MATCH/WITH and broke FILTER after
+    // FOR/UNWIND).
+    return "WITH * WHERE " + finishExpr(sourceText(cond));
 }
 
 std::string GqlToCypherTransformer::translateForStatement(
@@ -1224,10 +1318,24 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     return out.str();
 }
 
+// GQL names an unnamed result item after its source text ("max(x)"); LadybugDB
+// would otherwise name it from the normalized function spelling ("MAX(x)").
+// Backtick-quote the source text as the column alias.
+static std::string quoteColumnAlias(const std::string &name) {
+    std::string out = "`";
+    for (char c : name) {
+        if (c == '`') out += "``";
+        else out += c;
+    }
+    out += "`";
+    return out;
+}
+
 std::string GqlToCypherTransformer::renderSelectItems(
     const std::vector<SelectItemInfo> &items, const std::vector<Span> &replacements) const {
     std::vector<std::string> parts;
     for (auto &item : items) {
+        std::string original = item.exprText;
         std::string text = item.exprText;
         std::vector<Span> reps = replacements;
         std::sort(reps.begin(), reps.end(),
@@ -1238,6 +1346,8 @@ std::string GqlToCypherTransformer::renderSelectItems(
         }
         if (!item.alias.empty()) {
             text += " AS " + item.alias;
+        } else {
+            text += " AS " + quoteColumnAlias(original);
         }
         parts.push_back(text);
     }
@@ -1326,6 +1436,9 @@ std::string GqlToCypherTransformer::translateReturnStatement(
             std::string out = finishExpr(replaceExprs(item.exprText, aggPairs));
             if (!item.alias.empty() && out != item.alias) {
                 out += " AS " + item.alias;
+            } else if (item.alias.empty()) {
+                // GQL names unnamed result items after their source text.
+                out += " AS " + quoteColumnAlias(item.exprText);
             }
             returnItems.push_back(out);
         }
@@ -1351,9 +1464,13 @@ std::string GqlToCypherTransformer::translateReturnStatement(
     } else {
         std::vector<std::string> parts;
         for (auto *item : body->returnItemList()->returnItem()) {
-            std::string text = sourceText(item->aggregatingValueExpression());
+            std::string original = sourceText(item->aggregatingValueExpression());
+            std::string text = original;
             if (item->returnItemAlias()) {
                 text += " AS " + sourceText(item->returnItemAlias()->identifier());
+            } else {
+                // GQL names unnamed result items after their source text.
+                text += " AS " + quoteColumnAlias(original);
             }
             parts.push_back(text);
         }
@@ -1488,28 +1605,6 @@ std::string GqlToCypherTransformer::translateDeleteStatement(
 
 namespace {
 
-struct GraphTypeProp {
-    std::string name;
-    std::string type; // LadybugDB column type text (INT64, STRING, ...)
-};
-
-struct GraphTypeNode {
-    std::string name;
-    std::vector<GraphTypeProp> props;
-};
-
-struct GraphTypeEdge {
-    std::string name;
-    std::string from; // endpoint node type name
-    std::string to;
-    std::vector<GraphTypeProp> props;
-};
-
-struct GraphTypeSpec {
-    std::vector<GraphTypeNode> nodes;
-    std::vector<GraphTypeEdge> edges;
-};
-
 struct FillerInfo {
     std::vector<std::string> labels;
     std::string labelName; // single label, "" when the label set is empty
@@ -1538,17 +1633,11 @@ std::string ctxText(const std::string &query, antlr4::ParserRuleContext *ctx) {
     return query.substr(startIdx, stopIdx - startIdx + 1);
 }
 
-// Process-local graph-type registry (see section comment). Keyed by upper-cased
-// type name; the declaration spelling is preserved in the stored spec's
-// element names for DDL emission.
-std::map<std::string, GraphTypeSpec> &graphTypeRegistry() {
-    static std::map<std::string, GraphTypeSpec> registry;
-    return registry;
-}
-
-const GraphTypeSpec *findGraphType(const std::string &name) {
-    auto it = graphTypeRegistry().find(upperCopy(name));
-    return it == graphTypeRegistry().end() ? nullptr : &it->second;
+// Graph-type registry lookup (the registry is injected per database — see
+// GqlToCypherTransformer's registry member). Keyed by upper-cased type name.
+const GraphTypeSpec *findGraphType(const GraphTypeRegistry &registry, const std::string &name) {
+    auto it = registry.find(upperCopy(name));
+    return it == registry.end() ? nullptr : &it->second;
 }
 
 // GQL property value type → LadybugDB column type text (ISO GQL predefined
@@ -1979,6 +2068,10 @@ std::string emitGraphTypeDdl(const std::string &graphName, const GraphTypeSpec &
         }
         out += ")";
     }
+    // GQL catalog statements return empty results; the DDL above leaves a
+    // message row, so end with a zero-row tail.
+    out += "; ";
+    out += GqlToCypherTransformer::EMPTY_RESULT_CYPHER;
     return out;
 }
 
@@ -2011,6 +2104,9 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
     if (!parentAndName || !parentAndName->graphName()) {
         unsupported("CREATE GRAPH without a graph name");
     }
+    if (parentAndName->catalogObjectParentReference()) {
+        unsupported("qualified graph name (schemas are not mapped)");
+    }
     std::string name = sourceText(parentAndName->graphName());
 
     // The GQL grammar lets a regular identifier be the keyword TYPE, so
@@ -2024,16 +2120,15 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
         }
         std::string typeName = graphTypeRefName(query, of->graphTypeReference());
         std::string other = sourceText(ctx->graphSource()->graphExpression());
-        const GraphTypeSpec *srcSpec = findGraphType(other);
+        const GraphTypeSpec *srcSpec = findGraphType(*registry, other);
         if (!srcSpec) {
             throw common::RuntimeException{"Graph type " + other + " is not defined"};
         }
-        auto &registry = graphTypeRegistry();
-        if (registry.contains(upperCopy(typeName))) {
+        if (registry->contains(upperCopy(typeName))) {
             throw common::RuntimeException{"Graph type " + typeName + " already exists"};
         }
-        registry[upperCopy(typeName)] = *srcSpec;
-        return "RETURN 0";
+        (*registry)[upperCopy(typeName)] = *srcSpec;
+        return EMPTY_RESULT_CYPHER;
     }
 
     if (ctx->graphSource()) {
@@ -2047,7 +2142,7 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
     // Open ("ANY") property graph → LadybugDB's ANY graph: arbitrary labels and
     // properties without a schema, the same open-graph semantics.
     if (ctx->openGraphType()) {
-        return "CREATE GRAPH " + name + " ANY";
+        return "CREATE GRAPH " + name + " ANY; " + std::string(EMPTY_RESULT_CYPHER);
     }
 
     // Typed graph: expand the graph type into node/rel table DDL.
@@ -2061,7 +2156,7 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
     GraphTypeSpec spec;
     if (of->graphTypeReference()) {
         std::string typeName = graphTypeRefName(query, of->graphTypeReference());
-        const GraphTypeSpec *src = findGraphType(typeName);
+        const GraphTypeSpec *src = findGraphType(*registry, typeName);
         if (!src) {
             throw common::RuntimeException{"Graph type " + typeName + " is not defined"};
         }
@@ -2093,7 +2188,7 @@ std::string GqlToCypherTransformer::translateCreateGraphTypeStatement(
         spec = parseGraphTypeSpecification(src->nestedGraphTypeSpecification(), query);
     } else if (src->copyOfGraphType()) {
         std::string other = graphTypeRefName(query, src->copyOfGraphType()->graphTypeReference());
-        const GraphTypeSpec *srcSpec = findGraphType(other);
+        const GraphTypeSpec *srcSpec = findGraphType(*registry, other);
         if (!srcSpec) {
             throw common::RuntimeException{"Graph type " + other + " is not defined"};
         }
@@ -2102,14 +2197,13 @@ std::string GqlToCypherTransformer::translateCreateGraphTypeStatement(
         unsupported("CREATE GRAPH TYPE ... LIKE <graph>");
     }
 
-    auto &registry = graphTypeRegistry();
     std::string key = upperCopy(name);
-    if (registry.contains(key) && !orReplace) {
-        if (ifNotExists) return "RETURN 0";
+    if (registry->contains(key) && !orReplace) {
+        if (ifNotExists) return EMPTY_RESULT_CYPHER;
         throw common::RuntimeException{"Graph type " + name + " already exists"};
     }
-    registry[key] = std::move(spec);
-    return "RETURN 0";
+    (*registry)[key] = std::move(spec);
+    return EMPTY_RESULT_CYPHER;
 }
 
 std::string GqlToCypherTransformer::translateDropGraphTypeStatement(
@@ -2122,11 +2216,11 @@ std::string GqlToCypherTransformer::translateDropGraphTypeStatement(
         unsupported("qualified graph type name");
     }
     std::string name = sourceText(parentAndName->graphTypeName());
-    if (graphTypeRegistry().erase(upperCopy(name)) == 0) {
-        if (ctx->IF()) return "RETURN 0";
+    if (registry->erase(upperCopy(name)) == 0) {
+        if (ctx->IF()) return EMPTY_RESULT_CYPHER;
         throw common::RuntimeException{"Graph type " + name + " does not exist"};
     }
-    return "RETURN 0";
+    return EMPTY_RESULT_CYPHER;
 }
 
 std::string GqlToCypherTransformer::translateDropGraphStatement(
@@ -2135,12 +2229,15 @@ std::string GqlToCypherTransformer::translateDropGraphStatement(
     if (!parentAndName || !parentAndName->graphName()) {
         unsupported("DROP GRAPH without a graph name");
     }
+    if (parentAndName->catalogObjectParentReference()) {
+        unsupported("qualified graph name (schemas are not mapped)");
+    }
     std::string text = "DROP GRAPH ";
     if (ctx->IF()) {
         text += "IF EXISTS ";
     }
     text += sourceText(parentAndName->graphName());
-    return text;
+    return text + "; " + EMPTY_RESULT_CYPHER;
 }
 
 std::string GqlToCypherTransformer::translateSessionSetGraphClause(

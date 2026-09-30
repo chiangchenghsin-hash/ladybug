@@ -7,6 +7,7 @@
 
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/graph_catalog_entry.h"
+#include "extension/extension_manager.h"
 #include "common/exception/runtime.h"
 #include "function/table/bind_data.h"
 #include "function/table/bind_input.h"
@@ -82,7 +83,7 @@ static std::string rewriteFunc(ClientContext &context,
         auto graphEntries = catalog->getGraphEntries(transaction);
         for (auto *entry : graphEntries) {
             if (entry->getName() == gqlData->graphName) {
-                return "RETURN 0"; // graph already exists — nothing to do
+                return GqlToCypherTransformer::EMPTY_RESULT_CYPHER; // graph already exists
             }
         }
     }
@@ -268,7 +269,6 @@ static std::string normalizeCreateGraphTypeRef(const std::string &text) {
 
 static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
                                                     const TableFuncBindInput *input) {
-    (void)context; // Not needed during bind — the Cypher query is executed later
 
     // Get the GQL query string from the first parameter
     auto gqlQuery = input->getLiteralVal<std::string>(0);
@@ -319,8 +319,14 @@ static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
 
     // Transform GQL to Cypher. The transformer reports unmapped GQL constructs
     // as "GQL feature not supported" — there is no silent pass-through.
-    GqlToCypherTransformer transformer(trimmed);
+    // The graph-type registry lives in per-database extension state so that
+    // catalog semantics (CREATE GRAPH TYPE ...) stay scoped to one database.
+    auto *extMgr = extension::ExtensionManager::Get(*context);
+    GraphTypeRegistry registry = GqlToCypherTransformer::deserializeGraphTypes(
+        extMgr->getData("gql.graphTypes"));
+    GqlToCypherTransformer transformer(trimmed, &registry);
     auto cypherQuery = transformer.Transform(*tree);
+    extMgr->setData("gql.graphTypes", GqlToCypherTransformer::serializeGraphTypes(registry));
 
     if (cypherQuery.empty()) {
         throw common::RuntimeException{"GQL translation produced no Cypher query: " + trimmed};

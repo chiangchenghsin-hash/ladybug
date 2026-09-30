@@ -43,6 +43,16 @@ https://www.apache.org/licenses/LICENSE-2.0
   ISO GQL, generated from the ISO BNF artifacts via gramgen and hand-tuned).
 - License: Apache License 2.0
 
+## opengql/tck (GQL Technology Compatibility Kit)
+
+- Source: https://github.com/opengql/tck
+- Usage: `extension/gql/test/tck/{features,data,NOTICE.md,LICENSE}`
+  (vendored Gherkin conformance scenarios and sample data) and the
+  `run_tck.py` runner built around them. Scenarios derived from the
+  openCypher TCK retain their Neo4j attribution headers; see the vendored
+  `NOTICE.md`.
+- License: Apache License 2.0
+
 ## ISO/IEC 39075:2024 GQL standard
 
 - The GQL language itself is defined by ISO/IEC 39075:2024. The machine-readable
