@@ -1,4 +1,4 @@
-# GQL ↔ openCypher 衔接补全 — 交接文档（2026-09-30 收工存档）
+# GQL ↔ openCypher 衔接补全 — 交接文档（2026-10-01 Phase 3 收工存档）
 
 > 会话目标：把 `extension/gql` 从"薄翻译+整段透传"补成诚实可用的 ISO GQL 兼容层——
 > **GQL 语句翻译成等价 Cypher 在引擎执行，结果与等价 Cypher 一致**（双跑对照验收）。
@@ -50,21 +50,30 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 44/44 全绿**（2026-09-30 第二班收工）：
-basic 11（回归）/ select 6（FROM GRAPH 归一化、CURRENT_GRAPH、DISTINCT、SKIP/LIMIT、`||`）/
-groupby 4（隐式+显式分组、HAVING）/ write 7（INSERT 字面量安全、DELETE、DETACH、SET 快照、REMOVE）/
-routing 4 / unsupported 13。
+**✅ 67/67 全绿**（2026-10-01 Phase 3 收工）：
+basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 /
+**path 16**（QPPI/量词、WALK·TRAIL·ACYCLIC、ANY·ALL SHORTEST、无向边、IS 标签、内联 WHERE 提升）/
+unsupported 19。
 
-本轮修复记录（备查）：
-1. **SELECT parse error**：ISO GQL 的 FROM 后**无 GRAPH 关键字**（`FROM <图名> MATCH`，
-   LDBC 示例 `FROM friends MATCH …`）。已在 bindFunc 加字面量安全的 `FROM GRAPH x`→`FROM x`
-   宽容归一化（`normalizeFromGraphClause`），测试覆盖两种拼写。
-2. **ORDER BY/HAVING 的表达式改写全部改为文本级替换**（`replaceExprs`：字面量安全+边界感知+最长优先）——
-   原 span 偏移数学对"新出现位置"的表达式无效。DISTINCT 与聚合同样只认投影别名。
-3. **聚合投影按文本去重**：同一聚合出现在 SELECT+HAVING 只投影一次（修
-   `Multiple result columns with the same name c`）。
-4. 测试修正：SetSnapshot 双跑分行（v:1 GQL / v:2 Cypher）、布尔渲染 `True`、
-   `CREATE GRAPH TYPE … AS { NODE Person {name STRING} }`、`SESSION SET SCHEMA /main`。
+### Phase 3（路径模式）交付记录（2026-10-01）
+- **量词映射**（bounds 抄 Neo4j `AddElementUniquenessPredicates.getLowerBound/UpperBound`）：
+  GQL `*`→`[e*0..]`（**0 起跳**，裸 Cypher `*` 是 1..！）、`+`→`*1..`、`{n}`→`*n`、`{m,n}`→`*m..n`、
+  `{m,}`→`*m..`、`?`→`*0..1`。单边量词与单跳 QPPI `( ()-[]->() ){m,n}` 都落到递归关系槽。
+- **路径模式/搜索前缀** → `iC_RecursiveType`：TRAIL/ACYCLIC 直落；WALK=引擎默认（省略）；
+  `ANY SHORTEST`→`*SHORTEST`、`ALL SHORTEST`→`*ALL SHORTEST`（SHORTEST 自动是 trail/acyclic，
+  附带 mode 丢弃）。SIMPLE、`SHORTEST k`、`SHORTEST GROUP(S)`、`ALL/ANY PATHS`、多跳+模式 → 显式报错。
+- **模式翻译是结构化的**（`translatePathTerm` flatten→节点/边事件→链发射），不再是整段透传；
+  无向/混向边 `~[e]~` 等折叠为 `-[e]-`；`IS Label`→`:Label`；元素内联 WHERE 提升到语句 WHERE；
+  MATCH/SELECT 的 WHERE 合并为单条（修双 WHERE 拼接隐患）。
+- **引擎语义实证**（探针验证，勿重复实验）：Ladybug MATCH **允许边重复**（≈GQL REPEATABLE
+  ELEMENTS/WALK，故 DIFFERENT EDGES 拒绝、REPEATABLE 丢弃）；`*0..` 下界 0 可用（0 跳行 start=end）；
+  `*TRAIL` = 边互异（与 GQL 一致）；**`*ACYCLIC` = 仅中间节点互异**（首尾不受限，闭合行走得通——
+  与 GQL 全节点互异有差，README 已记近似）；SHORTEST/ALL_SHORTEST 要求 lower=1。
+- **GQL 语言事实**：ISO GQL **无 `LENGTH()`**（只有 PATH_LENGTH/CHAR_LENGTH 等 lengthExpression），
+  `length(e)` 在 GQL 层就是语法错；GQL 也**无裸 `SHORTEST` 前缀**（只有 ANY/ALL SHORTEST 或 counted）。
+- 引擎侧小改进：`gql_function.cpp` 解析错误现在带 ANTLR 明细（`Failed to parse ... (line 1:8 ...)`）。
+- 参考代码新增 `_tmp_gql_ref/astRewriters/{AddPathPredicates,AddElementUniquenessPredicates,
+  AddVarLengthBoundPredicates}.scala` + `ir/QuantifiedPathPatternConverters.scala`（未入库）。
 
 ## 四、关键事实备忘（调研结论，勿重复调研）
 
@@ -86,7 +95,9 @@ routing 4 / unsupported 13。
   `PropertyExistsToIsNotNull.scala`、ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。
   Neo4j GQL 合规附录（网页）是语义差异清单的权威参考。
 
-## 五、Phase 3+ 路线（本期不做）
+## 五、Phase 4+ 路线（Phase 3 已完成，后续未做）
 
-路径模式（QPPI/路径模式/搜索前缀映射，抄 Neo4j QuantifiedPathPattern* rewriter 套路）、
-CREATE GRAPH TYPE→NODE/REL TABLE schema 桥、opengql/tck 通过率、原生执行/双向互通。
+CREATE GRAPH TYPE→NODE/REL TABLE schema 桥（抄 `GraphTypeCanonicalizer`）、
+多跳路径模式的 TRAIL/ACYCLIC 唯一性谓词（抄 `AddElementUniquenessPredicates` 的
+DifferentRelationships/NoneOfNodes 谓词生成——引擎无现成谓子，需评估）、
+opengql/tck 通过率、原生执行/双向互通。

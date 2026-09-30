@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <regex>
 #include <sstream>
 #include <utility>
@@ -487,8 +488,31 @@ std::string GqlToCypherTransformer::translatePrimitiveResult(
 
 std::string GqlToCypherTransformer::translateMatchStatement(
     GQLParser::MatchStatementContext *ctx) {
-    checkPatternSupported(ctx);
-    return finishExpr(sourceText(ctx));
+    std::vector<std::string> wheres;
+    std::string out = translateMatchStatement(ctx, wheres);
+    for (size_t i = 0; i < wheres.size(); ++i) {
+        out += (i ? " AND " : " WHERE ") + wheres[i];
+    }
+    return out;
+}
+
+std::string GqlToCypherTransformer::translateMatchStatement(
+    GQLParser::MatchStatementContext *ctx, std::vector<std::string> &wheres) {
+    std::string keyword = "MATCH ";
+    GQLParser::SimpleMatchStatementContext *simple = ctx->simpleMatchStatement();
+    if (!simple) {
+        auto *operand = ctx->optionalMatchStatement()->optionalOperand();
+        if (!operand->simpleMatchStatement()) {
+            unsupported("OPTIONAL MATCH block form");
+        }
+        keyword = "OPTIONAL MATCH ";
+        simple = operand->simpleMatchStatement();
+    }
+    auto *bindingTable = simple->graphPatternBindingTable();
+    if (bindingTable->graphPatternYieldClause()) {
+        unsupported("MATCH ... YIELD");
+    }
+    return keyword + translateGraphPattern(bindingTable->graphPattern(), wheres);
 }
 
 std::string GqlToCypherTransformer::translateFilterStatement(
@@ -518,6 +542,462 @@ std::string GqlToCypherTransformer::translateOrderByAndPage(
     // LadybugDB Cypher spells paging SKIP/LIMIT; GQL allows OFFSET as a synonym.
     text = replaceWord(text, "OFFSET", "SKIP");
     return text;
+}
+
+// =============================================================================
+// Graph patterns (Phase 3): GQL path patterns → LadybugDB Cypher patterns.
+//
+// Quantified single-edge patterns (edge `{m,n}` / single-hop QPPI) map onto the
+// engine's recursive relationship form `[e*<TYPE> <range>]` (iC_RecursiveDetail
+// in Cypher.g4). Path mode / search prefixes map onto iC_RecursiveType.
+// Quantifier bounds follow Neo4j's QuantifiedPathPattern semantics
+// (AddElementUniquenessPredicates.getLowerBound/getUpperBound, Apache-2.0):
+//   * → 0..∞,  + → 1..∞,  {n} → n..n,  {m,n} → m..n,  {m,} → m..∞,  {,n} → 0..n,
+//   ? → 0..1.
+// Verified engine facts (see path.test): lower bound 0 is supported (0-hop rows
+// bind start=end with an empty edge list), bare `*` in Cypher means 1..∞ so GQL
+// `*` must emit an explicit `0..`, and MATCH allows edge repetition (≈ GQL
+// REPEATABLE ELEMENTS / WALK).
+// =============================================================================
+
+namespace {
+
+// GQL quantifier → Cypher oC_RangeLiteral text (placed after '*').
+std::string quantifierRange(GQLParser::GraphPatternQuantifierContext *q) {
+    if (q->ASTERISK()) return "0..";
+    if (q->PLUS_SIGN()) return "1..";
+    if (auto *fixed = q->fixedQuantifier()) {
+        return fixed->unsignedInteger()->getText();
+    }
+    auto *gen = q->generalQuantifier();
+    std::string lo = gen->lowerBound() ? gen->lowerBound()->getText() : "0";
+    if (!gen->upperBound()) {
+        return lo + "..";
+    }
+    return lo + ".." + gen->upperBound()->getText();
+}
+
+enum class EdgeDir { Left, Right, Both };
+
+struct EdgeShape {
+    EdgeDir dir = EdgeDir::Both;
+    GQLParser::ElementPatternFillerContext *filler = nullptr;
+};
+
+EdgeShape edgeShape(GQLParser::EdgePatternContext *e) {
+    EdgeShape s;
+    if (auto *full = e->fullEdgePattern()) {
+        if (auto *x = full->fullEdgePointingLeft()) {
+            s.dir = EdgeDir::Left;
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgePointingRight()) {
+            s.dir = EdgeDir::Right;
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeUndirected()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeLeftOrUndirected()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeUndirectedOrRight()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeLeftOrRight()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeAnyDirection()) {
+            s.filler = x->elementPatternFiller();
+        }
+        return s;
+    }
+    // Abbreviated forms carry no filler. GQL's undirected / mixed-direction
+    // spellings collapse to LadybugDB's ANY-direction `--` (a directed property
+    // graph has no undirected edges to distinguish).
+    auto *ab = e->abbreviatedEdgePattern();
+    if (ab->LEFT_ARROW()) {
+        s.dir = EdgeDir::Left;
+    }
+    return s;
+}
+
+// A pattern factor ready to be flattened into node/edge events.
+struct FlatEvent {
+    bool isEdge = false;
+    std::string nodeBinding;                   // for node events (may be "")
+    GQLParser::EdgePatternContext *edge = nullptr; // for edge events
+    std::string range;                         // edge: "" = fixed single hop
+    std::string innerStart, innerEnd;          // paren unit end nodes ("" = none)
+};
+
+} // namespace
+
+std::string GqlToCypherTransformer::translatePathPatternPrefix(
+    GQLParser::PathPatternPrefixContext *ctx) {
+    if (auto *mode = ctx->pathModePrefix()) {
+        auto *m = mode->pathMode();
+        if (m->SIMPLE()) {
+            unsupported("SIMPLE path mode (LadybugDB has WALK/TRAIL/ACYCLIC only)");
+        }
+        // WALK is LadybugDB's default recursive semantic: emit no type.
+        if (m->TRAIL()) return "TRAIL";
+        if (m->ACYCLIC()) return "ACYCLIC";
+        return "";
+    }
+    auto *search = ctx->pathSearchPrefix();
+    if (auto *all = search->allPathSearch()) {
+        (void)all;
+        unsupported("ALL PATHS search prefix");
+    }
+    if (auto *any = search->anyPathSearch()) {
+        if (any->numberOfPaths()) {
+            unsupported("ANY <k> PATHS search prefix");
+        }
+        unsupported("ANY PATHS search prefix");
+    }
+    auto *sh = search->shortestPathSearch();
+    if (sh->countedShortestPathSearch() || sh->countedShortestGroupSearch()) {
+        unsupported("SHORTEST <k>/GROUP(S) search prefix");
+    }
+    // ANY SHORTEST -> one shortest path per binding (= Cypher SHORTEST);
+    // ALL SHORTEST -> all shortest paths. An accompanying path mode is
+    // redundant: any shortest path is automatically a trail and acyclic.
+    return sh->allShortestPathSearch() ? "ALL SHORTEST" : "SHORTEST";
+}
+
+void GqlToCypherTransformer::translateFiller(
+    GQLParser::ElementPatternFillerContext *ctx, std::vector<std::string> &wheres,
+    std::string &head, std::string &props) {
+    head.clear();
+    props.clear();
+    if (!ctx) {
+        return;
+    }
+    checkPatternSupported(ctx); // label-expression operators etc.
+    if (ctx->elementVariableDeclaration()) {
+        head += sourceText(ctx->elementVariableDeclaration());
+    }
+    if (auto *lab = ctx->isLabelExpression()) {
+        // Simple labels only (operators rejected above). Normalise both the
+        // `:Label` and `IS Label` spellings to Cypher's `:Label`.
+        head += ":" + sourceText(lab->labelExpression());
+    }
+    if (auto *pred = ctx->elementPatternPredicate()) {
+        if (auto *p = pred->elementPropertySpecification()) {
+            props += sourceText(p);
+        } else if (auto *w = pred->elementPatternWhereClause()) {
+            checkPatternSupported(w->searchCondition());
+            wheres.push_back(finishExpr(sourceText(w->searchCondition())));
+        }
+    }
+}
+
+std::string GqlToCypherTransformer::translateNodePattern(
+    GQLParser::NodePatternContext *ctx, std::vector<std::string> &wheres) {
+    std::string head, props;
+    translateFiller(ctx->elementPatternFiller(), wheres, head, props);
+    return "(" + head + props + ")";
+}
+
+std::string GqlToCypherTransformer::translateEdgePattern(
+    GQLParser::EdgePatternContext *ctx, const std::string &recDetail) {
+    EdgeShape shape = edgeShape(ctx);
+    std::string head, props;
+    if (shape.filler) {
+        std::vector<std::string> unused;
+        translateFiller(shape.filler, unused, head, props);
+        // An inline WHERE on an edge filler cannot be hoisted from here (this
+        // helper has no where sink); reject rather than drop it.
+        if (shape.filler->elementPatternPredicate() &&
+            shape.filler->elementPatternPredicate()->elementPatternWhereClause()) {
+            unsupported("inline WHERE on an edge pattern");
+        }
+    }
+    std::string left, right;
+    switch (shape.dir) {
+    case EdgeDir::Left:
+        left = "<-[";
+        right = "]-";
+        break;
+    case EdgeDir::Right:
+        left = "-[";
+        right = "]->";
+        break;
+    case EdgeDir::Both:
+        left = "-[";
+        right = "]-";
+        break;
+    }
+    if (recDetail.empty()) {
+        // Plain fixed-hop edge. Keep abbreviated forms abbreviated.
+        if (!shape.filler && ctx->abbreviatedEdgePattern()) {
+            switch (shape.dir) {
+            case EdgeDir::Left:
+                return "<--";
+            case EdgeDir::Right:
+                return "-->";
+            default:
+                return "--";
+            }
+        }
+        return left + head + props + right;
+    }
+    // Recursive (var-length) form: iC_RecursiveDetail sits between the type
+    // and the property map — [e:Knows*TRAIL 1..3 {since: 2020}].
+    return left + head + recDetail + props + right;
+}
+
+std::string GqlToCypherTransformer::translatePathPattern(
+    GQLParser::PathPatternContext *ctx, std::vector<std::string> &wheres) {
+    std::string recType;
+    if (auto *pre = ctx->pathPatternPrefix()) {
+        recType = translatePathPatternPrefix(pre);
+    }
+    auto *expr = ctx->pathPatternExpression();
+    auto *term = dynamic_cast<GQLParser::PpePathTermContext *>(expr);
+    if (!term) {
+        unsupported("path pattern union/multiset alternation");
+    }
+    std::string body = translatePathTerm(term->pathTerm(), wheres, recType);
+    if (ctx->pathVariableDeclaration()) {
+        return sourceText(ctx->pathVariableDeclaration()) + " " + body;
+    }
+    return body;
+}
+
+std::string GqlToCypherTransformer::translatePathTerm(
+    GQLParser::PathTermContext *ctx, std::vector<std::string> &wheres,
+    const std::string &recType) {
+    // Flatten factors into node-binding / edge events. Juxtaposition in GQL
+    // identifies the end of one factor with the start of the next, so adjacent
+    // node bindings merge into one node and an edge always sits between two
+    // node slots (implicit `()` when no neighbour provides one).
+    std::vector<FlatEvent> events;
+
+    std::function<void(GQLParser::PathTermContext *, bool)> flatten;
+    flatten = [&](GQLParser::PathTermContext *termCtx, bool quantifiedOuter) {
+        auto factors = termCtx->pathFactor();
+        for (size_t i = 0; i < factors.size(); ++i) {
+            auto *f = factors[i];
+            GQLParser::PathPrimaryContext *primary = nullptr;
+            std::string range;
+            bool quantified = false;
+            if (auto *p = dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(f)) {
+                primary = p->pathPrimary();
+                range = quantifierRange(p->graphPatternQuantifier());
+                quantified = true;
+            } else if (auto *p =
+                           dynamic_cast<GQLParser::PfQuestionedPathPrimaryContext *>(f)) {
+                primary = p->pathPrimary();
+                range = "0..1";
+                quantified = true;
+            } else {
+                primary = dynamic_cast<GQLParser::PfPathPrimaryContext *>(f)->pathPrimary();
+            }
+            if (auto *el = dynamic_cast<GQLParser::PpElementPatternContext *>(primary)) {
+                if (el->elementPattern()->nodePattern()) {
+                    if (quantified) {
+                        unsupported("quantified path pattern over a node pattern");
+                    }
+                    FlatEvent ev;
+                    std::string head, props;
+                    translateFiller(el->elementPattern()->nodePattern()->elementPatternFiller(),
+                                    wheres, head, props);
+                    ev.nodeBinding = "(" + head + props + ")";
+                    events.push_back(std::move(ev));
+                } else {
+                    FlatEvent ev;
+                    ev.isEdge = true;
+                    ev.edge = el->elementPattern()->edgePattern();
+                    ev.range = range;
+                    if (quantifiedOuter && quantified) {
+                        unsupported("nested quantified path pattern");
+                    }
+                    events.push_back(std::move(ev));
+                }
+                continue;
+            }
+            if (auto *paren =
+                    dynamic_cast<GQLParser::PpParenthesizedPathPatternExpressionContext *>(
+                        primary)) {
+                auto *ppe = paren->parenthesizedPathPatternExpression();
+                if (ppe->subpathVariableDeclaration()) {
+                    unsupported("subpath variable in parenthesized path pattern");
+                }
+                if (ppe->pathModePrefix()) {
+                    unsupported("path mode inside parenthesized path pattern");
+                }
+                if (ppe->parenthesizedPathPatternWhereClause()) {
+                    unsupported("WHERE inside parenthesized path pattern");
+                }
+                size_t before = events.size();
+                auto *innerExpr = dynamic_cast<GQLParser::PpePathTermContext *>(
+                    ppe->pathPatternExpression());
+                if (!innerExpr) {
+                    unsupported("path pattern union/multiset alternation");
+                }
+                flatten(innerExpr->pathTerm(), quantified);
+                if (quantified) {
+                    // QPPI: the interior must be exactly one edge between two
+                    // empty anonymous nodes — interior bindings would be lists
+                    // in GQL and have no Cypher var-length counterpart.
+                    std::vector<FlatEvent> inner(events.begin() + before, events.end());
+                    events.resize(before);
+                    int innerEdges = 0;
+                    FlatEvent edge;
+                    for (auto &e : inner) {
+                        if (e.isEdge) {
+                            innerEdges++;
+                            edge = e;
+                        } else if (e.nodeBinding != "()") {
+                            unsupported(
+                                "quantified path pattern with interior node bindings");
+                        }
+                    }
+                    if (innerEdges != 1) {
+                        unsupported("quantified path pattern with multiple edges");
+                    }
+                    if (!edge.range.empty()) {
+                        unsupported("nested quantified path pattern");
+                    }
+                    edge.range = range; // outer quantifier supplies the bounds
+                    FlatEvent startNode;
+                    startNode.nodeBinding = "()";
+                    FlatEvent endNode;
+                    endNode.nodeBinding = "()";
+                    events.push_back(startNode);
+                    events.push_back(edge);
+                    events.push_back(endNode);
+                }
+                continue;
+            }
+            unsupported("simplified path pattern (-/.../-)");
+        }
+    };
+
+    flatten(ctx, false);
+
+    // Build the chain: consecutive node bindings merge (juxtaposition); each
+    // edge is emitted between two node slots.
+    std::string out;
+    std::string pendingNode;
+    bool haveNode = false;
+    int edgeCount = 0;
+    FlatEvent *soleEdge = nullptr;
+
+    auto bindNode = [&](const std::string &b) {
+        std::string text = b.empty() ? "()" : b;
+        if (!haveNode) {
+            pendingNode = text;
+            haveNode = true;
+            return;
+        }
+        // Merge with the pending boundary node.
+        if (pendingNode == "()") {
+            pendingNode = text;
+        } else if (text != "()" && text != pendingNode) {
+            unsupported("juxtaposed node patterns (distinct variables)");
+        }
+    };
+    for (auto &ev : events) {
+        if (!ev.isEdge) {
+            bindNode(ev.nodeBinding);
+            continue;
+        }
+        if (!haveNode) {
+            bindNode("");
+        }
+        std::string recDetail;
+        if (!ev.range.empty()) {
+            recDetail = "*" + ev.range;
+        }
+        out += pendingNode + translateEdgePattern(ev.edge, recDetail);
+        haveNode = false;
+        edgeCount++;
+        soleEdge = &ev;
+    }
+    if (haveNode) {
+        out += pendingNode;
+    }
+
+    // Path mode / search prefix maps onto a recursive type — only a single-edge
+    // pattern has one. Fixed single hops drop a no-op prefix silently.
+    if (!recType.empty() && edgeCount > 1) {
+        unsupported("path mode/search prefix on multi-hop pattern");
+    }
+    if (edgeCount == 1 && !recType.empty()) {
+        FlatEvent &ev = *soleEdge;
+        if (ev.range.empty()) {
+            // Fixed 1-hop: every mode/search is a no-op on a single edge.
+            return out;
+        }
+        if ((recType == "SHORTEST" || recType == "ALL SHORTEST") &&
+            (ev.range.rfind("0", 0) == 0)) {
+            unsupported("shortest path with lower bound 0 (empty paths)");
+        }
+        // Re-emit the single edge with the recursive type injected.
+        std::string recDetail = "*" + recType + " " + ev.range;
+        std::string head, props;
+        EdgeShape shape = edgeShape(ev.edge);
+        if (shape.filler) {
+            std::vector<std::string> unused;
+            translateFiller(shape.filler, unused, head, props);
+        }
+        std::string left = "-[", right = "]-";
+        if (shape.dir == EdgeDir::Left) {
+            left = "<-[";
+        } else if (shape.dir == EdgeDir::Right) {
+            right = "]->";
+        }
+        // Rebuild the chain with the recType-bearing edge (out has exactly
+        // one edge between two node slots).
+        std::string rebuilt;
+        // Re-run the chain walk with a modified emitter.
+        pendingNode.clear();
+        haveNode = false;
+        for (auto &e2 : events) {
+            if (!e2.isEdge) {
+                std::string text = e2.nodeBinding.empty() ? "()" : e2.nodeBinding;
+                if (!haveNode) {
+                    pendingNode = text;
+                    haveNode = true;
+                } else if (pendingNode == "()") {
+                    pendingNode = text;
+                }
+                continue;
+            }
+            if (!haveNode) {
+                pendingNode = "()";
+                haveNode = true;
+            }
+            rebuilt += pendingNode + left + head + recDetail + props + right;
+            haveNode = false;
+        }
+        if (haveNode) {
+            rebuilt += pendingNode;
+        }
+        return rebuilt;
+    }
+    return out;
+}
+
+std::string GqlToCypherTransformer::translateGraphPattern(
+    GQLParser::GraphPatternContext *ctx, std::vector<std::string> &wheres) {
+    if (auto *mm = ctx->matchMode()) {
+        // LadybugDB MATCH already allows edge repetition (≈ GQL's REPEATABLE
+        // ELEMENTS); DIFFERENT EDGES has no engine enforcement.
+        if (mm->differentEdgesMatchMode()) {
+            unsupported("DIFFERENT EDGES match mode");
+        }
+    }
+    if (ctx->keepClause()) {
+        unsupported("KEEP clause");
+    }
+    std::vector<std::string> parts;
+    for (auto *p : ctx->pathPatternList()->pathPattern()) {
+        parts.push_back(translatePathPattern(p, wheres));
+    }
+    std::string out = joinCommas(parts);
+    if (auto *w = ctx->graphPatternWhereClause()) {
+        checkPatternSupported(w->searchCondition());
+        wheres.push_back(finishExpr(sourceText(w->searchCondition())));
+    }
+    return out;
 }
 
 // =============================================================================
@@ -558,6 +1038,7 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     // ---- FROM GRAPH ... MATCH ... ----
     std::string prefix;
     std::string matchText;
+    std::vector<std::string> wheres;
     if (auto *body = ctx->selectStatementBody()) {
         if (body->selectQuerySpecification()) {
             unsupported("SELECT ... FROM <nested query>");
@@ -574,13 +1055,17 @@ std::string GqlToCypherTransformer::translateSelectStatement(
             // must be routed through USE GRAPH (session-sticky, documented).
             prefix = "USE GRAPH " + finishExpr(graphText) + "; ";
         }
-        matchText = translateMatchStatement(graphMatch->matchStatement());
+        matchText = translateMatchStatement(graphMatch->matchStatement(), wheres);
     }
 
-    // ---- WHERE ----
-    std::string whereText;
+    // ---- WHERE (match-level predicates, hoisted fillers and SELECT WHERE
+    //      merge into one clause) ----
     if (auto *w = ctx->whereClause()) {
-        whereText = " WHERE " + finishExpr(sourceText(w->searchCondition()));
+        wheres.push_back(finishExpr(sourceText(w->searchCondition())));
+    }
+    std::string whereText;
+    for (size_t i = 0; i < wheres.size(); ++i) {
+        whereText += (i ? " AND " : " WHERE ") + wheres[i];
     }
 
     // ---- GROUP BY ----

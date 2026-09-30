@@ -96,8 +96,8 @@ Alice|Acme
 ---- ok
 
 -STATEMENT CALL GQL("INVALID !!! SYNTAX")
----- error
-Runtime exception: Failed to parse GQL query: INVALID !!! SYNTAX
+---- error(regex)
+Runtime exception: Failed to parse GQL query: INVALID !!! SYNTAX.*
 
 
 -CASE GqlEmptyQuery

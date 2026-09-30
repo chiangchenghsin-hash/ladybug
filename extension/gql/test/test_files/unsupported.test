@@ -109,6 +109,97 @@ Runtime exception: GQL feature not supported: label expression operator (&, !, |
 Runtime exception: GQL feature not supported: quantified path pattern .+
 
 
+-CASE UnsupportedQuantifiedMultiHop
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH (()-[]->()-[]->()){2} RETURN count(*)")
+---- error
+Runtime exception: GQL feature not supported: quantified path pattern with multiple edges
+
+
+-CASE UnsupportedQuantifiedNodePattern
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH (n:T){2} RETURN n.v")
+---- error(regex)
+Runtime exception: GQL feature not supported: quantified path pattern .+
+
+
+-CASE UnsupportedSimplePathMode
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH SIMPLE (n:T)-[r]->(m:T) RETURN n.v")
+---- error
+Runtime exception: GQL feature not supported: SIMPLE path mode (LadybugDB has WALK/TRAIL/ACYCLIC only)
+
+
+-CASE UnsupportedCountedShortestSearch
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH SHORTEST 2 (n:T)-[r]->(m:T) RETURN n.v")
+---- error
+Runtime exception: GQL feature not supported: SHORTEST <k>/GROUP(S) search prefix
+
+
+-CASE UnsupportedAnyKPathsSearch
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH ANY 2 PATHS (n:T)-[r]->(m:T) RETURN n.v")
+---- error
+Runtime exception: GQL feature not supported: ANY <k> PATHS search prefix
+
+
+-CASE UnsupportedSearchPrefixOnMultiHop
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH ANY SHORTEST (a:T)-[r]->(b:T)-[s]->(c:T) RETURN a.v")
+---- error
+Runtime exception: GQL feature not supported: path mode/search prefix on multi-hop pattern
+
+
+-CASE UnsupportedDifferentEdgesMatchMode
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CALL GQL("MATCH DIFFERENT EDGES (a:T)-[r]->(b:T) RETURN a.v")
+---- error
+Runtime exception: GQL feature not supported: DIFFERENT EDGES match mode
+
+
 -CASE UnsupportedSelectDistinctWithAggregation
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"

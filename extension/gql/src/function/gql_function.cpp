@@ -28,6 +28,20 @@ using namespace lbug::common;
 using namespace lbug::function;
 using namespace lbug::main;
 
+// Captures ANTLR syntax errors so the first message can be surfaced in the
+// "Failed to parse GQL query" exception instead of being lost to /dev/null.
+class GqlErrorCollector final : public antlr4::BaseErrorListener {
+public:
+    std::vector<std::string> messages;
+
+    void syntaxError(antlr4::Recognizer * /*recognizer*/, antlr4::Token * /*offendingSymbol*/,
+                     size_t line, size_t charPositionInLine, const std::string &msg,
+                     std::exception_ptr /*e*/) override {
+        messages.push_back("line " + std::to_string(line) + ":" +
+                           std::to_string(charPositionInLine) + " " + msg);
+    }
+};
+
 // =============================================================================
 // Bind data: holds the Cypher query produced by GQL→Cypher translation
 // =============================================================================
@@ -201,9 +215,13 @@ static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
     antlr4::CommonTokenStream tokens(&lexer);
     GQLParser parser(&tokens);
 
-    // Remove default error listeners to avoid printing to stderr
+    // Replace default error listeners (which print to stderr) with a collector
+    // so the first ANTLR message can be surfaced in the exception.
     lexer.removeErrorListeners();
     parser.removeErrorListeners();
+    GqlErrorCollector errors;
+    lexer.addErrorListener(&errors);
+    parser.addErrorListener(&errors);
 
     auto tree = parser.gqlProgram();
 
@@ -214,7 +232,8 @@ static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
         if (isDdlPassThrough(trimmed)) {
             return std::make_unique<GqlBindData>(trimmed);
         }
-        throw common::RuntimeException{"Failed to parse GQL query: " + trimmed};
+        std::string detail = errors.messages.empty() ? "" : " (" + errors.messages[0] + ")";
+        throw common::RuntimeException{"Failed to parse GQL query: " + trimmed + detail};
     }
 
     // Transform GQL to Cypher. The transformer reports unmapped GQL constructs

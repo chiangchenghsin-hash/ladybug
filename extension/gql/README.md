@@ -55,14 +55,20 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 
 | G-feature | Feature | Status | Notes |
 |---|---|---|---|
-| G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✗ | rejected explicitly (planned) |
-| G005/G015–G020 | Path search prefixes (SHORTEST / ANY / ALL ...) | ✗ | rejected explicitly (planned) |
-| G010–G013 | Path modes (WALK/TRAIL/SIMPLE/ACYCLIC) | ✗ | rejected explicitly (planned) |
+| G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✓ (single-hop) | quantified single edges and single-hop QPPIs `( ()-[]->() ){m,n}` → Cypher var-length `[e*m..n]`; multi-hop / node-quantified QPPIs ✗ |
+| G005/G015–G020 | Path search prefixes (ANY SHORTEST / ALL SHORTEST) | ✓ (single-hop) | → `[e*SHORTEST ...]` / `[e*ALL SHORTEST ...]`; counted `SHORTEST k`, `SHORTEST GROUP(S)`, `ALL/ANY PATHS` ✗ |
+| G010–G013 | Path modes (WALK/TRAIL/ACYCLIC) | ✓ (single-hop) | → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; WALK = engine default; SIMPLE ✗ (no engine counterpart); multi-hop path modes ✗ |
 | G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✗ | rejected explicitly; plain `:Label` works |
 | G100 | ELEMENT_ID | ✓ | → `internal_id()` |
 | G115 | PROPERTY_EXISTS | ✓ | GQL native predicate (parsed as-is) |
 | GA05 | Cast specification | ✓ | `CAST` shared syntax |
 | GC03 | CREATE GRAPH TYPE | ✗ | rejected explicitly (schema bridge planned) |
+
+Quantifier bounds follow the GQL/Neo4j semantics — note that GQL `*` is
+**zero**-or-more (`[e*0..]` in Cypher; Cypher's bare `*` is one-or-more), `+`
+is one-or-more, `?` is `{0,1}`. Lower bound 0 binds start = end with an empty
+edge list. `DIFFERENT EDGES` match mode is rejected; `REPEATABLE ELEMENTS` is
+dropped (LadybugDB MATCH already allows edge repetition).
 
 ### Function-name mapping
 
@@ -102,6 +108,17 @@ see `THIRD_PARTY_NOTICES.md`):
 5. **NEXT composition** across statements is not supported (Cypher
    multi-statements do not share binding scope).
 6. `SELECT *` with GROUP BY/HAVING is not supported (use explicit items).
+7. **ACYCLIC path mode** is approximate: the engine enforces
+   intermediate-node distinctness only (start/end nodes are unconstrained, so
+   closed walks like `1 -> 2 -> 1` are returned). ISO GQL ACYCLIC requires all
+   nodes distinct. TRAIL matches GQL exactly (edges distinct).
+8. **GQL has no `LENGTH()`** — ISO GQL spells it `PATH_LENGTH()` for paths
+   (mapped to LadybugDB `LENGTH`). A bare `length(...)` call is a GQL syntax
+   error at the parser level.
+9. **Edge directions**: GQL's undirected / mixed-direction edge spellings
+   (`~[e]~`, `<-[e]~`, `~[e]->`, `<->[e]`, ...) collapse to LadybugDB's
+   any-direction `-[e]-` (a directed property graph has no undirected edges to
+   distinguish).
 
 ## Architecture
 

@@ -82,11 +82,36 @@ private:
     // ---------- query primitives ----------
     std::string translateSelectStatement(GQLParser::SelectStatementContext *ctx);
     std::string translateMatchStatement(GQLParser::MatchStatementContext *ctx);
+    std::string translateMatchStatement(GQLParser::MatchStatementContext *ctx,
+                                        std::vector<std::string> &wheres);
     std::string translateReturnStatement(GQLParser::ReturnStatementContext *ctx,
                                          GQLParser::OrderByAndPageStatementContext *page);
     std::string translateFilterStatement(GQLParser::FilterStatementContext *ctx);
     std::string translateForStatement(GQLParser::ForStatementContext *ctx);
     std::string translateOrderByAndPage(GQLParser::OrderByAndPageStatementContext *ctx);
+
+    // ---------- graph patterns (QPPI / path modes / search prefixes) ----------
+    // `wheres` collects predicates hoisted from inline element WHERE fillers and
+    // any pattern-level WHERE; the caller merges them into the clause's WHERE.
+    std::string translateGraphPattern(GQLParser::GraphPatternContext *ctx,
+                                      std::vector<std::string> &wheres);
+    std::string translatePathPattern(GQLParser::PathPatternContext *ctx,
+                                     std::vector<std::string> &wheres);
+    std::string translatePathTerm(GQLParser::PathTermContext *ctx,
+                                  std::vector<std::string> &wheres,
+                                  const std::string &recType);
+    std::string translateEdgePattern(GQLParser::EdgePatternContext *ctx,
+                                     const std::string &recDetail);
+    std::string translateNodePattern(GQLParser::NodePatternContext *ctx,
+                                     std::vector<std::string> &wheres);
+    // Splits a filler into the bracket head (variable + :labels) and the
+    // trailing property map; an inline WHERE is pushed onto `wheres`.
+    void translateFiller(GQLParser::ElementPatternFillerContext *ctx,
+                         std::vector<std::string> &wheres, std::string &head,
+                         std::string &props);
+    // Path mode / search prefix -> iC_RecursiveType text ("", "TRAIL",
+    // "ACYCLIC", "SHORTEST", "ALL SHORTEST"). Throws on unsearchable forms.
+    std::string translatePathPatternPrefix(GQLParser::PathPatternPrefixContext *ctx);
 
     // ---------- write primitives ----------
     std::string translateInsertStatement(GQLParser::InsertStatementContext *ctx);

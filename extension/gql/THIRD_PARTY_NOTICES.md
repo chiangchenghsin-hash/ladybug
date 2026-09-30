@@ -16,6 +16,13 @@ acknowledge their authors.
     semantics (GQL feature G115).
   - `LabelExpressionPredicateNormalizer.scala`, `NormalizeHasLabelsAndHasType.scala`
     — label-expression normalization approach.
+  - `AddElementUniquenessPredicates.scala`, `AddPathPredicates.scala` —
+    quantified-path-pattern quantifier bounds (`getLowerBound`/`getUpperBound`:
+    `*`→0..∞, `+`→1..∞, `{m,n}`→m..n) and path-mode uniqueness semantics
+    (WALK/TRAIL/ACYCLIC), adapted for the single-hop QPPI → var-length mapping
+    in `gql_transformer.cpp` `quantifierRange`.
+  - `front-end/expressions/.../PathMode.scala` — GQL path-mode semantics
+    reference (`PathMode.effectivePathMode`).
   - `community/neo4j-gql-status/` — GQL-status error envelope conventions.
 - License: Apache License 2.0
 - Copyright (c) "Neo4j" Neo4j Sweden AB
