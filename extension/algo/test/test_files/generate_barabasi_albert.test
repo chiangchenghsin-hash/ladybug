@@ -1,0 +1,27 @@
+-DATASET CSV empty
+--
+
+-CASE BarabasiAlbertExactP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CALL generate_barabasi_albert(n:=6, k:=2, seed:=1) RETURN node1, node2, weight
+---- 8
+0|1|1.000000
+0|2|1.000000
+3|0|1.000000
+3|2|1.000000
+4|2|1.000000
+4|3|1.000000
+5|0|1.000000
+5|2|1.000000
+
+-CASE BarabasiAlbertCountP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CALL generate_barabasi_albert(n:=100, k:=5, seed:=42) RETURN count(*)
+---- 1
+475
+
+-CASE BarabasiAlbertErrorP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CALL generate_barabasi_albert(n:=4, k:=5, seed:=1) RETURN node1
+---- error
+Binder exception: generate_barabasi_albert requires k < n (k is the number of edges attached per new node).

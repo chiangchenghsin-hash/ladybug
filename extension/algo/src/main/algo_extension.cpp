@@ -1,8 +1,7 @@
 #include "main/algo_extension.h"
 
-#include <cstdlib>
-
 #include "function/algo_function.h"
+#include "function/leiden.h"
 #include "main/client_context.h"
 
 namespace lbug {
@@ -11,22 +10,6 @@ namespace algo_extension {
 using namespace extension;
 
 void AlgoExtension::load(main::ClientContext* context) {
-#if defined(ICEBUG_ENABLED)
-    // Arrow's default memory pool is mimalloc-backed, and mimalloc's per-thread init is not
-    // safe on threads that predate libarrow's dlopen — GDS functions allocating Arrow buffers
-    // from ladybug worker threads segfault in _mi_thread_init (non-deterministically; ~half of
-    // full-suite runs). Steer Arrow to the system allocator once, before its default pool is
-    // first used; Arrow reads this env var lazily, and load() runs before any GDS allocation.
-    // overwrite=0 respects a user-provided value.
-#if defined(_WIN32)
-    // setenv() is not available on MSVC; _putenv_s always overwrites, so check first.
-    if (getenv("ARROW_DEFAULT_MEMORY_POOL") == nullptr) {
-        _putenv_s("ARROW_DEFAULT_MEMORY_POOL", "system");
-    }
-#else
-    setenv("ARROW_DEFAULT_MEMORY_POOL", "system", 0);
-#endif
-#endif
     auto& db = *context->getDatabase();
     ExtensionUtils::addTableFunc<SCCFunction>(db);
     ExtensionUtils::addTableFuncAlias<SCCAliasFunction>(db);
@@ -34,20 +17,75 @@ void AlgoExtension::load(main::ClientContext* context) {
     ExtensionUtils::addTableFuncAlias<SCCKosarajuAliasFunction>(db);
     ExtensionUtils::addTableFunc<WeaklyConnectedComponentsFunction>(db);
     ExtensionUtils::addTableFuncAlias<WeaklyConnectedComponentsAliasFunction>(db);
+    ExtensionUtils::addTableFunc<ComponentIDsFunction>(db);
+    ExtensionUtils::addTableFuncAlias<ComponentIDsAliasFunction>(db);
     ExtensionUtils::addTableFunc<PageRankFunction>(db);
-    ExtensionUtils::addTableFuncAlias<PageRankAliasFunction>(db);
-#if defined(ICEBUG_ENABLED)
+#if defined(ENABLE_ICEBUG)
     ExtensionUtils::addTableFunc<GDSPageRankFunction>(db);
-    ExtensionUtils::addTableFunc<GDSNode2VecFunction>(db);
-    ExtensionUtils::addTableFunc<GDSLouvainFunction>(db);
-    ExtensionUtils::addTableFunc<GDSLeidenFunction>(db);
-    ExtensionUtils::addTableFunc<GDSPprFunction>(db);
 #endif
+    ExtensionUtils::addTableFuncAlias<PageRankAliasFunction>(db);
     ExtensionUtils::addTableFunc<KCoreDecompositionFunction>(db);
     ExtensionUtils::addTableFuncAlias<KCoreDecompositionAliasFunction>(db);
     ExtensionUtils::addTableFunc<LouvainFunction>(db);
+    ExtensionUtils::addTableFunc<LeidenFunction>(db);
+    ExtensionUtils::addTableFuncAlias<LeidenAliasFunction>(db);
     ExtensionUtils::addTableFunc<SpanningForest>(db);
     ExtensionUtils::addTableFuncAlias<SpanningForestAliasFunction>(db);
+    ExtensionUtils::addTableFunc<SubgraphIsomorphismFunction>(db);
+    ExtensionUtils::addTableFunc<TopologicalSortFunction>(db);
+    ExtensionUtils::addTableFunc<GraphDiffFunction>(db);
+    ExtensionUtils::addTableFunc<GraphEditDistanceFunction>(db);
+    ExtensionUtils::addTableFunc<GraphSignatureFunction>(db);
+    ExtensionUtils::addTableFunc<BetweennessFunction>(db);
+    ExtensionUtils::addTableFunc<LocalClusteringCoefficientFunction>(db);
+    ExtensionUtils::addTableFunc<KatzCentralityFunction>(db);
+    ExtensionUtils::addTableFunc<AssortativityFunction>(db);
+    ExtensionUtils::addTableFunc<BridgesFunction>(db);
+    ExtensionUtils::addTableFunc<ArticulationPointsFunction>(db);
+    ExtensionUtils::addTableFunc<ShortestPathFunction>(db);
+    // NASH × GNN P1 batch (ALGORITHM-SPEC-merged.md §5.1)
+    ExtensionUtils::addTableFunc<BiconnectedComponentsFunction>(db);
+    ExtensionUtils::addTableFunc<KTrussFunction>(db);
+    ExtensionUtils::addTableFunc<EigenvectorCentralityFunction>(db);
+    ExtensionUtils::addTableFunc<ClosenessCentralityFunction>(db);
+    ExtensionUtils::addTableFunc<ApproxBetweennessFunction>(db);
+    ExtensionUtils::addTableFunc<SpanningEdgeCentralityFunction>(db);
+    ExtensionUtils::addTableFunc<GroupBetweennessFunction>(db);
+    ExtensionUtils::addTableFunc<GroupClosenessFunction>(db);
+    ExtensionUtils::addTableFunc<LabelPropagationFunction>(db);
+    ExtensionUtils::addTableFunc<CutClusteringFunction>(db);
+    ExtensionUtils::addTableFunc<DijkstraFunction>(db);
+    ExtensionUtils::addTableFunc<AllPairsShortestPathFunction>(db);
+    ExtensionUtils::addTableFunc<DiameterFunction>(db);
+    ExtensionUtils::addTableFunc<EffectiveDiameterFunction>(db);
+    ExtensionUtils::addTableFunc<MaxFlowFunction>(db);
+    ExtensionUtils::addTableFunc<MinCutValueFunction>(db);
+    ExtensionUtils::addTableFunc<TriangleCountFunction>(db);
+    ExtensionUtils::addTableFunc<GlobalClusteringFunction>(db);
+    ExtensionUtils::addTableFunc<LinkPredictionFunction>(db);
+    // P2 batch (NASH×GNN advanced analysis).
+    ExtensionUtils::addTableFunc<EccentricityFunction>(db);
+    ExtensionUtils::addTableFunc<RadiusFunction>(db);
+    ExtensionUtils::addTableFunc<HitsFunction>(db);
+    ExtensionUtils::addTableFunc<SirSimulatorFunction>(db);
+    ExtensionUtils::addTableFunc<LocalDegreeSparsificationFunction>(db);
+    ExtensionUtils::addTableFunc<GlobalThresholdFilterFunction>(db);
+    ExtensionUtils::addTableFunc<RandomEdgeSparsificationFunction>(db);
+    ExtensionUtils::addTableFunc<TriangleFilterFunction>(db);
+    // P2 batch 2 (dynamic/coarsening/spectral/matching/metrics).
+    ExtensionUtils::addTableFunc<DynConnectedComponentsFunction>(db);
+    ExtensionUtils::addTableFunc<DynKatzCentralityFunction>(db);
+    ExtensionUtils::addTableFunc<Dyn2HopLandmarkFunction>(db);
+    ExtensionUtils::addTableFunc<GraphCoarseningFunction>(db);
+    ExtensionUtils::addTableFunc<PartitionIntersectionFunction>(db);
+    ExtensionUtils::addTableFunc<SpectralPartitioningFunction>(db);
+    ExtensionUtils::addTableFunc<MaxWeightMatchingFunction>(db);
+    ExtensionUtils::addTableFunc<CommuteTimeDistanceFunction>(db);
+    // P3 batch (NASH×GNN generators).
+    ExtensionUtils::addTableFunc<BarabasiAlbertFunction>(db);
+    ExtensionUtils::addTableFunc<WattsStrogatzFunction>(db);
+    ExtensionUtils::addTableFunc<StochasticBlockmodelFunction>(db);
+    ExtensionUtils::addTableFunc<GraphRandomizationFunction>(db);
 }
 
 } // namespace algo_extension

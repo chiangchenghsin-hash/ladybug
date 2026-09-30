@@ -1,0 +1,21 @@
+-DATASET CSV empty
+--
+
+-CASE SBMCliquesP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CALL generate_stochastic_blockmodel(blocks:=[2,2], P:=[[1.0,0.0],[0.0,1.0]], seed:=1) RETURN node1, node2, weight
+---- 2
+0|1|1.000000
+2|3|1.000000
+
+-CASE SBMCountP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CALL generate_stochastic_blockmodel(blocks:=[3,3], P:=[[1.0,0.0],[0.0,1.0]], seed:=9) RETURN count(*)
+---- 1
+6
+
+-CASE SBMErrorP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CALL generate_stochastic_blockmodel(blocks:=[2,2], P:=[[1.0]], seed:=1) RETURN node1
+---- error
+Binder exception: generate_stochastic_blockmodel requires len(blocks) == len(P).

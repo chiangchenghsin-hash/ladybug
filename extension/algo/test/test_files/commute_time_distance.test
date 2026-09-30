@@ -1,0 +1,34 @@
+-DATASET CSV empty
+--
+
+-CASE CommutePathP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL commute_time_distance('G', 0, 2) RETURN source, target, distance
+---- 1
+0|2|4.000000
+
+-CASE CommuteDisconnected
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1})
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL commute_time_distance('G', 0, 1) RETURN source, target, distance
+---- error
+Binder exception: COMMUTE_TIME_DISTANCE requires source and target in the same connected component (graph is disconnected).

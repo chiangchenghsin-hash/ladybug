@@ -94,3 +94,12 @@ dataset/ldbc-1/csv
 # Generated dictionary-bug e2e parquet fixtures
 test/test_files/dictionary_bug/orb383_relationship_projection_obfuscated_fixture/*.parquet
 test.db
+
+# fork build/dist artifacts (2026-09-30 upgrade)
+build/
+build_v0211/
+build_v0211t/
+build_hyperalgo/
+dist-ladybug-0.21.1/
+releases/
+*.log

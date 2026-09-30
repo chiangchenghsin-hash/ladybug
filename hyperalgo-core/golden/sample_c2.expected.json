@@ -1,0 +1,17 @@
+{
+  "sample": "C2",
+  "stats": {
+    "n_nodes": 5,
+    "n_edges": 1,
+    "isolated_stations": 4,
+    "degenerate_edges": 0
+  },
+  "booleanize": {
+    "groups": 4,
+    "k_e": 4,
+    "alive_groups": 1,
+    "edge_alive": 0
+  },
+  "note": "只到 1 种料(M1)→ 1/4 组活 < k_e=4 → 不齐;k_e 默认 = g(e)(FRZ-05 v1.1);孤立站口径(FRZ-01 条款 3)= 无入边节点 = M1..M4(料号成员亦计入)",
+  "fingerprint": "24bbd59b43984b7abe86fb086c3e76afd484c9cbde68c35c65542a0d9c2e5d0f"
+}

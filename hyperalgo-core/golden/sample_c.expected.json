@@ -1,0 +1,59 @@
+{
+  "sample": "C",
+  "stats": {
+    "n_nodes": 5,
+    "n_edges": 1,
+    "isolated_stations": 4,
+    "degenerate_edges": 0,
+    "note": "孤立站口径(FRZ-01 条款 3)= 无入边节点 = M1..M4(料号成员亦计入)"
+  },
+  "booleanize": {
+    "groups": 4,
+    "k_e": 2,
+    "alive_groups": 4,
+    "edge_alive": 1
+  },
+  "booleanize_modes": [
+    {
+      "name": "全员活:4/4 ≥ 2 齐",
+      "alive": {
+        "M1": 1,
+        "M2": 1,
+        "M3": 1,
+        "M4": 1
+      },
+      "groups": 4,
+      "k_e": 2,
+      "alive_groups": 4,
+      "edge_alive": 1
+    },
+    {
+      "name": "缺 2 员:2/4 ≥ 2 仍齐(k_e 允许部分满足)",
+      "alive": {
+        "M1": 1,
+        "M2": 1,
+        "M3": 0,
+        "M4": 0
+      },
+      "groups": 4,
+      "k_e": 2,
+      "alive_groups": 2,
+      "edge_alive": 1
+    },
+    {
+      "name": "缺 3 员:1/4 < 2 不齐",
+      "alive": {
+        "M1": 1,
+        "M2": 0,
+        "M3": 0,
+        "M4": 0
+      },
+      "groups": 4,
+      "k_e": 2,
+      "alive_groups": 1,
+      "edge_alive": 0
+    }
+  ],
+  "note": "显式 k_e=2 ≠ 默认 g(e)=4 → HIF→TSV 转换须发 KE 行(golden_check 自动判定);alive 模式 2/3 由 booleanize_modes 扫描",
+  "fingerprint": "5245041dfc58785e943d4cb9c4173a52a13ac930aad9b1b14d1f2d42f3ebaf72"
+}

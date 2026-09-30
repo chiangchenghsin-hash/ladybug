@@ -1,0 +1,75 @@
+-DATASET CSV empty
+--
+
+-CASE DiameterC8
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4}),(:N {id:5}),(:N {id:6}),(:N {id:7})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:2}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:3}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:5}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:6}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:6}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:7}),(y:N {id:0}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL diameter('G') RETURN diameter
+---- 1
+4
+-STATEMENT CALL effective_diameter('G') RETURN diameter, exact
+---- 1
+4|True
+
+-CASE DiameterDisconnected
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE T(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE R(FROM T TO T)
+---- ok
+-STATEMENT CREATE (:T {id:0}),(:T {id:1}),(:T {id:2}),(:T {id:3})
+---- ok
+-STATEMENT MATCH (x:T {id:0}),(y:T {id:1}) CREATE (x)-[:R]->(y)
+---- ok
+-STATEMENT MATCH (x:T {id:2}),(y:T {id:3}) CREATE (x)-[:R]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G2', ['T'], ['R'])
+---- ok
+-STATEMENT CALL diameter('G2') RETURN diameter
+---- 1
+-1
+
+-CASE EffectiveDiameterP5
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE U(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE S(FROM U TO U)
+---- ok
+-STATEMENT CREATE (:U {id:0}),(:U {id:1}),(:U {id:2}),(:U {id:3}),(:U {id:4})
+---- ok
+-STATEMENT MATCH (x:U {id:0}),(y:U {id:1}) CREATE (x)-[:S]->(y)
+---- ok
+-STATEMENT MATCH (x:U {id:1}),(y:U {id:2}) CREATE (x)-[:S]->(y)
+---- ok
+-STATEMENT MATCH (x:U {id:2}),(y:U {id:3}) CREATE (x)-[:S]->(y)
+---- ok
+-STATEMENT MATCH (x:U {id:3}),(y:U {id:4}) CREATE (x)-[:S]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G3', ['U'], ['S'])
+---- ok
+-STATEMENT CALL effective_diameter('G3', approx := false, ratio := 0.9) RETURN diameter, exact
+---- 1
+3|True

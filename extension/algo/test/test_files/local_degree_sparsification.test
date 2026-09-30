@@ -1,0 +1,27 @@
+-DATASET CSV empty
+--
+
+-CASE LocalDegreePathP5
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:2}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:3}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL local_degree_sparsification('G', ratio := 0.5) RETURN source, target, is_kept, rank ORDER BY rank
+---- 4
+1|2|True|1
+2|3|True|2
+0|1|False|3
+3|4|False|4

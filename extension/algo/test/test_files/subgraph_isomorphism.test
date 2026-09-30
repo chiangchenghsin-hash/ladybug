@@ -1,0 +1,154 @@
+-DATASET CSV empty
+
+--
+
+-CASE SubgraphIsomorphismChainVsBranch
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE Pattern_Node(id INT64 PRIMARY KEY, type STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Pattern_Edge(FROM Pattern_Node TO Pattern_Node);
+---- ok
+-STATEMENT CREATE NODE TABLE Target_Node(id INT64 PRIMARY KEY, name STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Target_Edge(FROM Target_Node TO Target_Node);
+---- ok
+-STATEMENT CREATE (:Pattern_Node {id: 0, type: 'A'}), (:Pattern_Node {id: 1, type: 'B'}), (:Pattern_Node {id: 2, type: 'C'});
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 0}), (b:Pattern_Node {id: 1}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 1}), (b:Pattern_Node {id: 2}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT CREATE (:Target_Node {id: 10, name: 'x'}), (:Target_Node {id: 11, name: 'y'}), (:Target_Node {id: 12, name: 'z'}), (:Target_Node {id: 13, name: 'w'});
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 10}), (b:Target_Node {id: 11}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 11}), (b:Target_Node {id: 12}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 13}), (b:Target_Node {id: 11}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT CALL project_graph('Pattern', ['Pattern_Node'], ['Pattern_Edge']);
+---- ok
+-STATEMENT CALL project_graph('Target', ['Target_Node'], ['Target_Edge']);
+---- ok
+# Chain A->B->C matches x->y->z and w->y->z (non-induced: target branch edge 13->11 is allowed).
+-STATEMENT CALL subgraph_isomorphism('Pattern', 'Target') RETURN match_id, pattern_node.id, target_node.name ORDER BY match_id, pattern_node.id;
+---- 6
+0|0|x
+0|1|y
+0|2|z
+1|0|w
+1|1|y
+1|2|z
+
+-CASE SubgraphIsomorphismMaxMatches
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE Pattern_Node(id INT64 PRIMARY KEY, type STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Pattern_Edge(FROM Pattern_Node TO Pattern_Node);
+---- ok
+-STATEMENT CREATE NODE TABLE Target_Node(id INT64 PRIMARY KEY, name STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Target_Edge(FROM Target_Node TO Target_Node);
+---- ok
+-STATEMENT CREATE (:Pattern_Node {id: 0, type: 'A'}), (:Pattern_Node {id: 1, type: 'B'}), (:Pattern_Node {id: 2, type: 'C'});
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 0}), (b:Pattern_Node {id: 1}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 1}), (b:Pattern_Node {id: 2}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT CREATE (:Target_Node {id: 10, name: 'x'}), (:Target_Node {id: 11, name: 'y'}), (:Target_Node {id: 12, name: 'z'}), (:Target_Node {id: 13, name: 'w'});
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 10}), (b:Target_Node {id: 11}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 11}), (b:Target_Node {id: 12}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 13}), (b:Target_Node {id: 11}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT CALL project_graph('Pattern', ['Pattern_Node'], ['Pattern_Edge']);
+---- ok
+-STATEMENT CALL project_graph('Target', ['Target_Node'], ['Target_Edge']);
+---- ok
+-STATEMENT CALL subgraph_isomorphism('Pattern', 'Target', max_matches := 1) RETURN match_id, pattern_node.id, target_node.name ORDER BY match_id, pattern_node.id;
+---- 3
+0|0|x
+0|1|y
+0|2|z
+# max_matches must be non-negative.
+-STATEMENT CALL subgraph_isomorphism('Pattern', 'Target', max_matches := -1) RETURN match_id;
+---- error
+Binder exception: max_matches must be non-negative (0 = unlimited).
+# Unknown optional parameter.
+-STATEMENT CALL subgraph_isomorphism('Pattern', 'Target', unknownParam := 5) RETURN match_id;
+---- error
+Binder exception: Unknown optional parameter: unknownparam.
+
+-CASE SubgraphIsomorphismCyclicTarget
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE Pattern_Node(id INT64 PRIMARY KEY, type STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Pattern_Edge(FROM Pattern_Node TO Pattern_Node);
+---- ok
+-STATEMENT CREATE NODE TABLE Target_Node(id INT64 PRIMARY KEY, name STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Target_Edge(FROM Target_Node TO Target_Node);
+---- ok
+-STATEMENT CREATE (:Pattern_Node {id: 0, type: 'A'}), (:Pattern_Node {id: 1, type: 'B'}), (:Pattern_Node {id: 2, type: 'C'});
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 0}), (b:Pattern_Node {id: 1}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 1}), (b:Pattern_Node {id: 2}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT CREATE (:Target_Node {id: 10, name: 'x'}), (:Target_Node {id: 11, name: 'y'}), (:Target_Node {id: 12, name: 'z'});
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 10}), (b:Target_Node {id: 11}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 11}), (b:Target_Node {id: 12}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 12}), (b:Target_Node {id: 10}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT CALL project_graph('Pattern', ['Pattern_Node'], ['Pattern_Edge']);
+---- ok
+-STATEMENT CALL project_graph('Target', ['Target_Node'], ['Target_Edge']);
+---- ok
+# Cyclic target 10->11->12->10: the chain embeds in all three rotation positions.
+-STATEMENT CALL subgraph_isomorphism('Pattern', 'Target') RETURN match_id, pattern_node.id, target_node.name ORDER BY match_id, pattern_node.id;
+---- 9
+0|0|x
+0|1|y
+0|2|z
+1|0|y
+1|1|z
+1|2|x
+2|0|z
+2|1|x
+2|2|y
+
+-CASE SubgraphIsomorphismNoMatch
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE Pattern_Node(id INT64 PRIMARY KEY, type STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Pattern_Edge(FROM Pattern_Node TO Pattern_Node);
+---- ok
+-STATEMENT CREATE NODE TABLE Target_Node(id INT64 PRIMARY KEY, name STRING);
+---- ok
+-STATEMENT CREATE REL TABLE Target_Edge(FROM Target_Node TO Target_Node);
+---- ok
+-STATEMENT CREATE (:Pattern_Node {id: 0, type: 'A'}), (:Pattern_Node {id: 1, type: 'B'}), (:Pattern_Node {id: 2, type: 'C'});
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 0}), (b:Pattern_Node {id: 1}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Pattern_Node {id: 1}), (b:Pattern_Node {id: 2}) CREATE (a)-[:Pattern_Edge]->(b);
+---- ok
+-STATEMENT CREATE (:Target_Node {id: 10, name: 'x'}), (:Target_Node {id: 11, name: 'y'}), (:Target_Node {id: 12, name: 'z'});
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 10}), (b:Target_Node {id: 11}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT MATCH (a:Target_Node {id: 11}), (b:Target_Node {id: 10}) CREATE (a)-[:Target_Edge]->(b);
+---- ok
+-STATEMENT CALL project_graph('Pattern', ['Pattern_Node'], ['Pattern_Edge']);
+---- ok
+-STATEMENT CALL project_graph('Target', ['Target_Node'], ['Target_Edge']);
+---- ok
+# Target is 10<->11 (2 nodes with a 2-cycle): chain of 3 nodes cannot embed.
+-STATEMENT CALL subgraph_isomorphism('Pattern', 'Target') RETURN match_id, pattern_node.id, target_node.name ORDER BY match_id, pattern_node.id;
+---- 0

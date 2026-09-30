@@ -1,0 +1,80 @@
+-DATASET CSV empty
+--
+
+-CASE GraphRandomizationCurveballP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4})
+---- ok
+-STATEMENT MATCH (a:N {id:0}),(b:N {id:1}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:1}),(b:N {id:2}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:2}),(b:N {id:3}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:3}),(b:N {id:4}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:4}),(b:N {id:0}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:0}),(b:N {id:2}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:2}),(b:N {id:4}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL graph_randomization('G', method:='curveball', iterations:=5, seed:=7) RETURN node1, node2
+---- 7
+0|2
+0|3
+0|4
+1|2
+1|4
+2|3
+2|4
+
+-CASE GraphRandomizationCountP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4})
+---- ok
+-STATEMENT MATCH (a:N {id:0}),(b:N {id:1}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:1}),(b:N {id:2}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:2}),(b:N {id:3}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:3}),(b:N {id:4}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:4}),(b:N {id:0}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:0}),(b:N {id:2}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:2}),(b:N {id:4}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL graph_randomization('G', method:='double_edge_swap', iterations:=20, seed:=11) RETURN count(*)
+---- 1
+7
+
+-CASE GraphRandomizationErrorP3
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1})
+---- ok
+-STATEMENT MATCH (a:N {id:0}),(b:N {id:1}) CREATE (a)-[:E]->(b)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL graph_randomization('G', method:='bogus', iterations:=1) RETURN node1
+---- error
+Binder exception: graph_randomization method must be 'curveball' or 'double_edge_swap'.

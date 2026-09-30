@@ -1,0 +1,45 @@
+-DATASET CSV empty
+--
+
+-CASE BiconnectedChain
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL biconnected_components('G') RETURN node.id, component ORDER BY component, node.id
+---- 4
+1|0
+2|0
+0|1
+1|1
+
+-CASE BiconnectedTriangle
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE T(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE R(FROM T TO T)
+---- ok
+-STATEMENT CREATE (:T {id:0}),(:T {id:1}),(:T {id:2})
+---- ok
+-STATEMENT MATCH (x:T {id:0}),(y:T {id:1}) CREATE (x)-[:R]->(y)
+---- ok
+-STATEMENT MATCH (x:T {id:1}),(y:T {id:2}) CREATE (x)-[:R]->(y)
+---- ok
+-STATEMENT MATCH (x:T {id:2}),(y:T {id:0}) CREATE (x)-[:R]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G2', ['T'], ['R'])
+---- ok
+-STATEMENT CALL biconnected_components('G2') RETURN node.id, component ORDER BY component, node.id
+---- 3
+0|0
+1|0
+2|0

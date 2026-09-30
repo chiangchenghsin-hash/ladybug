@@ -1,0 +1,21 @@
+{
+  "sample": "B",
+  "description": "菱形供应 + 退化边 + 孤立站:R1,R2→M1;R2,R3→M2;M1,M2→Z;R4→P(退化 |e|=1);孤立站 I(无入边,由节点表统计)",
+  "nodes": [
+    {"ext_id": "R1", "role": "material", "alive": 1},
+    {"ext_id": "R2", "role": "material", "alive": 1},
+    {"ext_id": "R3", "role": "material", "alive": 1},
+    {"ext_id": "R4", "role": "material", "alive": 1},
+    {"ext_id": "M1", "role": "station", "alive": 1},
+    {"ext_id": "M2", "role": "station", "alive": 1},
+    {"ext_id": "Z", "role": "station", "alive": 1},
+    {"ext_id": "P", "role": "station", "alive": 1},
+    {"ext_id": "I", "role": "station", "alive": 1}
+  ],
+  "edges": [
+    {"id": "M1", "members": [{"ext_id": "R1", "role": "material"}, {"ext_id": "R2", "role": "material"}], "h": [1.0, 1.0], "k_e": 2, "edge_alive": 1},
+    {"id": "M2", "members": [{"ext_id": "R2", "role": "material"}, {"ext_id": "R3", "role": "material"}], "h": [1.0, 1.0], "k_e": 2, "edge_alive": 1},
+    {"id": "Z", "members": [{"ext_id": "M1", "role": "station"}, {"ext_id": "M2", "role": "station"}], "h": [1.0, 1.0], "k_e": 2, "edge_alive": 1},
+    {"id": "P", "members": [{"ext_id": "R4", "role": "material"}], "h": [1.0], "k_e": 1, "edge_alive": 1}
+  ]
+}

@@ -1,0 +1,70 @@
+-DATASET CSV empty
+
+--
+
+-CASE SignatureChain
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT CALL project_graph('G', ['SN'], ['SE']);
+---- ok
+# Chain 0->1->2: 3 nodes, 2 edges, 3 SCCs (each node), DAG, max depth 2, 1 source, 1 sink.
+-STATEMENT CALL graph_signature('G') RETURN feature, value WHERE feature = 'num_nodes' OR feature = 'scc_count' OR feature = 'is_dag' OR feature = 'max_depth' OR feature = 'sources' OR feature = 'sinks' ORDER BY feature;
+---- 6
+is_dag|1.0
+max_depth|2.0
+num_nodes|3.0
+scc_count|3.0
+sinks|1.0
+sources|1.0
+
+-CASE SignatureCycle
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 2}), (b:SN {id: 0}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT CALL project_graph('G', ['SN'], ['SE']);
+---- ok
+# Directed 3-cycle: 1 SCC, not a DAG, no sources/sinks.
+-STATEMENT CALL graph_signature('G') RETURN feature, value WHERE feature = 'scc_count' OR feature = 'is_dag' OR feature = 'max_depth' OR feature = 'sources' ORDER BY feature;
+---- 4
+is_dag|0.0
+max_depth|0.0
+scc_count|1.0
+sources|0.0
+
+-CASE SignatureBidirectional
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 0}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT CALL project_graph('G', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL graph_signature('G') RETURN feature, value WHERE feature = 'bidirectional_edges' OR feature = 'scc_count' ORDER BY feature;
+---- 2
+bidirectional_edges|1.0
+scc_count|1.0

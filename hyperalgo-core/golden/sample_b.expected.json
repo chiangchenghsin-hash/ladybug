@@ -1,0 +1,56 @@
+{
+  "sample": "B",
+  "stats": {
+    "n_nodes": 9,
+    "n_edges": 4,
+    "isolated_stations": 5,
+    "degenerate_edges": 1,
+    "note": "孤立站口径(FRZ-01 条款 3)= 无入边节点 = R1,R2,R3,R4,I(料号成员亦计入)"
+  },
+  "s_cc_s1": {
+    "components": 5,
+    "note": "成员侧共现:{R1,R2,R3}、{M1,M2};R4/P/Z 各单点;孤立站不在 CSR 中(由节点表统计,FRZ-01 条款 3)"
+  },
+  "kitting_cc_all_alive": {
+    "blocks": [
+      [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      [
+        "M1",
+        "M2"
+      ],
+      [
+        "R4"
+      ]
+    ],
+    "note": "头 P/Z 不在成员侧;孤立 I 不在图中"
+  },
+  "hitting_set": {
+    "size": 3,
+    "note": "贪心:R2 + {M1|M2} + R4"
+  },
+  "ks_core_1_1": {
+    "layers": [
+      [
+        "P",
+        "Z"
+      ]
+    ],
+    "core": [
+      "R1",
+      "R2",
+      "R3",
+      "M1",
+      "M2",
+      "R4"
+    ],
+    "note": "头节点超度 0 剥落(与 Rust get_core 口径一致);孤立 I 不在图中"
+  },
+  "b_cycles": {
+    "cycles": 0
+  },
+  "fingerprint": "6f30d99a6794b8cfd1ff102adec045e45ec7646c0c4730b418ea9f625f4e38e5"
+}

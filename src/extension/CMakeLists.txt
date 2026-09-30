@@ -56,7 +56,7 @@ add_library(lbug_extension
         loaded_extension.cpp
 )
 
-if (NOT BUILD_WASM)
+if (NOT BUILD_WASM AND OpenSSL_FOUND)
     target_compile_definitions(lbug_extension PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
     target_include_directories(lbug_extension PRIVATE ${OPENSSL_INCLUDE_DIR})
 endif ()

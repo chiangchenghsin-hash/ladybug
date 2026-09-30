@@ -1,0 +1,17 @@
+{
+  "sample": "C1",
+  "description": "同料双供(反例锁定)——x1/x2 同料号 X 共享需求组,g(e)=2 默认 k_e=2;x2 活 → 齐(同料多供韧性)",
+  "nodes": [
+    {"ext_id": "x1", "role": "material", "alive": 0},
+    {"ext_id": "x2", "role": "material", "alive": 1},
+    {"ext_id": "y1", "role": "material", "alive": 1},
+    {"ext_id": "Z", "role": "station", "alive": 1}
+  ],
+  "edges": [
+    {"id": "Z", "members": [
+      {"ext_id": "x1", "role": "material", "material_id": "X"},
+      {"ext_id": "x2", "role": "material", "material_id": "X"},
+      {"ext_id": "y1", "role": "material", "material_id": "Y"}
+    ], "h": [1.0, 1.0, 1.0], "k_e": 2, "edge_alive": 1}
+  ]
+}

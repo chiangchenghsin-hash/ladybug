@@ -1,0 +1,49 @@
+-DATASET CSV empty
+--
+
+-CASE ApproxBetweennessBarbell
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4}),(:N {id:5}),(:N {id:6}),(:N {id:7})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:2}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:3}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:5}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:6}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:6}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:6}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL approx_betweenness('G') RETURN node.id, score, is_approx ORDER BY node.id
+---- 8
+0|0.000000|True
+1|0.000000|True
+2|0.000000|True
+3|0.574190|True
+4|0.573794|True
+5|0.000000|True
+6|0.000000|True
+7|0.000000|True

@@ -1,0 +1,166 @@
+-DATASET CSV empty
+
+--
+
+-CASE GedIsoSameGraph
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT CALL project_graph('GA', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('GB', ['SN'], ['SE']);
+---- ok
+# Isomorphic graphs -> distance 0 (fast path: trivial upper bound == 0).
+-STATEMENT CALL graph_edit_distance('GA', 'GB') RETURN distance, node_edits, edge_edits, approximate;
+---- 1
+0.0|3|2|False
+
+-CASE GedChainVsMissingEdge
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 0}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT CALL project_graph('SB', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('AI', ['AN'], ['AE']);
+---- ok
+# Chain 0->1->2 vs 0->1 (missing edge): delete edge (1,2) -> distance 1.
+-STATEMENT CALL graph_edit_distance('SB', 'AI') RETURN distance, node_edits, edge_edits, approximate;
+---- 1
+1.0|3|2|False
+
+-CASE GedDirectionSensitive
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 0}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 2}), (b:AN {id: 0}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT CALL project_graph('SO', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('FI', ['AN'], ['AE']);
+---- ok
+# star-out {0->1, 0->2} vs {0->1, 2->0} (fan-in): out-degree sequence differs,
+# not isomorphic -> one edge must be deleted + one inserted = distance 2.
+-STATEMENT CALL graph_edit_distance('SO', 'FI') RETURN distance, node_edits, edge_edits, approximate;
+---- 1
+2.0|3|3|False
+
+-CASE GedNodeCountDiff
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2}), (:AN {id: 3});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 0}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 1}), (b:AN {id: 2}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT CALL project_graph('SB', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('AI', ['AN'], ['AE']);
+---- ok
+# Chain of 3 vs chain of 4: insert one node + its edge -> distance 2.
+-STATEMENT CALL graph_edit_distance('SB', 'AI') RETURN distance, node_edits, edge_edits, approximate;
+---- 1
+2.0|4|3|False
+
+-CASE GedEmptyVsSingle
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CALL project_graph('GE', ['SN'], ['SE']);
+---- ok
+-STATEMENT CREATE (:AN {id: 0});
+---- ok
+-STATEMENT CALL project_graph('GS', ['AN'], ['AE']);
+---- ok
+# Empty graph vs single node: insert one node -> distance 1.
+-STATEMENT CALL graph_edit_distance('GE', 'GS') RETURN distance, node_edits, edge_edits, approximate;
+---- 1
+1.0|1|0|False
+
+-CASE GedApproxMode
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 0}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT CALL project_graph('SB', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('AI', ['AN'], ['AE']);
+---- ok
+# bipartite 近似（大图 fallback）：结果 = 合法编辑路径（上界），approximate 列 = True。
+-STATEMENT CALL graph_edit_distance('SB', 'AI', approximate := true) RETURN distance, node_edits, edge_edits, approximate;
+---- 1
+1.0|3|2|True

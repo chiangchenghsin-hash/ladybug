@@ -1,0 +1,56 @@
+{
+  "sample": "A",
+  "stats": {
+    "n_nodes": 5,
+    "n_edges": 4,
+    "isolated_stations": 1,
+    "degenerate_edges": 4
+  },
+  "kitting_cc_all_alive": {
+    "blocks": [
+      [
+        "R"
+      ],
+      [
+        "A"
+      ],
+      [
+        "B"
+      ],
+      [
+        "C"
+      ]
+    ],
+    "note": "D 为纯头节点(非成员)不计块"
+  },
+  "hitting_set": {
+    "nodes": [
+      "R",
+      "A",
+      "B",
+      "C"
+    ],
+    "size": 4
+  },
+  "ks_core_1_1": {
+    "layers": [
+      [
+        "D"
+      ]
+    ],
+    "core": [
+      "R",
+      "A",
+      "B",
+      "C"
+    ]
+  },
+  "b_cycles": {
+    "cycles": 0
+  },
+  "s_cc_s1": {
+    "components": 5,
+    "note": "全退化边:无共现对,s-walk 连通退化为单点"
+  },
+  "fingerprint": "1b9b476dbf16571009f6eb87ed82536ffe6e714c0aa41527e3b29a2567b207ea"
+}

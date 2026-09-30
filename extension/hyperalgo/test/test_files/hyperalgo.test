@@ -1,0 +1,149 @@
+-DATASET CSV empty
+
+--
+
+# hyperalgo 扩展 E2E:构造层(hyper_project)+ 分析层七函数
+# 黄金图集 = P-1 SPEC v1.1 FRZ-12 样例 A 形态(4 站串联链 + 环形回路变体)
+# 节点 ext id = "<tableID>:<offset>"(单节点表 → 0:0..0:3)。测试框架每个 CASE 独立建库,故自包含。
+
+-CASE HyperalgoChainAll
+-LOAD_DYNAMIC_EXTENSION hyperalgo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE FLOWS(FROM N TO N, weight DOUBLE)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3})
+---- ok
+-STATEMENT MATCH (a:N {id:0}),(b:N {id:1}) CREATE (a)-[:FLOWS {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:1}),(b:N {id:2}) CREATE (a)-[:FLOWS {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:N {id:2}),(b:N {id:3}) CREATE (a)-[:FLOWS {weight:1.0}]->(b)
+---- ok
+-LOG 构造统计(FRZ-10):孤立站 = 无入边节点 0:0;退化边 = |e|=1 三条
+-STATEMENT CALL hyper_project('g', ['N'], ['FLOWS']) RETURN graph, n_nodes, n_edges, isolated_stations, degenerate_edges
+---- 1
+g|4|3|1|3
+-LOG 指纹跨端核验(FRZ-12 checklist 3):与 hyperalgo-core CLI 同图同 ext id 期望值一致
+-STATEMENT CALL hyper_project('g', ['N'], ['FLOWS']) RETURN fingerprint
+---- 1
+c2f4a301f7a6ead85ba01e99814d786a08bc1e8ef659834efba9faf4ac2b1c88
+-LOG s-walk 连通:s=1/s=2 均 4 个单点分量(全退化边,无共现对)
+-STATEMENT CALL hyper_s_cc('g', 1) RETURN node, component_id ORDER BY node
+---- 4
+0:0|0
+0:1|1
+0:2|2
+0:3|3
+-STATEMENT CALL hyper_s_cc('g', 2) RETURN node, component_id ORDER BY node
+---- 4
+0:0|0
+0:1|1
+0:2|2
+0:3|3
+-LOG 齐套连通:块 {0:0},{0:1},{0:2};纯头节点 0:3 不在成员侧不出行
+-STATEMENT CALL hyper_kitting_cc('g') RETURN node, block_id ORDER BY node
+---- 3
+0:0|0
+0:1|1
+0:2|2
+-LOG 贪心击垮集:每超边单成员 → 依次取 0:0,0:1,0:2(按选择序)
+-STATEMENT CALL hyper_hit_set('g') RETURN node
+---- 3
+0:0
+0:1
+0:2
+-LOG (1,1)-core:头节点 0:3 超度 0 → 第 0 层剥落;其余稳定
+-STATEMENT CALL hyper_ks_core('g', 1, 1) RETURN node, layer ORDER BY node
+---- 1
+0:3|0
+-LOG 链无回路(验收:4 级链人为断一环场景)
+-STATEMENT CALL hyper_b_cycles('g') RETURN cycle_id, edge
+---- 0
+-LOG 浮点函数烟雾:行数断言(精确值由 hyperalgo-core 单测覆盖)
+-STATEMENT CALL hyper_pr_walk('g', 0.15, 100, 1e-9) RETURN COUNT(*) AS c
+---- 1
+4
+-STATEMENT CALL hyper_fiedler('g') RETURN COUNT(*) AS c
+---- 1
+4
+
+-CASE HyperalgoRingCycle
+-LOAD_DYNAMIC_EXTENSION hyperalgo
+-STATEMENT CREATE NODE TABLE R(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE FLOWS_R(FROM R TO R, weight DOUBLE)
+---- ok
+-STATEMENT CREATE (:R {id:0}),(:R {id:1}),(:R {id:2}),(:R {id:3})
+---- ok
+-STATEMENT MATCH (a:R {id:0}),(b:R {id:1}) CREATE (a)-[:FLOWS_R {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:R {id:1}),(b:R {id:2}) CREATE (a)-[:FLOWS_R {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:R {id:2}),(b:R {id:3}) CREATE (a)-[:FLOWS_R {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:R {id:3}),(b:R {id:0}) CREATE (a)-[:FLOWS_R {weight:1.0}]->(b)
+---- ok
+-STATEMENT CALL hyper_project('r', ['R'], ['FLOWS_R']) RETURN *
+---- 1
+r|4|4|0|4|8f1cdac6401b74f2c24676af8a1616158bf8277fc1d6edc5304ccbb88bb3b82f
+-LOG 环形 FLOWS → 恰好 1 条 B-回路(4 超边,e_0→e_1→e_2→e_3→e_0;edge = S 业务 ext id)
+-STATEMENT CALL hyper_b_cycles('r') RETURN cycle_id, edge ORDER BY cycle_id, edge
+---- 4
+0|0:0
+0|0:1
+0|0:2
+0|0:3
+
+-CASE HyperalgoGoldenJudge
+-LOAD_DYNAMIC_EXTENSION hyperalgo
+-LOG 判定层金本(FRZ-11 v0 单站直接上游布尔齐套)+ 分析层互证(P-1.5 §4 条款 1)
+-LOG 同轮数据:4 级链 0→1→2→3,RoundState 全库存 5.0;指纹一致为对拍前提(FRZ-07.1)
+-STATEMENT CREATE NODE TABLE Agent(id INT64 PRIMARY KEY, stationType STRING, material_id STRING)
+---- ok
+-STATEMENT CREATE NODE TABLE RoundState(id INT64 PRIMARY KEY, round INT32, agent_id INT64, inventory DOUBLE)
+---- ok
+-STATEMENT CREATE REL TABLE SUPPLY(FROM Agent TO Agent, weight DOUBLE)
+---- ok
+-STATEMENT CREATE (:Agent {id:0, stationType:'process', material_id:''}),(:Agent {id:1, stationType:'process', material_id:''}),(:Agent {id:2, stationType:'process', material_id:''}),(:Agent {id:3, stationType:'process', material_id:''}),(:Agent {id:4, stationType:'process', material_id:''})
+---- ok
+-STATEMENT CREATE (:RoundState {id:0, round:1, agent_id:0, inventory:5.0}),(:RoundState {id:1, round:1, agent_id:1, inventory:5.0}),(:RoundState {id:2, round:1, agent_id:2, inventory:5.0})
+---- ok
+-STATEMENT MATCH (a:Agent {id:0}),(b:Agent {id:1}) CREATE (a)-[:SUPPLY {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:Agent {id:1}),(b:Agent {id:2}) CREATE (a)-[:SUPPLY {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (a:Agent {id:2}),(b:Agent {id:3}) CREATE (a)-[:SUPPLY {weight:1.0}]->(b)
+---- ok
+-STATEMENT MATCH (s:Agent) WHERE s.id = 1 OPTIONAL MATCH (u:Agent)-[f:SUPPLY]->(s) OPTIONAL MATCH (rs:RoundState) WHERE rs.round = 1 AND rs.agent_id = u.id WITH s, collect({uid: u.id, inv: coalesce(rs.inventory, 0.0)}) AS sup RETURN size(list_filter(sup, x -> x.uid IS NOT NULL)) = 0 AS no_supplier, all(x IN sup WHERE x.uid IS NULL OR x.inv > 0) AS kitting
+---- 1
+False|True
+-LOG 判定层 CALL(P3a-v0 决策:扩展内实现;与上条 Cypher 金本同图互证):站 1/2/3 有上游齐套,孤立站 4 no_supplier
+-STATEMENT CALL hyper_kitting_bool('kj', ['Agent'], ['SUPPLY'], 'RoundState', 1) RETURN station, no_supplier, kitting, missing ORDER BY station
+---- 4
+1|False|True|[]
+2|False|True|[]
+3|False|True|[]
+4|True|True|[]
+-STATEMENT MATCH (r:RoundState {agent_id:0}) SET r.inventory = 0.0
+---- ok
+-LOG 断供后同一金本:站 1 缺料 [0]
+-STATEMENT MATCH (s:Agent) WHERE s.id = 1 OPTIONAL MATCH (u:Agent)-[f:SUPPLY]->(s) OPTIONAL MATCH (rs:RoundState) WHERE rs.round = 1 AND rs.agent_id = u.id WITH s, collect({uid: u.id, inv: coalesce(rs.inventory, 0.0)}) AS sup RETURN size(list_filter(sup, x -> x.uid IS NOT NULL)) = 0 AS no_supplier, all(x IN sup WHERE x.uid IS NULL OR x.inv > 0) AS kitting, list_transform(list_filter(sup, x -> x.uid IS NOT NULL AND x.inv <= 0), y -> y.uid) AS missing
+---- 1
+False|False|[0]
+-LOG 判定层 CALL 同图互证:站 1 断供后与 Cypher 金本同判(kitting=False,missing=[0])
+-STATEMENT CALL hyper_kitting_bool('kj', ['Agent'], ['SUPPLY'], 'RoundState', 1) RETURN station, no_supplier, kitting, missing ORDER BY station
+---- 4
+1|False|False|[0]
+2|False|True|[]
+3|False|True|[]
+4|True|True|[]
+-LOG 分析层互证:同图 hyper_project 指纹 = 核心 CLI 期望值;齐套连通块与判定层一致
+-STATEMENT CALL hyper_project('gj', ['Agent'], ['SUPPLY']) RETURN graph, n_nodes, n_edges, isolated_stations, degenerate_edges, fingerprint
+---- 1
+gj|4|3|2|3|c2f4a301f7a6ead85ba01e99814d786a08bc1e8ef659834efba9faf4ac2b1c88
+-STATEMENT CALL hyper_kitting_cc('gj') RETURN node, block_id ORDER BY node
+---- 3
+0:0|0
+0:1|1
+0:2|2

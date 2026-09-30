@@ -20,7 +20,9 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
         COMMAND libtool -static -o "${BUNDLED_LIBRARY}" "${MAIN_LIBRARY}" ${STATIC_LIBRARY_LIST}
         RESULT_VARIABLE BUNDLE_RESULT
         COMMAND_ERROR_IS_FATAL ANY)
-elseif(CMAKE_HOST_WIN32)
+elseif(CMAKE_HOST_WIN32 AND NOT AR_EXECUTABLE MATCHES "emar")
+    # MSVC-style /OUT: only works with lib.exe; emscripten's llvm-ar (used in
+    # wasm builds even on a Windows host) falls through to the MRI script below.
     execute_process(
         COMMAND "${AR_EXECUTABLE}" "/OUT:${BUNDLED_LIBRARY}" "${MAIN_LIBRARY}" ${STATIC_LIBRARY_LIST}
         RESULT_VARIABLE BUNDLE_RESULT

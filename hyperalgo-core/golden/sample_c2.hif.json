@@ -1,0 +1,19 @@
+{
+  "sample": "C2",
+  "description": "异料单供 4 料(反例锁定:P0-1 修订建议④)——g(e)=4 默认 k_e=4;只到 1 种料 → 不齐(v1.0 默认 k_e=1 误判齐套已修复)",
+  "nodes": [
+    {"ext_id": "M1", "role": "material", "alive": 1},
+    {"ext_id": "M2", "role": "material", "alive": 0},
+    {"ext_id": "M3", "role": "material", "alive": 0},
+    {"ext_id": "M4", "role": "material", "alive": 0},
+    {"ext_id": "Z", "role": "station", "alive": 1}
+  ],
+  "edges": [
+    {"id": "Z", "members": [
+      {"ext_id": "M1", "role": "material"},
+      {"ext_id": "M2", "role": "material"},
+      {"ext_id": "M3", "role": "material"},
+      {"ext_id": "M4", "role": "material"}
+    ], "h": [1.0, 1.0, 1.0, 1.0], "k_e": 4, "edge_alive": 0}
+  ]
+}

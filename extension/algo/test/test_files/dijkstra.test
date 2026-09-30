@@ -1,0 +1,40 @@
+-DATASET CSV empty
+--
+
+-CASE DijkstraWeightedChain
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N, weight DOUBLE)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E {weight:1}]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E {weight:3}]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL dijkstra('G', 0) RETURN node.id, distance ORDER BY node.id
+---- 3
+0|0.000000
+1|1.000000
+2|4.000000
+
+-CASE DijkstraNegativeWeight
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE T(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE R(FROM T TO T, weight DOUBLE)
+---- ok
+-STATEMENT CREATE (:T {id:0}),(:T {id:1}),(:T {id:2})
+---- ok
+-STATEMENT MATCH (x:T {id:0}),(y:T {id:1}) CREATE (x)-[:R {weight:-1}]->(y)
+---- ok
+-STATEMENT MATCH (x:T {id:1}),(y:T {id:2}) CREATE (x)-[:R {weight:2}]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G2', ['T'], ['R'])
+---- ok
+-STATEMENT CALL dijkstra('G2', 0) RETURN node.id, distance ORDER BY node.id
+---- error
+Binder exception: DIJKSTRA does not support negative edge weights/capacities.

@@ -1,4 +1,4 @@
-set(EXTENSION_LIST adbc azure delta duckdb ducklake fts httpfs iceberg json llm pg_client postgres sqlite unity_catalog vector neo4j algo gql)
+set(EXTENSION_LIST adbc azure delta duckdb ducklake fts httpfs hyperalgo iceberg json llm pg_client postgres sqlite unity_catalog vector neo4j algo gql timeseries)
 
 #set(EXTENSION_STATIC_LINK_LIST fts)
 foreach(extension IN LISTS EXTENSION_STATIC_LINK_LIST)
@@ -11,6 +11,7 @@ if(${BUILD_WASM})
     add_static_link_extension(json)
     add_static_link_extension(vector)
     add_static_link_extension(algo)
+    add_static_link_extension(timeseries)
 endif()
 
 if(ANDROID_ABI)

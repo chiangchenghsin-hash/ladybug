@@ -1,0 +1,139 @@
+-DATASET CSV empty
+
+--
+
+-CASE TopologicalSortDAG
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE TN(id INT64 PRIMARY KEY, name STRING);
+---- ok
+-STATEMENT CREATE REL TABLE TE(FROM TN TO TN);
+---- ok
+-STATEMENT CREATE (:TN {id: 10, name: 'x'}), (:TN {id: 11, name: 'y'}), (:TN {id: 12, name: 'z'}), (:TN {id: 13, name: 'w'});
+---- ok
+-STATEMENT MATCH (a:TN {id: 10}), (b:TN {id: 11}) CREATE (a)-[:TE]->(b);
+---- ok
+-STATEMENT MATCH (a:TN {id: 11}), (b:TN {id: 12}) CREATE (a)-[:TE]->(b);
+---- ok
+-STATEMENT MATCH (a:TN {id: 13}), (b:TN {id: 11}) CREATE (a)-[:TE]->(b);
+---- ok
+-STATEMENT CALL project_graph('TG', ['TN'], ['TE']);
+---- ok
+# Branch DAG: sources 10/13 (rank 0/1, depth 0), then 11 (depth 1), then 12 (depth 2).
+-STATEMENT CALL topological_sort('TG') RETURN node.id, topo_rank, depth ORDER BY topo_rank;
+---- 4
+10|0|0
+13|1|0
+11|2|1
+12|3|2
+
+-CASE TopologicalSortCyclic
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE TN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE TE(FROM TN TO TN);
+---- ok
+-STATEMENT CREATE (:TN {id: 0}), (:TN {id: 1}), (:TN {id: 2});
+---- ok
+-STATEMENT MATCH (a:TN {id: 0}), (b:TN {id: 1}) CREATE (a)-[:TE]->(b);
+---- ok
+-STATEMENT MATCH (a:TN {id: 1}), (b:TN {id: 2}) CREATE (a)-[:TE]->(b);
+---- ok
+-STATEMENT MATCH (a:TN {id: 2}), (b:TN {id: 0}) CREATE (a)-[:TE]->(b);
+---- ok
+-STATEMENT CALL project_graph('TCy', ['TN'], ['TE']);
+---- ok
+-STATEMENT CALL topological_sort('TCy') RETURN node.id;
+---- error
+Binder exception: Graph contains a cycle; TOPOLOGICAL_SORT is only defined for DAGs. Use STRONGLY_CONNECTED_COMPONENTS to locate the cycle.
+
+-CASE GraphDiffReflexion
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2}), (:SN {id: 3});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2}), (:AN {id: 3});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 0}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 1}), (b:AN {id: 2}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 3}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT CALL project_graph('SB', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('AI', ['AN'], ['AE']);
+---- ok
+# SHOULD-BE: 0->1, 1->2. AS-IS: 0->1, 1->2, 3->1. convergence x2, divergence (3,1), absence none.
+-STATEMENT CALL graph_diff('SB', 'AI') RETURN src, dst, status ORDER BY status, src, dst;
+---- 3
+0|1|convergence
+1|2|convergence
+3|1|divergence
+
+-CASE GraphDiffMissingEdge
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2});
+---- ok
+-STATEMENT MATCH (a:SN {id: 0}), (b:SN {id: 1}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 1}), (b:SN {id: 2}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:SN {id: 2}), (b:SN {id: 0}) CREATE (a)-[:SE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 0}), (b:AN {id: 1}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT MATCH (a:AN {id: 1}), (b:AN {id: 2}) CREATE (a)-[:AE]->(b);
+---- ok
+-STATEMENT CALL project_graph('SB', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('AI', ['AN'], ['AE']);
+---- ok
+# SHOULD-BE has 0->1,1->2,2->0; AS-IS only 0->1,1->2: absence (2,0).
+-STATEMENT CALL graph_diff('SB', 'AI') RETURN src, dst, status ORDER BY status, src, dst;
+---- 3
+0|1|convergence
+1|2|convergence
+2|0|absence
+
+-CASE GraphDiffNodeCountMismatch
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE SN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE NODE TABLE AN(id INT64 PRIMARY KEY);
+---- ok
+-STATEMENT CREATE REL TABLE SE(FROM SN TO SN);
+---- ok
+-STATEMENT CREATE REL TABLE AE(FROM AN TO AN);
+---- ok
+-STATEMENT CREATE (:SN {id: 0}), (:SN {id: 1}), (:SN {id: 2});
+---- ok
+-STATEMENT CREATE (:AN {id: 0}), (:AN {id: 1}), (:AN {id: 2}), (:AN {id: 3});
+---- ok
+-STATEMENT CALL project_graph('SB', ['SN'], ['SE']);
+---- ok
+-STATEMENT CALL project_graph('AI', ['AN'], ['AE']);
+---- ok
+-STATEMENT CALL graph_diff('SB', 'AI') RETURN src, dst, status;
+---- error
+Binder exception: GRAPH_DIFF requires equal node counts for offset alignment (SHOULD-BE: 3 nodes, AS-IS: 4 nodes).

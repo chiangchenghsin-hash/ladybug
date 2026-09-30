@@ -1,0 +1,43 @@
+-DATASET CSV empty
+--
+
+-CASE LinkPredictionKnownAnswers
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL link_prediction('G', source := 0, target := 1, metric := 'common_neighbors') RETURN source, target, metric_name, score
+---- 1
+0|1|common_neighbors|2.000000
+-STATEMENT CALL link_prediction('G', source := 0, target := 1, metric := 'all') RETURN source, target, metric_name, score ORDER BY metric_name
+---- 6
+0|1|adamic_adar|2.885390
+0|1|common_neighbors|2.000000
+0|1|jaccard|1.000000
+0|1|katz_index|0.005051
+0|1|preferential_attachment|4.000000
+0|1|resource_allocation|1.000000
+-STATEMENT CALL link_prediction('G', source := 0, target := 1, metric := 'katz_index', alpha := 0.05) RETURN source, target, metric_name, score
+---- 1
+0|1|katz_index|0.005051
+-STATEMENT CALL link_prediction('G', pivot_node := 0) RETURN source, target, metric_name, score ORDER BY source, target
+---- 3
+0|1|adamic_adar|2.885390
+0|2|adamic_adar|0.000000
+0|3|adamic_adar|0.000000
+-STATEMENT CALL link_prediction('G', pivot_node := 0, metric := 'all') RETURN source, target, metric_name, score
+---- error
+Binder exception: LINK_PREDICTION metric='all' requires an explicit source+target.

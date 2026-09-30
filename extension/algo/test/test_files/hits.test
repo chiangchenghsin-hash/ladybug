@@ -1,0 +1,31 @@
+-DATASET CSV empty
+--
+
+-CASE HitsDirectedStar
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4}),(:N {id:5})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:5}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL hits('G') RETURN node.id, hub, authority ORDER BY node.id
+---- 6
+0|1.000000|0.000000
+1|0.000000|0.200000
+2|0.000000|0.200000
+3|0.000000|0.200000
+4|0.000000|0.200000
+5|0.000000|0.200000

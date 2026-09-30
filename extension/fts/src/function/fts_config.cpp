@@ -154,7 +154,7 @@ CreateFTSConfig::CreateFTSConfig(main::ClientContext& context, common::table_id_
             value.validateType(common::LogicalTypeID::STRING);
             tokenizerInfo.tokenizer = common::StringUtils::getLower(value.getValue<std::string>());
             Tokenizer::validate(tokenizerInfo.tokenizer);
-        } else if (lowerCaseName == "jieba_dict_dir") {
+        } else if (lowerCaseName == "jieba_dict_dir" || lowerCaseName == "mecab_dict_dir") {
             value.validateType(common::LogicalTypeID::STRING);
             tokenizerInfo.jiebaDictDir =
                 common::StringUtils::getLower(value.getValue<std::string>());
@@ -214,12 +214,13 @@ void TopK::validate(uint64_t value) {
 }
 
 void Tokenizer::validate(const std::string& tokenizer) {
-    if (tokenizer == "simple" || tokenizer == "jieba") {
+    if (tokenizer == "simple" || tokenizer == "jieba" || tokenizer == "mecab") {
         return;
     }
     throw common::BinderException{
         "Unsupported tokenizer: " + tokenizer +
-        ".\nSupported tokenizers: 'simple' (default), 'jieba' (advanced Chinese)"};
+        ".\nSupported tokenizers: 'simple' (default), 'jieba' (advanced Chinese), 'mecab' "
+        "(Japanese)"};
 }
 
 } // namespace fts_extension

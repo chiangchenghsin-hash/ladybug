@@ -1,0 +1,65 @@
+-DATASET CSV empty
+--
+
+-CASE LabelPropagationTwoK5
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4}),(:N {id:5}),(:N {id:6}),(:N {id:7}),(:N {id:8}),(:N {id:9})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:2}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:2}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:3}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:6}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:8}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:9}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:6}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:6}),(y:N {id:8}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:6}),(y:N {id:9}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:7}),(y:N {id:8}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:7}),(y:N {id:9}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:8}),(y:N {id:9}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL label_propagation('G') RETURN node.id, community ORDER BY node.id
+---- 10
+0|0
+1|0
+2|0
+3|0
+4|0
+5|1
+6|1
+7|1
+8|1
+9|1

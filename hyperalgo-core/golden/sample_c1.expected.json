@@ -1,0 +1,17 @@
+{
+  "sample": "C1",
+  "stats": {
+    "n_nodes": 4,
+    "n_edges": 1,
+    "isolated_stations": 3,
+    "degenerate_edges": 0
+  },
+  "booleanize": {
+    "groups": 2,
+    "k_e": 2,
+    "alive_groups": 2,
+    "edge_alive": 1
+  },
+  "note": "x1/x2 同料号共享需求组:缺 1 家(x1 死)仍齐(2/2 组活);x2 也死 → 1/2 < 2 不齐;孤立站口径(FRZ-01 条款 3)= 无入边节点 = x1,x2,y1(料号成员亦计入)",
+  "fingerprint": "34a97fb90b41a1766fc3cd372eeead6f761de4a67c7b050e2546e2a84ce2d6b0"
+}

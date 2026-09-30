@@ -2,15 +2,20 @@
 
 #include <algorithm>
 #include <cctype>
+#include <format>
+#include <memory>
 #include <optional>
 
+#include "common/exception/binder.h"
 #include "common/string_utils.h"
 #include "cppjieba/Jieba.hpp"
 #include "function/stem.h"
 #include "libstemmer.h"
+#include "mecab.h"
 #include "re2.h"
 #include "storage/storage_manager.h"
 #include "storage/table/node_table.h"
+#include "utils/dict_dir_resolver.h"
 
 namespace lbug {
 namespace fts_extension {
@@ -151,6 +156,35 @@ std::vector<std::string> FTSUtils::tokenizeString(std::string& str, const FTSCon
             return std::all_of(term.begin(), term.end(),
                 [](unsigned char c) { return std::isspace(c); });
         });
+    } else if (config.tokenizer == "mecab") {
+        // Same cross-machine fallback as the jieba tokenizer: a stale
+        // machine-specific path from the catalog is retried against the
+        // extension-adjacent dictionary before giving up.
+        auto dictDir = resolveDictDir(config.jiebaDictDir, DictKind::MECAB);
+        // Pass the rc file explicitly. Without -r, MeCab falls back to
+        // MECAB_DEFAULT_RC, a build-time absolute path that does not exist in
+        // deployed environments — the tagger then fails to create.
+        std::unique_ptr<MeCab::Tagger, decltype(&MeCab::deleteTagger)> tagger(
+            MeCab::createTagger((std::string("-d ") + dictDir + " -r " + dictDir + "/mecabrc").c_str()),
+            MeCab::deleteTagger);
+        if (!tagger) {
+            auto lastError = MeCab::getLastError();
+            throw common::BinderException{std::format(
+                "Failed to create mecab tagger with dict dir: '{}'. (mecab error: {})", dictDir,
+                lastError ? lastError : "unknown")};
+        }
+        // parseToNode() returns nodes whose surface points into `str`, so the
+        // surface must be copied out while `str` is still alive.
+        const MeCab::Node* node = tagger->parseToNode(str.c_str());
+        for (; node; node = node->next) {
+            if (node->stat == MECAB_BOS_NODE || node->stat == MECAB_EOS_NODE) {
+                continue;
+            }
+            if (node->surface == nullptr || node->length == 0) {
+                continue;
+            }
+            terms.emplace_back(node->surface, node->length);
+        }
     } else {
         terms = StringUtils::split(str, " ", true /* ignoreEmptyStringParts */);
     }

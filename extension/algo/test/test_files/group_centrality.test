@@ -1,0 +1,50 @@
+-DATASET CSV empty
+--
+
+-CASE GroupCentralityKnownAnswers
+-LOAD_DYNAMIC_EXTENSION algo
+-STATEMENT CREATE NODE TABLE N(id INT64 PRIMARY KEY)
+---- ok
+-STATEMENT CREATE REL TABLE E(FROM N TO N)
+---- ok
+-STATEMENT CREATE (:N {id:0}),(:N {id:1}),(:N {id:2}),(:N {id:3}),(:N {id:4}),(:N {id:5}),(:N {id:6}),(:N {id:7})
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:1}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:0}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:2}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:1}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:2}),(y:N {id:3}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:3}),(y:N {id:4}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:5}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:6}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:4}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:6}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:5}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT MATCH (x:N {id:6}),(y:N {id:7}) CREATE (x)-[:E]->(y)
+---- ok
+-STATEMENT CALL PROJECT_GRAPH('G', ['N'], ['E'])
+---- ok
+-STATEMENT CALL group_betweenness('G', 2) RETURN node.id, group_score, rank_in_group ORDER BY rank_in_group
+---- 2
+3|0.571429|1
+4|0.785714|2
+-STATEMENT CALL group_betweenness('G', 2, output := 'group_summary') RETURN group_id, group_score, member_count, members
+---- 1
+0|0.785714|2|[3,4]
+-STATEMENT CALL group_closeness('G', 2) RETURN node.id, group_score ORDER BY node.id
+---- 2
+3|5.500000
+4|6.000000

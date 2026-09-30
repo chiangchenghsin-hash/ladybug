@@ -1,0 +1,17 @@
+{
+  "sample": "A",
+  "description": "四级链(教科书基准):R→A→B→C→D;全退化边;b_cycles 空",
+  "nodes": [
+    {"ext_id": "R", "role": "material", "alive": 1},
+    {"ext_id": "A", "role": "station", "alive": 1},
+    {"ext_id": "B", "role": "station", "alive": 1},
+    {"ext_id": "C", "role": "station", "alive": 1},
+    {"ext_id": "D", "role": "station", "alive": 1}
+  ],
+  "edges": [
+    {"id": "A", "members": [{"ext_id": "R", "role": "material"}], "h": [1.0], "k_e": 1, "edge_alive": 1},
+    {"id": "B", "members": [{"ext_id": "A", "role": "station"}], "h": [1.0], "k_e": 1, "edge_alive": 1},
+    {"id": "C", "members": [{"ext_id": "B", "role": "station"}], "h": [1.0], "k_e": 1, "edge_alive": 1},
+    {"id": "D", "members": [{"ext_id": "C", "role": "station"}], "h": [1.0], "k_e": 1, "edge_alive": 1}
+  ]
+}
