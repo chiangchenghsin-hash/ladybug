@@ -48,31 +48,23 @@ _build_gql.bat
 E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gtest_filter="gql~test~test_files~*"
 ```
 
-## 三、当前测试战果（最后一轮）
+## 三、当前测试战果
 
-**通过**：basic.* 全部回归绿（10 个）、unsupported 中 LET/NEXT/SET label/REMOVE label/
-label 表达式/量词路径/事务包裹/MERGE-not-GQL、routing 中 DropGraphIfExists/TransactionRouting、
-write 中多数（InsertLiteralSafety/Delete/DetachDelete/SetProperty/InsertThenMatch）。
+**✅ 44/44 全绿**（2026-09-30 第二班收工）：
+basic 11（回归）/ select 6（FROM GRAPH 归一化、CURRENT_GRAPH、DISTINCT、SKIP/LIMIT、`||`）/
+groupby 4（隐式+显式分组、HAVING）/ write 7（INSERT 字面量安全、DELETE、DETACH、SET 快照、REMOVE）/
+routing 4 / unsupported 13。
 
-**未过（根因已全部定位，修复方案明确）**：
-1. **SELECT 全挂（parse error）**：ISO GQL 语法是 `FROM <图名> MATCH`（**无 GRAPH 关键字**，
-   LDBC 官方示例 `FROM friends MATCH …`；`FROM CURRENT_GRAPH MATCH …`）。
-   修复：(a) bindFunc 前做字面量安全的 `FROM GRAPH x`→`FROM x` 宽容归一化（AI 常写错）；
-   (b) 测试改用 `FROM main MATCH` / `FROM CURRENT_GRAPH MATCH`，保留一条 `FROM GRAPH main` 测归一化。
-   ——transformer 本身不用动（它接 selectGraphMatch）。
-2. **聚合查询 ORDER BY 报 "Variable n is not in scope"**：Ladybug 聚合后 ORDER BY 只能引用投影别名。
-   修复：隐式聚合 RETURN 形态下，把 ORDER BY 里与 select item 表达式相同的 span 换成其别名
-   （WITH 形态已做，buildOrderPage(reps)；给 RETURN 形态补 item→alias 的 reps）。
-   双跑 Cypher 期望也改成 `ORDER BY age`（别名）。
-3. **SetSnapshotOrderParity 测试自身设计错**：双跑 Cypher 把已更新的行又改了一遍（得 99|99）。
-   改两行数据（v:1 GQL 跑、v:2 Cypher 跑）再对比。
-4. **布尔渲染是 `True` 不是 `true`**：RemovePropertyParity 期望改 `True`。
-5. **unsupported 两条语法写错**：
-   - CREATE GRAPH TYPE 要写 `{ NODE Person {name STRING} }`（elementTypeSpecification 形态），
-     不是 `{name STRING}`；
-   - `SESSION SET SCHEMA main` 过不了 parse（schemaReference 不是裸名）——查
-     `relativeCatalogSchemaReference/predefinedSchemaReference` 后改写法，或改断言为
-     error(regex) 接受 parse 错误。
+本轮修复记录（备查）：
+1. **SELECT parse error**：ISO GQL 的 FROM 后**无 GRAPH 关键字**（`FROM <图名> MATCH`，
+   LDBC 示例 `FROM friends MATCH …`）。已在 bindFunc 加字面量安全的 `FROM GRAPH x`→`FROM x`
+   宽容归一化（`normalizeFromGraphClause`），测试覆盖两种拼写。
+2. **ORDER BY/HAVING 的表达式改写全部改为文本级替换**（`replaceExprs`：字面量安全+边界感知+最长优先）——
+   原 span 偏移数学对"新出现位置"的表达式无效。DISTINCT 与聚合同样只认投影别名。
+3. **聚合投影按文本去重**：同一聚合出现在 SELECT+HAVING 只投影一次（修
+   `Multiple result columns with the same name c`）。
+4. 测试修正：SetSnapshot 双跑分行（v:1 GQL / v:2 Cypher）、布尔渲染 `True`、
+   `CREATE GRAPH TYPE … AS { NODE Person {name STRING} }`、`SESSION SET SCHEMA /main`。
 
 ## 四、关键事实备忘（调研结论，勿重复调研）
 

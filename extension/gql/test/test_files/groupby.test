@@ -24,13 +24,13 @@
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT n.age AS age, count(*) AS c FROM GRAPH main MATCH (n:Person) ORDER BY n.age")
+-STATEMENT CALL GQL("SELECT n.age AS age, count(*) AS c FROM main MATCH (n:Person) ORDER BY n.age")
 ---- 2
 25|1
 30|2
 
 -CHECK_ORDER
--STATEMENT MATCH (n:Person) RETURN n.age AS age, count(*) AS c ORDER BY n.age
+-STATEMENT MATCH (n:Person) RETURN n.age AS age, count(*) AS c ORDER BY age
 ---- 2
 25|1
 30|2
@@ -54,7 +54,7 @@
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT n.age AS age, count(*) AS c FROM GRAPH main MATCH (n:Person) HAVING count(*) > 1 ORDER BY n.age")
+-STATEMENT CALL GQL("SELECT n.age AS age, count(*) AS c FROM main MATCH (n:Person) HAVING count(*) > 1 ORDER BY n.age")
 ---- 1
 30|2
 
@@ -100,7 +100,7 @@
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT n.name AS name, count(*) AS c FROM GRAPH main MATCH (n:User)-[:WORKS_AT]->(o:Org) GROUP BY n ORDER BY n.name")
+-STATEMENT CALL GQL("SELECT n.name AS name, count(*) AS c FROM main MATCH (n:User)-[:WORKS_AT]->(o:Org) GROUP BY n ORDER BY n.name")
 ---- 2
 Alice|2
 Bob|1
@@ -148,7 +148,7 @@ Bob|1
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT n.name AS name, count(*) AS c FROM GRAPH main MATCH (n:User)-[:WORKS_AT]->(o:Org) GROUP BY n HAVING count(*) > 1")
+-STATEMENT CALL GQL("SELECT n.name AS name, count(*) AS c FROM main MATCH (n:User)-[:WORKS_AT]->(o:Org) GROUP BY n HAVING count(*) > 1")
 ---- 1
 Alice|2
 

@@ -32,7 +32,7 @@ Runtime exception: GQL feature not supported: CREATE OR REPLACE GRAPH
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 ---- ok
 
--STATEMENT CALL GQL("CREATE GRAPH TYPE PersonType AS {name STRING}")
+-STATEMENT CALL GQL("CREATE GRAPH TYPE PersonType AS { NODE Person {name STRING} }")
 ---- error
 Runtime exception: GQL feature not supported: CREATE GRAPH TYPE (typed graphs are not mapped yet)
 
@@ -78,7 +78,7 @@ Runtime exception: GQL feature not supported: NEXT statement composition
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 ---- ok
 
--STATEMENT CALL GQL("SESSION SET SCHEMA main")
+-STATEMENT CALL GQL("SESSION SET SCHEMA /main")
 ---- error
 Runtime exception: GQL feature not supported: SESSION SET SCHEMA
 
@@ -117,7 +117,7 @@ Runtime exception: GQL feature not supported: quantified path pattern .+
 -STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
 ---- ok
 
--STATEMENT CALL GQL("SELECT DISTINCT n.v AS v, count(*) AS c FROM GRAPH main MATCH (n:T)")
+-STATEMENT CALL GQL("SELECT DISTINCT n.v AS v, count(*) AS c FROM main MATCH (n:T)")
 ---- error
 Runtime exception: GQL feature not supported: SELECT DISTINCT with aggregation
 

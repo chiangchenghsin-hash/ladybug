@@ -54,13 +54,13 @@ Carol|35
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT DISTINCT n.age AS age FROM GRAPH main MATCH (n:Person) ORDER BY n.age")
+-STATEMENT CALL GQL("SELECT DISTINCT n.age AS age FROM main MATCH (n:Person) ORDER BY n.age")
 ---- 2
 25
 30
 
 -CHECK_ORDER
--STATEMENT MATCH (n:Person) RETURN DISTINCT n.age AS age ORDER BY n.age
+-STATEMENT MATCH (n:Person) RETURN DISTINCT n.age AS age ORDER BY age
 ---- 2
 25
 30
@@ -84,7 +84,7 @@ Carol|35
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT n.name AS name FROM GRAPH main MATCH (n:Person) ORDER BY n.name SKIP 1 LIMIT 1")
+-STATEMENT CALL GQL("SELECT n.name AS name FROM main MATCH (n:Person) ORDER BY n.name SKIP 1 LIMIT 1")
 ---- 1
 Bob
 
@@ -109,7 +109,7 @@ Bob
 ---- 0
 
 -CHECK_ORDER
--STATEMENT CALL GQL("SELECT n.name AS name FROM GRAPH main MATCH (n:Person) WHERE n.age >= 30 ORDER BY n.name")
+-STATEMENT CALL GQL("SELECT n.name AS name FROM main MATCH (n:Person) WHERE n.age >= 30 ORDER BY n.name")
 ---- 1
 Alice
 
@@ -130,10 +130,32 @@ Alice
 -STATEMENT CALL GQL("INSERT (n:Person {name: 'Alice', age: 30})")
 ---- 0
 
--STATEMENT CALL GQL("SELECT n.name || '!' AS greeting FROM GRAPH main MATCH (n:Person)")
+-STATEMENT CALL GQL("SELECT n.name || '!' AS greeting FROM main MATCH (n:Person)")
 ---- 1
 Alice!
 
 -STATEMENT MATCH (n:Person) RETURN n.name + '!' AS greeting
 ---- 1
 Alice!
+
+
+-CASE SelectFromCurrentGraph
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))
+---- ok
+
+-STATEMENT CALL GQL("INSERT (n:Person {name: 'Alice', age: 30})")
+---- 0
+
+-CHECK_ORDER
+-STATEMENT CALL GQL("SELECT n.name AS name FROM CURRENT_GRAPH MATCH (n:Person)")
+---- 1
+Alice
+
+-CHECK_ORDER
+-STATEMENT MATCH (n:Person) RETURN n.name AS name
+---- 1
+Alice

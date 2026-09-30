@@ -258,6 +258,68 @@ std::string joinCommas(const std::vector<std::string> &parts) {
     return out.str();
 }
 
+// Replaces whole-expression occurrences of pair.first with pair.second in
+// source text. Literal-aware (string/quoted-identifier contents untouched),
+// boundary-aware (`n.age` does not match inside `n.aged` or `m.n.age`), and
+// longest-pattern-first. Used for rewriting ORDER BY / HAVING / RETURN
+// fragments that reference *new* occurrences of select-item expressions, where
+// absolute span math does not apply.
+std::string replaceExprs(const std::string &text,
+                         std::vector<std::pair<std::string, std::string>> pairs) {
+    std::sort(pairs.begin(), pairs.end(),
+              [](const auto &a, const auto &b) { return a.first.size() > b.first.size(); });
+    std::string out;
+    out.reserve(text.size());
+    auto isWordChar = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.';
+    };
+    size_t i = 0;
+    while (i < text.size()) {
+        char c = text[i];
+        if (c == '\'' || c == '"' || c == '`') {
+            char quote = c;
+            out += c;
+            ++i;
+            while (i < text.size()) {
+                out += text[i];
+                if (text[i] == quote) {
+                    if (i + 1 < text.size() && text[i + 1] == quote) {
+                        out += text[i + 1];
+                        i += 2;
+                        continue;
+                    }
+                    ++i;
+                    break;
+                }
+                ++i;
+            }
+            continue;
+        }
+        bool matched = false;
+        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+            for (auto &p : pairs) {
+                const std::string &from = p.first;
+                if (from.empty() || i + from.size() > text.size()) continue;
+                if (text.compare(i, from.size(), from) != 0) continue;
+                bool beforeOk = (i == 0) || !isWordChar(text[i - 1]);
+                size_t after = i + from.size();
+                bool afterOk = (after >= text.size()) || !isWordChar(text[after]);
+                if (beforeOk && afterOk) {
+                    out += p.second;
+                    i = after;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            out += c;
+            ++i;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 std::string GqlToCypherTransformer::translateLinearQuery(
@@ -544,19 +606,10 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     }
 
     // ---- ORDER BY / OFFSET / LIMIT (page suffix; rewritten after grouping) ----
-    auto buildOrderPage = [&](const std::vector<Span> &reps) {
+    auto buildOrderPage = [&](const std::vector<std::pair<std::string, std::string>> &pairs) {
         std::ostringstream page;
         if (auto *ob = ctx->orderByClause()) {
-            std::string text = sourceText(ob);
-            size_t base = ob->getStart()->getStartIndex();
-            std::vector<Span> sorted = reps;
-            std::sort(sorted.begin(), sorted.end(),
-                      [](const Span &a, const Span &b) { return a.start > b.start; });
-            for (auto &rep : sorted) {
-                if (rep.start < base) continue;
-                text.replace(rep.start - base, rep.stop - rep.start + 1, rep.replacement);
-            }
-            page << ' ' << finishExpr(text);
+            page << ' ' << finishExpr(replaceExprs(sourceText(ob), pairs));
         }
         if (auto *off = ctx->offsetClause()) {
             page << " SKIP " << finishExpr(sourceText(off->nonNegativeIntegerSpecification()));
@@ -567,6 +620,18 @@ std::string GqlToCypherTransformer::translateSelectStatement(
         return page.str();
     };
 
+    // (exprText -> output name) pairs. ORDER BY / HAVING reference *new*
+    // occurrences of the item expressions, so rewrites are textual.
+    auto itemPairs = [&]() {
+        std::vector<std::pair<std::string, std::string>> pairs;
+        for (auto &item : items) {
+            if (!item.alias.empty()) {
+                pairs.emplace_back(item.exprText, item.alias);
+            }
+        }
+        return pairs;
+    };
+
     if (distinct && hasAgg) {
         unsupported("SELECT DISTINCT with aggregation");
     }
@@ -574,19 +639,21 @@ std::string GqlToCypherTransformer::translateSelectStatement(
         unsupported("GROUP BY without aggregation (use SELECT DISTINCT)");
     }
 
-    // No aggregation: plain MATCH ... RETURN.
+    // No aggregation: plain MATCH ... RETURN. DISTINCT narrows ORDER BY to
+    // projected names (same binder rule as aggregation), so rewrite either way.
     if (!hasAgg) {
         std::string proj = star ? "*" : renderSelectItems(items, {});
         return prefix + matchText + whereText + " RETURN " + (distinct ? "DISTINCT " : "") +
-               finishExpr(proj) + buildOrderPage({});
+               finishExpr(proj) + buildOrderPage(itemPairs());
     }
 
     // Implicit grouping with no HAVING: Cypher's RETURN groups by the
-    // non-aggregated items exactly like GQL's implicit grouping.
+    // non-aggregated items exactly like GQL's implicit grouping; ORDER BY can
+    // only reference projected names after aggregation.
     if (explicitKeys.empty() && havingRaw.empty()) {
         std::string proj = star ? "*" : renderSelectItems(items, {});
         return prefix + matchText + whereText + " RETURN " + finishExpr(proj) +
-               buildOrderPage({});
+               buildOrderPage(itemPairs());
     }
 
     // General grouped form: WITH keys, aggs [WHERE having] RETURN items.
@@ -594,55 +661,41 @@ std::string GqlToCypherTransformer::translateSelectStatement(
         unsupported("SELECT * with GROUP BY/HAVING");
     }
 
-    // Assign an alias to every aggregate expression (select items first, then
-    // HAVING). Identical aggregate texts share one alias.
-    std::vector<Span> aggSpans;
-    std::vector<std::string> aggTexts;
-    std::vector<std::string> aggAliases;
-    auto registerAgg = [&](size_t start, size_t stop, const std::string &userAlias) {
-        for (size_t i = 0; i < aggSpans.size(); ++i) {
-            if (aggSpans[i].start == start && aggSpans[i].stop == stop) {
-                return;
-            }
+    // Assign an alias to every distinct aggregate expression text (select
+    // items first, then HAVING). Identical texts share one alias and one WITH
+    // projection -- an aggregate appearing in both SELECT and HAVING must not
+    // be projected twice.
+    std::vector<std::pair<std::string, std::string>> aggPairs; // aggText -> alias
+    auto registerAgg = [&](const std::string &text, const std::string &userAlias) {
+        for (auto &p : aggPairs) {
+            if (p.first == text) return;
         }
-        std::string text = query.substr(start, stop - start + 1);
-        std::string alias = userAlias;
-        if (alias.empty()) {
-            for (size_t i = 0; i < aggTexts.size(); ++i) {
-                if (aggTexts[i] == text && !aggAliases[i].empty()) {
-                    alias = aggAliases[i];
-                    break;
-                }
-            }
-        }
-        if (alias.empty()) {
-            alias = "__gql_agg" + std::to_string(aggSpans.size());
-        }
-        aggSpans.push_back(Span{start, stop, alias});
-        aggTexts.push_back(text);
-        aggAliases.push_back(alias);
+        std::string alias = userAlias.empty() ? "__gql_agg" + std::to_string(aggPairs.size())
+                                              : userAlias;
+        aggPairs.emplace_back(text, alias);
     };
     for (auto &item : items) {
         std::vector<Span> local;
         int counter = 0;
         collectAggregates(item.exprCtx, local, counter);
         for (auto &span : local) {
+            std::string text = query.substr(span.start, span.stop - span.start + 1);
             bool whole = (span.start == item.exprStart && span.stop == item.exprStop);
-            registerAgg(span.start, span.stop, whole ? item.alias : "");
+            registerAgg(text, whole ? item.alias : "");
         }
     }
-    {
-        std::vector<Span> havingAggSpans;
+    if (!havingRaw.empty()) {
+        std::vector<Span> havingAggs;
         int counter = 0;
-        collectAggregates(ctx->havingClause()->searchCondition(), havingAggSpans, counter);
-        for (auto &span : havingAggSpans) {
-            registerAgg(span.start, span.stop, "");
+        collectAggregates(ctx->havingClause()->searchCondition(), havingAggs, counter);
+        for (auto &span : havingAggs) {
+            registerAgg(query.substr(span.start, span.stop - span.start + 1), "");
         }
     }
 
-    // Build WITH keys.
+    // WITH keys (explicit: raw binding variables; implicit: non-agg items).
     std::vector<std::string> withParts;
-    std::vector<Span> keySpans; // implicit key expr spans → alias
+    std::vector<std::pair<std::string, std::string>> keyPairs;
     if (!explicitKeys.empty()) {
         for (auto &key : explicitKeys) {
             withParts.push_back(finishExpr(key));
@@ -654,44 +707,25 @@ std::string GqlToCypherTransformer::translateSelectStatement(
             std::string alias =
                 item.alias.empty() ? "__gql_key" + std::to_string(keyCounter++) : item.alias;
             withParts.push_back(finishExpr(item.exprText) + " AS " + alias);
-            keySpans.push_back(Span{item.exprStart, item.exprStop, alias});
+            keyPairs.emplace_back(item.exprText, alias);
         }
     }
-    for (size_t i = 0; i < aggSpans.size(); ++i) {
-        withParts.push_back(finishExpr(aggTexts[i]) + " AS " + aggAliases[i]);
+    for (auto &p : aggPairs) {
+        withParts.push_back(finishExpr(p.first) + " AS " + p.second);
     }
+    std::vector<std::pair<std::string, std::string>> allPairs = keyPairs;
+    allPairs.insert(allPairs.end(), aggPairs.begin(), aggPairs.end());
 
-    // HAVING → WHERE on the WITH output, aggregates (and implicit keys)
-    // replaced by their aliases.
+    // HAVING -> WHERE on the WITH output (keys/aggs replaced by aliases).
     std::string havingText;
     if (!havingRaw.empty()) {
-        std::vector<Span> reps = aggSpans;
-        reps.insert(reps.end(), keySpans.begin(), keySpans.end());
-        antlr4::ParserRuleContext *havingCtx = ctx->havingClause()->searchCondition();
-        std::string text = sourceText(havingCtx);
-        size_t base = havingCtx->getStart()->getStartIndex();
-        std::sort(reps.begin(), reps.end(),
-                  [](const Span &a, const Span &b) { return a.start > b.start; });
-        for (auto &rep : reps) {
-            if (rep.start < base) continue;
-            text.replace(rep.start - base, rep.stop - rep.start + 1, rep.replacement);
-        }
-        havingText = " WHERE " + finishExpr(text);
+        havingText = " WHERE " + finishExpr(replaceExprs(havingRaw, allPairs));
     }
 
-    // RETURN items: aggregate (and implicit key) spans replaced by aliases.
-    std::vector<Span> returnReps = aggSpans;
-    returnReps.insert(returnReps.end(), keySpans.begin(), keySpans.end());
+    // RETURN items: key/agg expressions replaced by their WITH aliases.
     std::vector<std::string> returnItems;
     for (auto &item : items) {
-        std::string text = item.exprText;
-        std::sort(returnReps.begin(), returnReps.end(),
-                  [](const Span &a, const Span &b) { return a.start > b.start; });
-        for (auto &rep : returnReps) {
-            if (rep.start < item.exprStart || rep.stop > item.exprStop) continue;
-            text.replace(rep.start - item.exprStart, rep.stop - rep.start + 1, rep.replacement);
-        }
-        std::string out = finishExpr(text);
+        std::string out = finishExpr(replaceExprs(item.exprText, allPairs));
         if (!item.alias.empty() && out != item.alias) {
             out += " AS " + item.alias;
         }
@@ -700,7 +734,7 @@ std::string GqlToCypherTransformer::translateSelectStatement(
 
     std::ostringstream out;
     out << prefix << matchText << whereText << " WITH " << joinCommas(withParts) << havingText
-        << " RETURN " << joinCommas(returnItems) << buildOrderPage(returnReps);
+        << " RETURN " << joinCommas(returnItems) << buildOrderPage(allPairs);
     return out.str();
 }
 
@@ -774,47 +808,36 @@ std::string GqlToCypherTransformer::translateReturnStatement(
             unsupported("RETURN ... GROUP BY without aggregation");
         }
 
-        std::vector<Span> aggSpans;
-        std::vector<std::string> aggTexts;
-        std::vector<std::string> aggAliases;
-        auto registerAgg = [&](size_t start, size_t stop, const std::string &userAlias) {
-            for (size_t i = 0; i < aggSpans.size(); ++i) {
-                if (aggSpans[i].start == start && aggSpans[i].stop == stop) return;
+        // Textual aggregate aliasing (same scheme as SELECT's grouped form).
+        std::vector<std::pair<std::string, std::string>> aggPairs;
+        auto registerAgg = [&](const std::string &text, const std::string &userAlias) {
+            for (auto &p : aggPairs) {
+                if (p.first == text) return;
             }
-            std::string text = query.substr(start, stop - start + 1);
-            std::string alias = userAlias.empty() ? "__gql_agg" + std::to_string(aggSpans.size())
+            std::string alias = userAlias.empty() ? "__gql_agg" + std::to_string(aggPairs.size())
                                                   : userAlias;
-            aggSpans.push_back(Span{start, stop, alias});
-            aggTexts.push_back(text);
-            aggAliases.push_back(alias);
+            aggPairs.emplace_back(text, alias);
         };
         for (auto &item : items) {
             std::vector<Span> local;
             int counter = 0;
             collectAggregates(item.exprCtx, local, counter);
             for (auto &span : local) {
+                std::string text = query.substr(span.start, span.stop - span.start + 1);
                 bool whole = (span.start == item.exprStart && span.stop == item.exprStop);
-                registerAgg(span.start, span.stop, whole ? item.alias : "");
+                registerAgg(text, whole ? item.alias : "");
             }
         }
         std::vector<std::string> withParts;
         for (auto &key : explicitKeys) {
             withParts.push_back(finishExpr(key));
         }
-        for (size_t i = 0; i < aggSpans.size(); ++i) {
-            withParts.push_back(finishExpr(aggTexts[i]) + " AS " + aggAliases[i]);
+        for (auto &p : aggPairs) {
+            withParts.push_back(finishExpr(p.first) + " AS " + p.second);
         }
-        std::vector<Span> returnReps = aggSpans;
-        std::sort(returnReps.begin(), returnReps.end(),
-                  [](const Span &a, const Span &b) { return a.start > b.start; });
         std::vector<std::string> returnItems;
         for (auto &item : items) {
-            std::string text = item.exprText;
-            for (auto &rep : returnReps) {
-                if (rep.start < item.exprStart || rep.stop > item.exprStop) continue;
-                text.replace(rep.start - item.exprStart, rep.stop - rep.start + 1, rep.replacement);
-            }
-            std::string out = finishExpr(text);
+            std::string out = finishExpr(replaceExprs(item.exprText, aggPairs));
             if (!item.alias.empty() && out != item.alias) {
                 out += " AS " + item.alias;
             }
@@ -822,12 +845,7 @@ std::string GqlToCypherTransformer::translateReturnStatement(
         }
         // ORDER BY after a grouped RETURN can only reference key/agg aliases.
         if (page && page->orderByClause()) {
-            std::string orderText = sourceText(page->orderByClause());
-            size_t base = page->orderByClause()->getStart()->getStartIndex();
-            for (auto &rep : returnReps) {
-                if (rep.start < base) continue;
-                orderText.replace(rep.start - base, rep.stop - rep.start + 1, rep.replacement);
-            }
+            std::string orderText = replaceExprs(sourceText(page->orderByClause()), aggPairs);
             pageText = " " + finishExpr(orderText);
             if (page->offsetClause()) {
                 pageText += " SKIP " +

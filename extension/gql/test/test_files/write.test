@@ -112,20 +112,23 @@ updated
 -STATEMENT CALL GQL("INSERT (n:T {a: 10, b: 20, v: 1})")
 ---- 0
 
+-STATEMENT CALL GQL("INSERT (n:T {a: 10, b: 20, v: 2})")
+---- 0
+
 # GQL SET is order-independent (all RHS evaluated before assignment): a gets
-# the OLD b. The translator snapshots the RHS values first.
+# the OLD b. The translator snapshots the RHS values first. Run the GQL form
+# on row 1 and the equivalent Cypher snapshot form on the twin row 2.
 -STATEMENT CALL GQL("MATCH (n:T {v: 1}) SET n.a = n.b, n.b = 99")
 ---- 0
 
--CHECK_ORDER
--STATEMENT MATCH (n:T) RETURN n.a, n.b
----- 1
-20|99
+-STATEMENT MATCH (n:T {v: 2}) WITH n, n.b AS x, 99 AS y SET n.a = x, n.b = y
+---- 0
 
 -CHECK_ORDER
--STATEMENT MATCH (n:T {v: 1}) WITH n, n.b AS x, 99 AS y SET n.a = x, n.b = y RETURN n.a, n.b
----- 1
-20|99
+-STATEMENT MATCH (n:T) RETURN n.v, n.a, n.b ORDER BY n.v
+---- 2
+1|20|99
+2|20|99
 
 
 -CASE RemovePropertyParity
@@ -145,14 +148,14 @@ updated
 
 -STATEMENT MATCH (n:T) RETURN n.msg IS NULL
 ---- 1
-true
+True
 
 -STATEMENT MATCH (n:T {v: 1}) SET n.msg = NULL
 ---- 0
 
 -STATEMENT MATCH (n:T) RETURN n.msg IS NULL
 ---- 1
-true
+True
 
 
 -CASE InsertThenMatchThenReturnChain
