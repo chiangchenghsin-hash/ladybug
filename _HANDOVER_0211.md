@@ -1,0 +1,121 @@
+# 交接：LadybugDB fork 升级到 0.21.1（2026-09-30）
+
+> 给下一个会话：工作目录建议切到 `C:\Users\chian\Documents\trae_projects\ladybug-0.21.1`。
+> 本文是唯一交接入口；先读完再动手。
+
+## 一、任务与结论（TL;DR）
+
+**任务**：把 0.20.2 fork（`ladybug-0.20.2`，含 43+ 算法 / timeseries / fts MeCab+jieba / hyperalgo 超图扩展）升级到上游 0.21.1，方法照搬 0.20.2 的构建链。
+
+**已完成**：定制全部移植到 0.21.1 并提交（git：`8e4b79d` 基线 → `bac3e0b` 移植）；核心 e2e、4 扩展+shell、hyperalgo **全部构建通过**（零代码适配——0.21.1 的 API 变更没伤到我们的定制）；dist 骨架已组装。
+
+**卡点**：上游 0.21.x 有**未报告的规划器死循环 bug**——带非空左计划的 `MERGE` 规划时 100% 单核空转（或崩溃）。官方预编译二进制（npm `@ladybugdb/core@0.21.1`）同样复现，**不是我们构建的问题**。e2e 测试套件因此跑不完。已二分定位到引入窗口（2026-09-27~28 的 planner 提交），正在 LSP 调用层级追踪精确根因。
+
+## 二、目录与 git 状态
+
+| 路径 | 用途 | 状态 |
+|---|---|---|
+| `ladybug-0.20.2/` | 0.20.2 fork 工作树（来源） | 只读参考，勿动 |
+| `ladybug-0.21.0/` | 0.21.0 尝试（已弃：用户确认 0.21.0 有 bug） | 保留作对照（其 e2e 构建可用） |
+| `ladybug-0.21.1/` | **当前工作树** | git 2 commits，工作区干净 |
+| `_upstream_ext_9884564/` | 上游 extensions@9884564 稀疏检出（ftype/vector/algo 对比基准） | 参考 |
+| `_hang_repro/` | 死循环复现脚本 + 日志 | 关键证据 |
+| `_official_0211/` | 官方 0.21.1 Windows CLI | 对照 |
+
+`ladybug-0.21.1` git：`8e4b79d` Baseline: pristine 0.21.1 upstream snapshot → `bac3e0b` Port fork customizations onto 0.21.1。回滚锚点就是 baseline。
+
+## 三、已移植的定制清单（0.20.2 → 0.21.1）
+
+1. **hyperalgo-core/**（34 文件，header-only，工作区当前状态非 commit 态）+ **extension/hyperalgo/**（15）+ **extension/timeseries/**（14）——整目录拷贝。
+2. **extension/algo/**：用户的 57 算法 fork 整层替换上游 14 文件 GDS 桥接架构；删掉了上游残留的 11 个 gds_* 文件（gds_csr_bridge/leiden/louvain/node2vec/ppr + 2 头 + 4 测试）。**保留**用户版 `download_icebug.cmake`（icebug 12.8，与用户 algo CMakeLists 自洽；升 13.4 另做）。
+3. **extension/fts/**：`dict_dir_resolver.{h,cpp}` 新增；`tokenize.cpp`/`CMakeLists.txt`/`src/utils/CMakeLists.txt`/`error.test`/`fts_japanese.test` 直接覆盖；`create_fts_index.cpp`/`fts_config.cpp`/`query_fts_bind_data.cpp`/`fts_utils.h`/`fts_utils.cpp` 三方合并（git merge-file；上游已收编用户的 wildcard 保护/ignore_pattern/jieba 空白过滤，合并后只余 mecab 块+include 差异）。
+4. **extension/vector/**：`hnsw_index.cpp`（NULL-embedding shrink 防护）+`update.test` 三方合并。
+5. **核心补丁 5 处**：`CMakeLists.txt` OpenSSL QUIET 化、`src/extension/CMakeLists.txt` httplib OpenSSL_FOUND 门控、`cmake/BundleStaticLibrary.cmake` emar 例外、`Makefile` EXTENSION_LIST +hyperalgo、`.gitignore`。
+6. **扩展注册 2 处**：`extension/CMakeLists.txt` + `extension/extension_config.cmake` 加 hyperalgo/timeseries。
+7. **third_party/mecab/**（68 文件，56MB）——**必须有**，否则 fts 配不过（`extension/fts/CMakeLists.txt` 引用 `${PROJECT_SOURCE_DIR}/third_party/mecab`）。0.21.1 快照不含它。
+8. **tools/wasm/**（54 文件，含用户 bundle.mjs）——gitlink 与上游相同（`aa72699`），从 0.20.2 直接拷。
+9. **构建/打包脚本**：`_build_v0211t.bat`（核心 e2e → build_v0211t）、`_build_fts_vector.bat`（algo;timeseries;fts;vector + shell → build_v0211）、`_build_hyperalgo.bat`（→ build_hyperalgo）、`_build_wasm.bat`（→ build\wasm，emsdk 路径同 0.20.2）、`_pack_0211.py`、`dist-ladybug-0.21.1/smoke-0.21.1.js`。
+10. **dataset/**：0.21.1 快照自带（645 文件，含 tinysnb）——不用拷（0.21.0 树当时是空的才需要）。
+
+**兼容性结论**：存储版本 v47 不变（0.20.0→0.21.1 全是 v47），老库零迁移；扩展 ABI 版本 0.21.0→0.21.1，扩展全部重编（已做）。
+
+## 四、构建状态
+
+| 链 | 结果 | 产物位置 |
+|---|---|---|
+| 核心 e2e（`_build_v0211t.bat`） | ✅ BUILD_EXIT=0 | `build_v0211t/src/Release/e2e_test.exe` |
+| 扩展+shell（`_build_fts_vector.bat`） | ✅ BUILD_OK | `build_v0211/src/Release/lbug_shell.exe`；`extension/{algo,fts,vector,timeseries}/build/Release/lib*.lbug_extension` |
+| hyperalgo（`_build_hyperalgo.bat`） | ✅ BUILD_EXIT=0 | `build_hyperalgo/`（libhyperalgo 待拷入 dist） |
+| wasm（`_build_wasm.bat`） | ⏳ **未跑** | `build\wasm`（emsdk 在 C:\emsdk） |
+
+**dist-ladybug-0.21.1/** 已装：lbug_shell.exe + libalgo/libfts/libtimeseries/libvector.lbug_extension + fts_dict/ + fts_dict-ipadic/ + README.md/FIXES.md/ladybug-api-reference.md（均为 0.20.2 版本，**版本标注待更新**）+ smoke-0.21.1.js。
+**待装**：libhyperalgo.lbug_extension、wasm-deploy/（wasm 构建后）。
+
+## 五、卡点：MERGE 规划死循环（重点）
+
+### 症状
+- 非空左计划 + `MERGE` rel 模式 → 规划阶段 100% 单核空转（`EXPLAIN` 即可触发，不执行）；部分场景直接崩溃（exit 127 / SIGSEGV）。
+- 空表 11ms 通过；有数据必挂。同配置 0.20.2 全绿。
+
+### 最小复现（用 tinysnb 数据集 + 官方 npm 包即可，无需编译）
+```js
+// npm i @ladybugdb/core@0.21.1；cwd = ladybug-0.21.1/dataset/tinysnb
+// Database(path, 64MB+hash, compression, readonly, maxdb, autockpt, ckptthr, throwonreplay, checksums, defhash)
+// Connection(db, 2) —— 2 线程即 TestHelper 默认
+EXPLAIN MATCH (a:person), (b:person) WHERE a.ID = 0 AND b.ID = 5
+        MERGE (a)-[r:knows]->(b);
+```
+现成脚本：`_hang_repro/repro_official.js`（载入 schema+copy 后跑挂死语句）、`variants.js`（变体探针）。
+
+### 变体探针结论（variants.log）
+| 查询 | 结果 |
+|---|---|
+| Qa 纯 MERGE（无 MATCH）| ✅ OK |
+| Qb MATCH 1 节点 + MERGE | ❌ **挂** |
+| P1 纯 MATCH rel 模式 EXPLAIN | ✅ OK |
+| P2 MATCH + CREATE 同形状 | ✅ OK |
+| Qc OPTIONAL MATCH（mark=nullptr） | 未测（下一个跑） |
+| 空表 | ✅ 11ms |
+
+→ 触发面 = `planOptionalMatch`（mark≠nullptr 的 MERGE 路径，legacyPath=true）相关子查询规划。
+
+### 二分结果（npm 每日构建，`_hang_repro/bisect_*.log`）
+`0.20.4` ✅ → `dev.20260909` ✅ → `dev.20260919` ✅ → `dev.20260924` ✅ → `dev.20260927` ❌崩溃于 COPY organisation（另一 bug，见 #1059）→ `dev.20260928` ❌挂于 MERGE → `0.21.0/0.21.1` ❌同挂。
+**引入窗口 = 2026-09-27 晚～09-28 晨**。
+
+### 嫌疑提交（`ladybug-0.20.2` 仓库 git 有全量历史，可 `git show <sha>`）
+| 提交 | 日期(PDT) | 内容 | 嫌疑度 |
+|---|---|---|---|
+| `273adad53` | 09-27 16:19 | planner: staged distinct pre-aggregation over LEFT-join chains（plan_subquery.cpp +335） | 高（MERGE=LEFT-join 型反连接） |
+| `8caf03bf9` | 09-27 19:58 | planner: degree-stats fan-out + staged-agg cardinality（#1046，含 `while(true)` 链走、ANALYZE 统计缓存、estimateAggregate 域乘积） | 高（有数据才挂=统计路径） |
+| `f49718c11` | 09-27 20:05 | storage: scope frozen WAL adoption | 低（EXPLAIN 不涉执行） |
+| 09-28 晨 c8ed6c266/bcf3fb4f1/08915c1c8 | storage 修复 | 低 | |
+
+已排查：`tryPreAggregateDistinctLeftChain` 只挂聚合路径（我们无聚合）；`tryPlanPropertySeededChain` 的 `while(true)` 有界（usedRels 单调增长+`steps.size()>numRels` 护栏）；`buildPlannerTableStats` 无递归。**尚未查**：`findCorrelatedPrimaryKeyLookupKey`/`tryPlanCorrelatedPrimaryKeyLookup`/`planQueryGraphCollectionInNewContext`/`appendAccHashJoin` 及 `SubqueryPredicatePullUpAnalyzer::analyze`。
+
+### LSP 用法（已验证）
+VS Code 只开了 0.20.2 工作区；**传 `instanceId` 即可分析 0.21.1 文件**：
+```
+instanceId = "ladybug-0.20.2-8214a8c2:15884:b209b525"   // list_instances 取，可能变化需重查
+operation  = prepare_call_hierarchy / outgoing_calls / incoming_calls / references
+uri        = c:/users/chian/documents/trae_projects/ladybug-0.21.1/src/planner/plan/plan_subquery.cpp
+```
+已 `prepare_call_hierarchy` 于 `planOptionalMatch`（1570 行），callId=`0aaf1eadf3ff4beb8baf9211`，下一步 `outgoing_calls` 顺藤摸瓜。或者把 `ladybug-0.21.1` 文件夹在 VS Code 打开（更稳）。
+
+## 六、下一步（按序）
+
+1. **根因**：LSP outgoing_calls 从 planOptionalMatch → 找到无界循环/递归点（重点看 `findCorrelatedPrimaryKeyLookupKey`(58)、`tryPlanCorrelatedPrimaryKeyLookup`(126)、`planQueryGraphCollectionInNewContext`、`SubqueryPredicatePullUpAnalyzer::analyze`(296)、`CorrelatedOptionalLegDecision::decide()`）。
+2. **修复**：fork 内定点修（或先 revert `273adad53`+`8caf03bf9` 二选一做验证——revert 后需重编 e2e_test+扩展）。
+3. **上报上游**：用户是 LadybugDB 贡献者（0.21.0 release notes 里 #897 是用户的 PR）。复现脚本+二分结论可直接开 issue。相关 landscape：#1059（COPY 未 checkpoint CSR 扫描越界，open）、#1082（**昨天报的**：参数化 QUERY_FTS_INDEX 同连接第 2 次 SIGSEGV，0.21.0/0.21.1 都中——会影响 fts 冒烟！）、#1062（#1046 的 Q6 性能回归修复，open）。
+4. **恢复测试**（修完后）：e2e `*merge_tinysnb.Merge*` 对照 0.20.2 的 12/12；hyperalgo e2e+golden（`hyperalgo-core/tools/ci_hyperalgo.sh`/`golden_check.py`/`p0_acceptance.py`）；`dist-ladybug-0.21.1/` 里 `npm i @ladybugdb/core@0.21.1 && node smoke-0.21.1.js`。
+5. **补完 dist**：拷 `build_hyperalgo/` 的 libhyperalgo.lbug_extension；跑 `_build_wasm.bat` → wasm-deploy/（参考 0.20.2 的 dist/wasm-deploy 结构）；README/FIXES/api-reference 版本标注 0.20.2→0.21.1。
+6. **打包**：`python _pack_0211.py` → releases/0.21.1/ladybug-0.21.1-{windows,ubuntu}.zip。
+
+## 七、环境备忘
+
+- 构建：VS 2026 BuildTools（`C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\...`），googletest 本地源 `C:/Users/chian/Documents/trae_projects/ladybug-0.19.0/build_algo/_deps/googletest-src`。
+- emsdk：`C:\emsdk`（wasm 链）；node 24 在 PATH。
+- npm：`@ladybugdb/core` 有 0.21.1 + 0.21.0-dev.202609XX 每日构建（二分用）+ 0.21.2 尚未发布；上游 main 只比 v0.21.1 多 1 个 rust_api 提交（**无修复**）。
+- e2e 跑法：`E2E_TEST_FILES_DIRECTORY=test/test_files ./build_v0211t/src/Release/e2e_test.exe --gtest_filter="..."`（cwd=树根；dataset 走编译期 LBUG_ROOT_DIRECTORY 自动解析）。
+- 行尾噪声：对比 extension 树时用 `diff --strip-trailing-cr`；`extension/` 在 0.20.2 仓库里是 submodule（gitlink 9884564），用户的定制全部是 working-tree 未跟踪状态。
+- `_pack_0211.py` 约定：二进制 STORED/文本 DEFLATE、mtime 归一 1980-01-01、SKIP build*/releases/.venv-oracle/vendor/*.log。
