@@ -63,12 +63,13 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 86/86 全绿**（2026-10-01 Phase 7 收工 + 评估日修正）：
+**✅ 92/92 全绿**（2026-10-01 Phase 8 Q1 收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
-**labels 2**（G074 标签表达式双跑：ANY 图 / 表图）/
+**labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
+**orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
-**TCK 合规：206 场景 = 165 过 / 30 挂 / 11 跳**（Phase 6 口径不变，明细 `extension/gql/test/tck/REPORT.md`）。
+**TCK 合规：206 场景 = 171 过 / 24 挂 / 11 跳**（明细 `extension/gql/test/tck/REPORT.md`）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
 - **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
@@ -175,6 +176,33 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   labels.test 增 `ColonLabelChainNotGqlSyntax` 钉住输入侧拒绝（MATCH/INSERT 各一）。分析里 `%`
   通配"翻译无坑"也不准——文法一致但本层仍响亮拒（unsupported）。教训：差异条目凡涉及"同拼写反语义"，
   必须写明病灶在**输入侧还是目标侧**，否则读者会脑补出不存在的静默执行路径。
+
+### Phase 8（Q1 全序聚合）交付记录（2026-10-01，外部咨询驱动 + 3 subagent 并行实现）
+
+- **扩展聚合三件套**（`extension/gql/src/function/gql_json_functions.{h,cpp}`，注册于
+  `gql_extension.cpp`）：`_GQL_TO_JSON(ANY)→JSON` 标量；`_GQL_MAX`/`_GQL_MIN` 聚合（ANY 参数 +
+  bindFunc 钉返回类型=输入类型，**isDistinct 双重载必配**）。**仓内首个扩展聚合**——走
+  `extension::addFunc` 公开模板 + `AGGREGATE_FUNCTION_ENTRY`（与内建聚合同一 FunctionCatalogEntry
+  路径，无需引擎改动）。state 平凡析构 tagged blob + overflow buffer（抄 min_max.h）。
+- **全序实现**：JSON 值按 `null < bool < array < string < number < object`（**TCK [11][12] 钉的**，
+  数组/字符串/数字三类与 CIP2016-06-14 相反——TCK 是可执行规范）；数字跨 INT/DOUBLE 按数值、
+  列表字典序（短前缀小）、串字节序；不可比对（如两个结构不同的 JSON object）**响亮抛**。
+  胜出元素保原类型（`max([1,2.0,5])`=INT `5`）。
+- **翻译层**（gql_transformer.cpp）：`translateForStatement` 对**异构字面量**或**元素全为列表的
+  字面量**逐元素包 `_gql_to_json`（字面量 null 保持裸 null）；`scanValueShapes` 对 FOR 源子树豁免
+  异构拒绝，但发射前红线复查——包装元素里嵌混合列表仍拒（`_gql_to_json([1,'a'])` 会先被引擎
+  同构化=静默错，必须拒）。`max(`/`min(` → `_gql_max(`/`_gql_min(` 在 finishExpr 漏斗做
+  call-position 文本 splice（保护 `n.max` 属性、别名、字面量；GQL.g4 只有 MAX/MIN 拼写）；
+  **别名安全**：`RETURN max(x)` 列名仍是 `` `max(x)` ``（GQL 源文本惯例）。
+- **harness 裸数值归一**（test_runner.cpp `canonicalizeBareNumber`）：`0.100000`→`0.1`、
+  `5.000000`→`5.0`（**int `5` vs real `5.0` 严格区分**）——解 TCK 转换器 `%.6f` 与 JSON 短打印的
+  错位；两侧同纯函数归一不破坏任何现有用例。
+- **TCK 翻绿 6 例**：Aggregation2 [5][6] 混合数值、[9][10] 列表值、[11][12] 混合值。
+  剩 24 挂 = rejected 19（SCHEMA 13 含事务包裹 1、AS COPY OF 2、多标签 2、qualified 1）+
+  parse-error 4（语料 3 + 文法歧义 1）+ other 1（`sum(p.age)` ANY 图 JSON 属性——**Q2 未做**）。
+- 实现分工：3 个 general-purpose subagent 并行（函数/翻译/harness+测试），集成编译一次过、
+  92/92 首跑全绿。测试包纠正了任务书笔误（字符串 max 应为 `c`——TCK [8] 钉代码序）。
+- **勿重复调研**：扩展聚合注册链/API 面见 `docs/gql_consult_brief.md` §8（双 subagent 核验）。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

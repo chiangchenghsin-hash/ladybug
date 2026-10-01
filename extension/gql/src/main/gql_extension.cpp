@@ -1,6 +1,7 @@
 #include "main/gql_extension.h"
 
 #include "function/gql_function.h"
+#include "function/gql_json_functions.h"
 #include "main/client_context.h"
 
 namespace lbug {
@@ -11,6 +12,15 @@ using namespace extension;
 void GqlExtension::load(main::ClientContext* context) {
     auto& db = *context->getDatabase();
     ExtensionUtils::addStandaloneTableFunc<GqlFunction>(db);
+    // GQL extension functions. addFunc is idempotent (checks containsFunction)
+    // and catalog names are case-insensitive, so these cannot collide with the
+    // JSON extension's to_json or with a re-load.
+    addFunc<GqlToJsonFunction>(db, GqlToJsonFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
+    addFunc<GqlMaxFunction>(db, GqlMaxFunction::name,
+        catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
+    addFunc<GqlMinFunction>(db, GqlMinFunction::name,
+        catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
 }
 
 } // namespace gql_extension

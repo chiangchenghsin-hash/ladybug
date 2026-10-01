@@ -2,7 +2,7 @@
 
 - TCK vendored at `extension/gql/test/tck/` (opengql/tck, Apache-2.0 — see NOTICE.md; openCypher-derived features retain their Neo4j attribution headers).
 - Mode: untyped graphs (`CREATE GRAPH ... ANY` + populator).
-- Scenarios run: **195** executed, **165 passed**, **30 failed**, **11 skipped**.
+- Scenarios run: **195** executed, **171 passed**, **24 failed**, **11 skipped**.
 
 Methodology: expected results are compared in the engine's Value::toString form; exception scenarios assert that *an* error is raised (GQLSTATUS codes are not emitted by the layer yet); side effects are checked only for empty-start working graphs and observable metrics (+nodes/+edges).
 
@@ -12,7 +12,7 @@ Methodology: expected results are compared in the engine's Value::toString form;
 |---|---|---|---|---|
 | Debug | 1 | 0 | 1 | 0 |
 | expressions_aggregation_Aggregation1 | 2 | 0 | 2 | 0 |
-| expressions_aggregation_Aggregation2 | 12 | 6 | 6 | 0 |
+| expressions_aggregation_Aggregation2 | 12 | 12 | 0 | 0 |
 | expressions_aggregation_Aggregation3 | 2 | 0 | 2 | 0 |
 | expressions_boolean_Boolean1 | 30 | 30 | 0 | 0 |
 | expressions_boolean_Boolean2 | 30 | 30 | 0 | 0 |
@@ -44,12 +44,6 @@ Methodology: expected results are compared in the engine's Value::toString form;
 - `Debug` :: [4] Raise error condition creating a schema whose name identifies a directory — [rejected-by-layer] EXPECT OK BUT GOT ERROR: Runtime exception: GQL feature not supported: CREATE SCHEMA
 - `expressions_aggregation_Aggregation1` :: [1] Count only non-null values — [parse-error] EXPECT OK BUT GOT ERROR: Runtime exception: Failed to parse GQL query: CREATE ({name: 'a', age: 33}) (line 1:7 no viable alternative at input 'CREATE (')
 - `expressions_aggregation_Aggregation1` :: [2] Counting loop relationships — [parse-error] EXPECT OK BUT GOT ERROR: Runtime exception: Failed to parse GQL query: CREATE (a), (a)-[:KNOWS]->(a) (line 1:7 no viable alternative at input 'CREATE (')
-- `expressions_aggregation_Aggregation2` :: [10] `min()` over list values — [other] Unexpected error for query: Binder exception: Function MIN did not receive correct arguments:
-- `expressions_aggregation_Aggregation2` :: [11] `max()` over mixed values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
-- `expressions_aggregation_Aggregation2` :: [12] `min()` over mixed values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
-- `expressions_aggregation_Aggregation2` :: [5] `max()` over mixed numeric values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
-- `expressions_aggregation_Aggregation2` :: [6] `min()` over mixed numeric values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
-- `expressions_aggregation_Aggregation2` :: [9] `max()` over list values — [other] Unexpected error for query: Binder exception: Function MAX did not receive correct arguments:
 - `expressions_aggregation_Aggregation3` :: [1] Sum only non-null values — [other] Unexpected error for query: Binder exception: Function SUM did not receive correct arguments:
 - `expressions_aggregation_Aggregation3` :: [2] No overflow during summation — [parse-error] EXPECT OK BUT GOT ERROR: Runtime exception: Failed to parse GQL query: UNWIND range(1000000, 2000000) AS i (line 1:0 mismatched input 'UNWIND' expecting {'AT',
 - `statements_catalog_modifying_create_graph_types_Create1` :: [4] Create a single node type with three labels, and three properties — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
@@ -72,7 +66,7 @@ Methodology: expected results are compared in the engine's Value::toString form;
 - `statements_catalog_modifying_drop_drop1` :: [6] Raise error condition dropping a non-empty schema — [rejected-by-layer] EXPECT OK BUT GOT ERROR: Runtime exception: GQL feature not supported: CREATE SCHEMA
 - `statements_catalog_modifying_drop_drop1` :: [7] Drop a schema, if exists — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: DROP SCHEMA
 
-Failure classes: other=3, parse-error=4, rejected-by-layer=23
+Failure classes: other=1, parse-error=4, rejected-by-layer=19
 
 ## Unchecked assertions (best-effort)
 

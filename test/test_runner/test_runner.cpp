@@ -59,9 +59,52 @@ static std::string canonicalizeJsonValue(yyjson_val* val) {
     return json_extension::jsonToString(val);
 }
 
-static std::string canonicalizeJsonField(const std::string& field) {
-    if (field.empty() || (field[0] != '{' && field[0] != '[')) {
+// Bare numeric fields: the TCK expectation converter renders decimal cells
+// with %.6f ("0.100000") while JSON-typed results print the short form
+// ("0.1"). Strip fractional trailing zeros so both spellings compare equal,
+// keeping at least one decimal digit whenever a decimal point is present —
+// the int/real distinction is preserved: "5" stays "5", "5.000000" becomes
+// "5.0", never "5". Fields not matching ^-?\d+$ / ^-?\d+\.\d+$ pass through
+// unchanged.
+static std::string canonicalizeBareNumber(const std::string& field) {
+    auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+    size_t i = (!field.empty() && field[0] == '-') ? 1 : 0;
+    if (i >= field.size() || !isDigit(field[i])) {
         return field;
+    }
+    bool hasDecimalPoint = false;
+    for (size_t j = i; j < field.size(); ++j) {
+        if (isDigit(field[j])) {
+            continue;
+        }
+        if (field[j] == '.' && !hasDecimalPoint) {
+            hasDecimalPoint = true;
+            // ^-?\d+\.\d+$ requires at least one digit after the point.
+            if (j + 1 >= field.size() || !isDigit(field[j + 1])) {
+                return field;
+            }
+            continue;
+        }
+        return field;
+    }
+    if (!hasDecimalPoint) {
+        return field;
+    }
+    // Integer part untouched: only strip trailing zeros of the fraction, and
+    // keep one digit so "5.0" never collapses to "5".
+    std::string stripped = field;
+    while (stripped.size() >= 2 && stripped.back() == '0' && stripped[stripped.size() - 2] != '.') {
+        stripped.pop_back();
+    }
+    return stripped;
+}
+
+static std::string canonicalizeJsonField(const std::string& field) {
+    if (field.empty()) {
+        return field;
+    }
+    if (field[0] != '{' && field[0] != '[') {
+        return canonicalizeBareNumber(field);
     }
     auto json = json_extension::stringToJsonNoError(field);
     if (json.ptr == nullptr) {

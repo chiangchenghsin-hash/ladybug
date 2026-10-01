@@ -143,7 +143,11 @@ GraphTypeRegistry GqlToCypherTransformer::deserializeGraphTypes(const std::strin
 // mixed literals to one element type at bind time (STRING is the universal
 // sink) — silently erasing types and making max()/min() compare the wrong
 // values. Reject both shapes at translation time instead of returning wrong
-// answers. Pattern property maps (`(n {k: v})`) parse as
+// answers. Exception: a FOR statement's list source is re-emitted element by
+// element through _gql_to_json (see translateForStatement), which absorbs the
+// type mixing — scanValueShapes exempts that subtree and the emission site
+// re-checks whatever the wrap cannot faithfully encode.
+// Pattern property maps (`(n {k: v})`) parse as
 // elementPropertySpecification and are intentionally untouched.
 
 namespace {
@@ -185,6 +189,79 @@ std::string literalTypeClass(const std::string &raw) {
     return "unknown";
 }
 
+// True when `list`'s untyped elements disagree in type class — exactly the
+// condition the heterogeneous-literal rejection enforces (null/unknown/map
+// never count). Typed enumerations state their element type and never count.
+bool listIsHeterogeneous(GQLParser::ListValueConstructorByEnumerationContext *list,
+                         const std::string &query) {
+    if (list->listValueTypeName()) return false;
+    auto *elList = list->listElementList();
+    if (!elList) return false;
+    std::string seen;
+    for (auto *el : elList->listElement()) {
+        std::string cls = literalTypeClass(guardText(query, el->valueExpression()));
+        if (cls == "null" || cls == "unknown") continue;
+        if (cls == "map") continue; // nested record constructor raises on the way down
+        if (seen.empty()) {
+            seen = cls;
+        } else if (seen != cls) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when `node` sits under a FOR statement's list source (`FOR x IN ...`).
+bool underForItemSource(antlr4::tree::ParseTree *node) {
+    for (auto *p = node->parent; p; p = p->parent) {
+        if (dynamic_cast<GQLParser::ForItemSourceContext *>(p)) return true;
+    }
+    return false;
+}
+
+// True when any untyped list literal in this subtree would fire the
+// heterogeneous-literal rejection. Such a literal loses its element types
+// when LadybugDB binds it, so it must never survive into emitted Cypher.
+bool containsHeterogeneousList(antlr4::tree::ParseTree *node, const std::string &query) {
+    if (!node) return false;
+    if (auto *list = dynamic_cast<GQLParser::ListValueConstructorByEnumerationContext *>(node)) {
+        if (listIsHeterogeneous(list, query)) return true;
+    }
+    for (auto *child : node->children) {
+        if (containsHeterogeneousList(child, query)) return true;
+    }
+    return false;
+}
+
+// The list literal an expression evaluates to when it is literally a
+// bracketed list: every step from the expression down is a single-child
+// wrapper rule (value-expression alternatives, unsignedValueSpecification,
+// listLiteral). Operators and parenthesized expressions introduce siblings
+// and stop the descent, so `([1, 2])` or `[1] + [2]` are not list literals.
+GQLParser::ListValueConstructorByEnumerationContext *
+plainListLiteral(antlr4::tree::ParseTree *node) {
+    while (node) {
+        if (auto *list =
+                dynamic_cast<GQLParser::ListValueConstructorByEnumerationContext *>(node)) {
+            return list;
+        }
+        if (node->children.size() != 1) return nullptr;
+        node = node->children[0];
+    }
+    return nullptr;
+}
+
+// True when every element of `list` is itself a list literal (nested lists).
+bool allElementsAreLists(GQLParser::ListValueConstructorByEnumerationContext *list,
+                         const std::string &query) {
+    auto *elList = list->listElementList();
+    if (!elList || elList->listElement().empty()) return false;
+    for (auto *el : elList->listElement()) {
+        if (literalTypeClass(guardText(query, el->valueExpression())) != "list") return false;
+    }
+    return true;
+}
+
 void scanValueShapes(antlr4::tree::ParseTree *node, const std::string &query) {
     if (dynamic_cast<GQLParser::RecordConstructorContext *>(node)) {
         GqlToCypherTransformer::unsupported("map value");
@@ -192,21 +269,15 @@ void scanValueShapes(antlr4::tree::ParseTree *node, const std::string &query) {
     if (auto *list = dynamic_cast<GQLParser::ListValueConstructorByEnumerationContext *>(node)) {
         // Explicitly typed enumerations (`INT64[] [...]`) state the element
         // type; only untyped literals rely on LadybugDB's homogenization.
-        if (!list->listValueTypeName()) {
-            if (auto *elList = list->listElementList()) {
-                std::string seen;
-                for (auto *el : elList->listElement()) {
-                    std::string cls =
-                        literalTypeClass(guardText(query, el->valueExpression()));
-                    if (cls == "null" || cls == "unknown") continue;
-                    if (cls == "map") continue; // nested record constructor raises on the way down
-                    if (seen.empty()) {
-                        seen = cls;
-                    } else if (seen != cls) {
-                        GqlToCypherTransformer::unsupported("heterogeneous list literal");
-                    }
-                }
-            }
+        // A FOR statement's list source is exempt (and so is anything nested
+        // inside it): translateForStatement wraps each of its elements in
+        // _gql_to_json, so no mixed literal ever reaches the engine. What the
+        // wrap cannot absorb — a source expression that is not itself the
+        // list, or a mixed literal nested inside an element — is re-checked
+        // and rejected loudly at that emission site.
+        if (!list->listValueTypeName() && !underForItemSource(list) &&
+            listIsHeterogeneous(list, query)) {
+            GqlToCypherTransformer::unsupported("heterogeneous list literal");
         }
     }
     for (auto *child : node->children) {
@@ -711,8 +782,51 @@ std::string GqlToCypherTransformer::translateForStatement(
     }
     auto *item = ctx->forItem();
     std::string var = sourceText(item->forItemAlias()->bindingVariable());
-    std::string src = finishExpr(sourceText(item->forItemSource()->valueExpression()));
-    // GQL FOR x IN expr == Cypher UNWIND expr AS x
+    auto *srcExpr = item->forItemSource()->valueExpression();
+
+    // GQL FOR x IN expr == Cypher UNWIND expr AS x. A list literal whose
+    // elements would not survive LadybugDB's bind-time homogenization —
+    // mixed type classes (scanValueShapes' heterogeneous-literal rule, which
+    // exempts FOR sources) or nested lists — is emitted with every element e
+    // wrapped as `_gql_to_json(e)` (literal `null` stays bare) so each
+    // unwound row keeps its GQL value and type for _gql_max/_gql_min to
+    // order. Homogeneous non-list literals emit unchanged (elements stay
+    // bare), and so do non-literal sources (property lists etc.).
+    // scanValueShapes skips the rejection under ForItemSource; the checks
+    // below keep the red line for what the wrap cannot absorb: a mixed
+    // literal nested inside an element, or a source expression that is not
+    // itself the list (a parenthesized/compound expression emits verbatim).
+    auto *list = plainListLiteral(srcExpr);
+    bool wrap = list && !list->listValueTypeName() &&
+                (listIsHeterogeneous(list, query) || allElementsAreLists(list, query));
+    std::string src;
+    if (wrap) {
+        for (auto *el : list->listElementList()->listElement()) {
+            if (containsHeterogeneousList(el->valueExpression(), query)) {
+                unsupported("heterogeneous list literal");
+            }
+        }
+        std::ostringstream out;
+        out << "[";
+        bool first = true;
+        for (auto *el : list->listElementList()->listElement()) {
+            if (!first) out << ", ";
+            first = false;
+            std::string text = sourceText(el->valueExpression());
+            if (literalTypeClass(text) == "null") {
+                out << "null";
+            } else {
+                out << "_gql_to_json(" << text << ")";
+            }
+        }
+        out << "]";
+        src = finishExpr(out.str());
+    } else {
+        if (containsHeterogeneousList(srcExpr, query)) {
+            unsupported("heterogeneous list literal");
+        }
+        src = finishExpr(sourceText(srcExpr));
+    }
     return "UNWIND " + src + " AS " + var;
 }
 
@@ -2700,6 +2814,75 @@ static const std::pair<const char *, const char *> GQL_FUNCTION_MAP[] = {
     {"ELEMENT_ID", "internal_id"},
 };
 
+// GQL's MAX/MIN aggregates must run through the extension's GQL-total-order
+// aggregates _gql_max/_gql_min (LadybugDB's native max/min order values
+// differently across types). GQL.g4 admits MAX/MIN only as
+// generalSetFunctionType inside aggregateFunction, so in emitted text the
+// spelling max/min directly before a `(` is structurally an aggregate call.
+// Detection of what IS an aggregate stays parse-tree based
+// (collectAggregates / containsAggregate / registerAgg), so GROUP BY alias
+// keys and the source-text column aliases keep the original GQL spelling;
+// this rewrites only the call text about to be emitted. Guards that keep it
+// inside aggregate-call positions: string / quoted-identifier literals
+// (including the backtick-quoted `AS \`max(x)\`` auto-alias) are copied
+// verbatim, the word must be a whole word not preceded by `.` (property
+// reference `n.max`), and only max/min immediately followed by optional
+// whitespace and `(` rewrites — result aliases (`AS max`) and identifiers
+// never have that shape.
+static std::string rewriteMaxMinAggCalls(const std::string &text) {
+    std::string out;
+    out.reserve(text.size());
+    size_t i = 0;
+    while (i < text.size()) {
+        char c = text[i];
+        // Copy string / quoted-identifier literals verbatim.
+        if (c == '\'' || c == '"' || c == '`') {
+            char quote = c;
+            out += c;
+            ++i;
+            while (i < text.size()) {
+                out += text[i];
+                if (text[i] == quote) {
+                    if (i + 1 < text.size() && text[i + 1] == quote) {
+                        out += text[i + 1];
+                        i += 2;
+                        continue;
+                    }
+                    ++i;
+                    break;
+                }
+                ++i;
+            }
+            continue;
+        }
+        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+            size_t start = i;
+            while (i < text.size() &&
+                   (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_')) {
+                ++i;
+            }
+            std::string word = text.substr(start, i - start);
+            bool wordStart =
+                start == 0 || !(std::isalnum(static_cast<unsigned char>(text[start - 1])) ||
+                                text[start - 1] == '_' || text[start - 1] == '.');
+            size_t j = i;
+            while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j]))) {
+                ++j;
+            }
+            bool isCall = j < text.size() && text[j] == '(';
+            if (wordStart && isCall && (iequals(word, "max") || iequals(word, "min"))) {
+                out += iequals(word, "max") ? "_gql_max" : "_gql_min";
+            } else {
+                out += word;
+            }
+            continue;
+        }
+        out += c;
+        ++i;
+    }
+    return out;
+}
+
 // Copies `text` to `out`, replacing function identifiers outside literals.
 static void mapIdentifiersInto(const std::string &text, std::string &out) {
     size_t i = 0;
@@ -2884,7 +3067,10 @@ std::string GqlToCypherTransformer::mapOperators(const std::string &text) {
 }
 
 std::string GqlToCypherTransformer::finishExpr(const std::string &text) const {
-    return mapOperators(mapIdentifiers(text));
+    // Every expression fragment leaves through here, so the aggregate-call
+    // rewrite of max/min → _gql_max/_gql_min is applied exactly once to
+    // emitted call text (aliases and literals are protected inside).
+    return mapOperators(mapIdentifiers(rewriteMaxMinAggCalls(text)));
 }
 
 // =============================================================================

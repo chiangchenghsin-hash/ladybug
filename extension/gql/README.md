@@ -91,6 +91,15 @@ see `THIRD_PARTY_NOTICES.md`):
 
 `||` (GQL string concatenation) maps to `+`.
 
+GQL `MAX`/`MIN` translate to the in-extension aggregates `_gql_max`/`_gql_min`
+(registered by this extension), which implement the GQL total order: numbers
+compare numerically across INT/DOUBLE, lists lexicographically, and cross-class
+ranking follows the TCK pin `null < bool < array < string < number < object`
+(see difference 20). Result type follows the input type, so display of native
+columns is unchanged. Heterogeneous / nested-list `FOR` sources are wrapped
+element-wise in `_gql_to_json(ANY) → JSON` so their element types survive
+LadybugDB's list homogenization (see difference 17).
+
 ### Known semantic differences
 
 1. **REMOVE property** is approximated as `SET n.prop = NULL` — on LadybugDB's
@@ -175,22 +184,38 @@ see `THIRD_PARTY_NOTICES.md`):
 16. **Unnamed result columns** are named after their GQL source text
     (`RETURN max(x)` → column `max(x)`), which is the GQL convention;
     LadybugDB's engine alone would uppercase function names.
-17. **Heterogeneous list literals are rejected**: GQL list literals preserve
-    per-element types (`[1, 2.0]` holds an INT64 and a DOUBLE); LadybugDB
-    homogenizes mixed literals to one element type at bind time (STRING is the
-    universal sink), which silently erases types and would make `max()`/`min()`
-    compare the wrong values. Unyped literals whose element classes disagree
-    (INT vs DOUBLE count as different classes; `null` ignored) are rejected with
-    `GQL feature not supported: heterogeneous list literal`. Non-literal
-    elements cannot be judged statically and may still homogenize at runtime.
-    **Map/record values** (`{}`, `{k: v}`) in expressions are rejected too
-    (`... map value`) — LadybugDB expressions have no map type.
+17. **Mixed-type list literals**: GQL list literals preserve per-element types
+    (`[1, 2.0]` holds an INT64 and a DOUBLE); LadybugDB homogenizes mixed
+    literals to one element type at bind time (STRING is the universal sink),
+    which silently erases types. **In `FOR` sources** the layer now wraps every
+    element of a heterogeneous literal (or a literal whose elements are all
+    lists) in `_gql_to_json`, preserving each element's type as JSON — so
+    `FOR x IN [1, 2.0, 5, null, 3.2, 0.1] RETURN max(x)` works (see difference
+    20). Everywhere else untyped literals whose element classes disagree (INT
+    vs DOUBLE count as different classes; `null` ignored) are still rejected
+    with `GQL feature not supported: heterogeneous list literal`, as is a mixed
+    list nested inside a wrapped `FOR` element; non-literal elements cannot be
+    judged statically and may still homogenize at runtime. **Map/record
+    values** (`{}`, `{k: v}`) in expressions are rejected too (`... map value`)
+    — LadybugDB expressions have no map type.
 18. **`FILTER` maps to `WITH * WHERE`** so it composes after `FOR`/`MATCH`;
     result semantics are unchanged.
 19. **Boolean operators do type-check their operands**: `123 AND true` raises
     a BinderException in LadybugDB as GQL requires (earlier TCK reports claimed
     otherwise — that was a test-harness regex bug matching multi-line errors,
     now fixed).
+20. **`MAX`/`MIN` implement the GQL total order** via the extension aggregates
+    `_gql_max`/`_gql_min`: numbers compare numerically across INT/DOUBLE (the
+    winning element keeps its own type — `max([1, 2.0, 5])` is the INT `5`), lists
+    compare element-wise lexicographically, and cross-class ranking is
+    `null < bool < array < string < number < object`, pinned by TCK
+    `Aggregation2` [11]/[12] (`max` over mixed values = `1`, `min` = `[1,2]`) —
+    note this puts arrays below strings below numbers, which differs from the
+    Cypher orderability CIP for those three classes; the TCK is treated as the
+    executable spec here. Structurally distinct JSON objects are un-orderable
+    and raise a loud error rather than guessing. Numeric aggregates over
+    **ANY-graph JSON property columns** (e.g. `sum(p.age)`) are still rejected
+    by the binder (no JSON overload) — known gap, see `docs/gql_consult_brief.md` Q2.
 
 ### Graph type → schema mapping
 
@@ -233,21 +258,21 @@ Measured on 2026-10-01 (untyped-graph mode; `python extension/gql/test/tck/run_t
 | Feature area | run | passed | failed | skipped |
 |---|---|---|---|---|
 | expressions / boolean | 149 | 149 | 0 | 1 |
-| expressions / aggregation | 16 | 6 | 10 | 0 |
+| expressions / aggregation | 16 | 12 | 4 | 0 |
 | catalog / create graph types | 7 | 5 | 2 | 8 |
 | catalog / create graphs | 8 | 4 | 4 | 0 |
 | catalog / create+drop schemas | 14 | 1 | 13 | 2 |
 | debug | 1 | 0 | 1 | 0 |
-| **total** | **195** | **165** | **30** | **11** of 206 |
+| **total** | **195** | **171** | **24** | **11** of 206 |
 
-Failure classes: rejected-by-layer 23 (schema namespaces, `LIKE`/`AS COPY OF`,
-multi-label node types — unsupported by design — plus 4 heterogeneous list
-literals, see difference 17), parse-error 4 (TCK setup uses openCypher
-`CREATE (...)`/`UNWIND`, which is not GQL — GQL writes `INSERT`/`FOR`; plus one
-`CREATE GRAPH ANY AS COPY OF` grammar ambiguity), other 3 (`MIN`/`MAX`/`SUM`
-over list values — the engine has no list-typed aggregates; the binder rejects
-them loudly). All failures are loud: the layer has **no silent wrong-answer
-class**. See `test/tck/REPORT.md` for the per-scenario listing and methodology
+Failure classes: rejected-by-layer 19 (schema namespaces incl. one
+transaction-wrapped case, `LIKE`/`AS COPY OF`, multi-label node types,
+qualified graph names — unsupported by design), parse-error 4 (TCK setup uses
+openCypher `CREATE (...)`/`UNWIND`, which is not GQL — GQL writes `INSERT`/`FOR`;
+plus one `CREATE GRAPH ANY AS COPY OF` grammar ambiguity), other 1 (`sum()` over
+an ANY-graph JSON property column — the binder has no JSON aggregate overload;
+see difference 20 / consult brief Q2). All failures are loud: the layer has
+**no silent wrong-answer class**. See `test/tck/REPORT.md` for the per-scenario listing and methodology
 (exception scenarios assert that *an* error is raised — GQLSTATUS codes are not
 emitted yet; side effects are checked only where observable).
 

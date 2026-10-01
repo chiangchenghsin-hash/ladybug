@@ -15,7 +15,7 @@
 **GQL→Cypher 翻译层本身就是本项目的贡献**。
 
 验收口径（计划与交接文档一致）：**"GQL 语句翻译成等价 Cypher 执行、双跑对照结果一致"**。
-**已达成（在已映射子集内）**：自测 **86/86** 双跑全绿；opengql/tck **165 过 / 30 挂 / 11 跳（206 场景）**，
+**已达成（在已映射子集内）**：自测 **92/92** 双跑全绿；opengql/tck **171 过 / 24 挂 / 11 跳（206 场景）**，
 30 个失败全部响亮。**未达成且不声称**：ISO GQL 全量合规——19 条语义差异与响亮拒绝面见第 3 节。
 
 ## 2. 成果
@@ -46,7 +46,7 @@
 | 宽容归一化 | `FROM GRAPH x`、`CREATE GRAPH g TYPE t` 预解析归一；`AS COPY OF` 文法歧义重解释 | README #14；`gql_function.cpp` normalize* |
 
 自测分布（`_HANDOVER_GQL.md`，与 .test 文件 CASE 计数逐一相符）：basic 11 / select 7 / groupby 4 /
-write 7 / routing 4 / path 18 / labels 2 / schema 6 / unsupported 27 = **86/86**。
+write 7 / routing 4 / path 18 / labels 3 / orderability 5 / schema 6 / unsupported 27 = **92/92**。
 
 ### ③ 诚实性工程
 
@@ -93,9 +93,10 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 
 - **值模型不匹配**：无 map 值（表达式中 `{}`/`{k:v}` 拒绝，#17）；无 TIME 类型（LOCAL/ZONED TIME
   全拒，#15）；异构列表字面量静态拒但**非字面量元素无法静态判别，运行时仍可能归一**（#17 残余）；
-  GQL 跨类型全序（min/max over 列表值、混合数值字面量）未实现——TCK "other 2 + 4 异构拒" 的根因；
+  GQL 跨类型全序 **已实现**（2026-10-01 Phase 8：`_gql_max`/`_gql_min` 扩展聚合 + FOR 源
+  `_gql_to_json` 保型包装，min/max over 列表值/混合值/混合数值字面量全通——TCK +6）；
   **ANY 图动态属性列是 JSON 类型**（`sum(p.age)` 报 `Actual: (JSON)`，无 JSON 聚合重载）——
-  数值聚合/比较在 ANY 图属性上会撞 binder 重载缺口，TCK "other 1" 的真根因。
+  数值聚合/比较在 ANY 图属性上会撞 binder 重载缺口，TCK "other 1" 的真根因（Q2，未做）。
 - **固定 schema 不匹配**：REMOVE≈`SET NULL`，`PROPERTY_EXISTS`/`properties()` 行为与 ISO 不同（#1）；
   NOT NULL 接受后丢弃（#12）；每个节点表带合成主键 `_gql_id`（#11）。
 - **程序模型**：`CALL GQL` 必须是批内唯一语句；事务包裹体（`START TRANSACTION <body> COMMIT`）
@@ -116,8 +117,8 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 | qualified graph name | 1 | 设计内拒绝（schemas 未映射） |
 | 异构列表字面量（map 值同类） | 4 | 静态拒绝（#17，Phase 6 起） |
 | `AS COPY OF <graph>`、多标签节点类型 | 2 + 2 | 设计内拒绝 |
-| min/max over 列表值（字典序） | other 2（Aggregation2 [9][10]） | binder 无列表聚合重载 |
-| ANY 图 JSON 属性数值聚合（`sum(p.age)`） | other 1（Aggregation3 [1]） | **根因修正（2026-01-10 复核）**：ANY 图动态属性列是 JSON 类型，`SUM` 无 JSON 重载——不是"列表聚合" |
+| min/max over 列表值、混合值（字典序/全序） | ~~other 2 + 异构拒 4~~ **已解（Phase 8）** | `_gql_max`/`_gql_min` + `_gql_to_json` 包装 |
+| ANY 图 JSON 属性数值聚合（`sum(p.age)`） | other 1（Aggregation3 [1]） | **根因修正（2026-10-01 复核）**：ANY 图动态属性列是 JSON 类型，`SUM` 无 JSON 重载——不是"列表聚合"（Q2 未做） |
 | TCK 语料/文法问题 | parse-error 4：3 例 setup 用 openCypher `CREATE (…)`/`UNWIND`（GQL 应为 INSERT/FOR）+ 1 例 `CREATE GRAPH ANY AS COPY OF` 文法歧义 | 语料自身问题 |
 | GQLSTATUS 错误码 | 影响全部异常场景的断言深度（不计失败数） | 未实现 |
 | 其余拒绝面（自测 unsupported 27 例钉死，不进 TCK） | — | 多跳 QPPI、SIMPLE 路径模式、counted `SHORTEST k`/`SHORTEST GROUP(S)`、DIFFERENT EDGES、`WHERE IS [NOT] LABELED`、`%` 标签通配、边标签表达式、SESSION SET SCHEMA/TIME ZONE/PARAMETER、`FOR … WITH ORDINALITY/OFFSET`、`SELECT *`+GROUP BY、SET 加标签、复合查询（UNION/EXCEPT/INTERSECT）——逐条响亮报错 |
@@ -161,7 +162,7 @@ schema DDL），在 LadybugDB 上要**经双跑验证、错了会喊**的场景�
 
 | 顺位 | 项 | 理由 |
 |---|---|---|
-| 1 | 扩展标量/聚合函数的跨类型 max/min（LIST(ANY) 支持） | 解 TCK "other 3"，只加函数不动算子 |
+| ~~1~~ | ~~扩展标量/聚合函数的跨类型 max/min（LIST(ANY) 支持）~~ **✅ 已交付（Phase 8，TCK 165→171）** | — |
 | 2 | GQLSTATUS 错误码信封 | 让 TCK 异常场景从"有错即可"升级为真断言 |
 | 3 | SCHEMA 命名空间模拟 | 解 TCK 最大失败块（13 场景） |
 | 4 | 原生 GQL 执行 / 双向互通 | **大工程**，≈重写半个 planner；维持远期选项 |
