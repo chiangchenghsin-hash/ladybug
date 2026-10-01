@@ -63,15 +63,18 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 112/112 全绿**（2026-10-02 Phase 10 Q2-A 比较桥收工）：
+**✅ 122/122 全绿**（2026-10-02 Phase 11 SCHEMA 命名空间收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
 **orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
 **jsonagg 9**（Q2 双跑：ANY 图 sum/avg/max/min、混合保型、空组 NULL、DISTINCT、乘数、native SUM 对拍、非数值响亮拒）/
 **comparebridge 11**（Q2-A 双跑：哨兵序算子、跨类序、三值 NULL/NOT、typed 操作数、sortkey ASC/DESC/多键、>2^53 精度、bool rank、等值桥、数组字典序、object 响亮拒）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
+**schemapath 10**（Phase 11：CREATE/DROP SCHEMA+IF EXISTS、目录语义、九错条件 [42000]、限定名 roundtrip、
+组合拒、READ ONLY [25G03] vs 无码、`_gqlsch__` 保留前缀拒、`_gql_schemas()` 形态）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
-**TCK 合规：206 场景 = 172 过 / 23 挂 / 11 跳**（明细 `extension/gql/test/tck/REPORT.md`；Phase 10 前后逐数一致、零回退）。
+**TCK 合规：206 场景 = 188 绿（68 过 + 120 pass-with-note）/ 9 挂 / 9 跳**（明细 `extension/gql/test/tck/REPORT.md`；
+三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
 - **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
@@ -274,6 +277,34 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
 - **咨询验证自查纠错（重要）**：验证报告曾判「149 boolean 场景」为笔误（grep Scenario 数出
   36）——**误判**：149 是 run_tck 展开后的**生成用例数**（Boolean1-5:30+30+30+51+8），
   场景级 36 是另一口径。两口径都对，勿再混。验证报告修正 3 已撤回并注明。
+
+### Phase 11（Q3 SCHEMA 命名空间 + GQLSTATUS 贴码）交付记录（2026-10-02，Q3 咨询回帖 + 验证 + 2 subagent 并行 + 主会话集成）
+
+- **驱动链**：Q3 简报（62a53a9）→ 外部回帖 → 独立验证（513e9b1，`docs/gql_consult_q3_reply_verify.md`）：
+  ① 回帖事实勘误**成立**——简报事实 #3 错误，语料**含 20 处 GQLSTATUS 码断言**
+  （42000×16、25G03、22G0N、22G0P、G2000），是 run_tck.py 主动丢弃码断言；Q3-A 由缓做转做。
+  ② 验证给回帖 4 处修正：G2000 脚枪（无差别贴 42000 会砸 Create2 [7] 绿场景→贴码面收窄）、
+  [8] 光贴码转不绿（when_exception 前导 OK 期望 + START/COMMIT 切分→需 harness 整体化）、
+  [9] 本已绿（NEXT 不切分）、22G0N/22G0P 在跳过场景无执行契约（"20 处升级"高估≈13 处）。
+- **产品侧（subagent + 主会话补自测）**：`SchemaCatalog`（ExtensionManager data 槽同址，
+  逻辑路径集合 + 目录=非空真前缀 + 逻辑↔物理双向映射，物理名 `_gqlsch__`+段拼 `__`）；
+  CREATE/DROP SCHEMA（IF [NOT] EXISTS、九错条件）→ 注册表变更 + EMPTY_RESULT_CYPHER；
+  限定名改写（CREATE GRAPH/GRAPH TYPE、DROP、SESSION SET GRAPH；USE GRAPH 裸 `/path` 是
+  **GQL.g4 文法面**不收，SESSION SET GRAPH 的 graphExpression 收——测试用后者）；
+  **收窄贴码**：schemaError→`[42000] `、READ ONLY 事务包裹→`[25G03] `、其余含 AS COPY OF
+  一律无码（G2000 脚枪规避）；非 READ ONLY 事务包裹消息一字未改（unsupported.test 钉子）；
+  `_gql_schemas()->STRING`（`{"schemas":[...],"directories":[...]}` 字典序，契约供 harness）。
+- **harness 侧（subagent）**：run_tck.py——when_exception 整段单 CALL GQL（修 [8] 分类）；
+  **三档码断言**（码正则→过 / 无括号码→passed-with-note / 异码→failed wrong-GQLSTATUS，
+  分类器带"首失败守卫"，5/5 单测用真实 MSVC gtest 块格式）；catalog-1.gql fixture
+  （补语料引用的缺失输入数据 + 能力探测）；±schemas/±directories 经 `_gql_schemas()` 对拍
+  harness 迷你模型（真校验，非 unchecked）；Create1 [7] 语料自相矛盾（When 漏 IF NOT EXISTS
+  而标题/期望要）走 allowlist 重释 + 脚注（Aggregation3 values-only 同款先例）。
+- **战果**：自测 **112→122**（schemapath 10）、TCK **172→188 绿**（68 过 + 120 note）/
+  9 挂 / 9 跳，wrong-GQLSTATUS=0；9 挂=语料 parse 4 + 多标签 2 + LIKE 1 + AS COPY OF 2（全部响亮，
+  含预期账：Create2 [4] 改名通后死在 LIKE、仍红）。
+- **残余（README #22）**：注册表不落 WAL；层外建图对冲突检查盲（引擎物理名冲突仍响亮）；
+  相对限定名（dir.name）不支持；USE GRAPH 裸路径=文法天花板。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

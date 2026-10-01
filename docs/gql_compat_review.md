@@ -15,8 +15,9 @@
 **GQL→Cypher 翻译层本身就是本项目的贡献**。
 
 验收口径（计划与交接文档一致）：**"GQL 语句翻译成等价 Cypher 执行、双跑对照结果一致"**。
-**已达成（在已映射子集内）**：自测 **112/112** 双跑全绿（Phase 10 起，+comparebridge 11）；
-opengql/tck **172 过 / 23 挂 / 11 跳（206 场景）**，23 个失败全部响亮。
+**已达成（在已映射子集内）**：自测 **122/122** 双跑全绿（Phase 11 起，+schemapath 10）；
+opengql/tck **188 绿（68 过 + 120 pass-with-note）/ 9 挂 / 9 跳（206 场景）**，9 个失败全部响亮
+（三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
 **未达成且不声称**：ISO GQL 全量合规——21 条语义差异与响亮拒绝面见第 3 节。
 
 ## 2. 成果
@@ -48,7 +49,7 @@ opengql/tck **172 过 / 23 挂 / 11 跳（206 场景）**，23 个失败全部�
 
 自测分布（`_HANDOVER_GQL.md`，与 .test 文件 CASE 计数逐一相符）：basic 11 / select 7 / groupby 4 /
 write 7 / routing 4 / path 18 / labels 3 / orderability 5 / jsonagg 9 / comparebridge 11 /
-schema 6 / unsupported 27 = **112/112**。
+schema 6 / schemapath 10 / unsupported 27 = **122/122**。
 
 ### ③ 诚实性工程
 
@@ -112,22 +113,22 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 
 ### ② 功能缺口清单（响亮拒绝面，按 TCK 影响排序）
 
-失败分类总账（REPORT.md 尾行）：**rejected-by-layer 23 + parse-error 4 + other 3 = 30，全部响亮**。构成：
+失败分类总账（Phase 11 后 REPORT.md 口径）：**rejected-by-layer 5 + parse-error 4 = 9，全部响亮**。构成：
 
 | 缺口 | 场景数（30 挂的构成） | 性质 |
 |---|---|---|
-| SCHEMA 命名空间（CREATE/DROP SCHEMA + 名称冲突错误条件） | **13**（create_schemas 8 + drop 5，最大单块；其中 1 例实际死在事务包裹拒绝） | 设计内拒绝 |
-| qualified graph name | 1 | 设计内拒绝（schemas 未映射） |
+| SCHEMA 命名空间（CREATE/DROP SCHEMA + 名称冲突错误条件） | ~~13~~ **已解（Phase 11）** | 注册表模拟（路径集合+目录前缀推导+`_gqlsch__` 改名），README #22 |
+| qualified graph name | ~~1~~ **已解（Phase 11）** | 限定名→物理名改写（USE GRAPH 裸 `/path` 为 GQL.g4 文法天花板，SESSION SET GRAPH 通） |
 | 异构列表字面量（map 值同类） | 4 | 静态拒绝（#17，Phase 6 起） |
 | `AS COPY OF <graph>`、多标签节点类型 | 2 + 2 | 设计内拒绝 |
 | min/max over 列表值、混合值（字典序/全序） | ~~other 2 + 异构拒 4~~ **已解（Phase 8）** | `_gql_max`/`_gql_min` + `_gql_to_json` 包装 |
 | ANY 图 JSON 属性数值聚合（`sum(p.age)`） | ~~other 1~~ **已解（Phase 9）** | `_gql_sum`/`_gql_avg` + splice |
 | ANY 图 JSON 属性比较/排序（文本序静默错） | **已解（Phase 10）** | `_gql_lt/le/gt/ge/eq/ne` + `_gql_sortkey` 全序桥；残余响亮/不歧义，README #21 |
 | TCK 语料/文法问题 | parse-error 4：3 例 setup 用 openCypher `CREATE (…)`/`UNWIND`（GQL 应为 INSERT/FOR）+ 1 例 `CREATE GRAPH ANY AS COPY OF` 文法歧义 | 语料自身问题 |
-| GQLSTATUS 错误码 | 影响全部异常场景的断言深度（不计失败数） | 未实现 |
+| GQLSTATUS 错误码 | ~~影响全部异常场景的断言深度~~ **已做（Phase 11，窄贴码+三档断言）** | schema/READ ONLY 贴码；引擎透传无码→pass-with-note；错码=挂 |
 | 其余拒绝面（自测 unsupported 27 例钉死，不进 TCK） | — | 多跳 QPPI、SIMPLE 路径模式、counted `SHORTEST k`/`SHORTEST GROUP(S)`、DIFFERENT EDGES、`WHERE IS [NOT] LABELED`、`%` 标签通配、边标签表达式、SESSION SET SCHEMA/TIME ZONE/PARAMETER、`FOR … WITH ORDINALITY/OFFSET`、`SELECT *`+GROUP BY、SET 加标签、复合查询（UNION/EXCEPT/INTERSECT）——逐条响亮报错 |
 
-（rejected-by-layer 23 = SCHEMA 命名空间 13〔含 1 例事务包裹拒绝〕+ qualified graph name 1 + 异构列表 4 + AS COPY OF 2 + 多标签 2；加 other 3、parse-error 4 = 30。）
+（Phase 11 后：rejected-by-layer 5 = `LIKE` 1 + AS COPY OF 2 + 多标签 2；parse-error 4 = 语料 openCypher setup 3 + `CREATE GRAPH ANY AS COPY OF` 文法 1。SCHEMA 命名空间 13 与 qualified graph name 1 已解；GQLSTATUS 三档断言启用后另有 120 个异常场景记 passed-with-note（错误响亮、码未发射）。）
 
 ### ③ 语义近似残余（能跑但与 ISO 有差）
 
@@ -143,7 +144,8 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 - **回写 harness 不可靠**：`E2E_REWRITE_TESTS=1` 可把实际值回写期望，但回写实现自述低效、
   不处理并行 CASE、需 `TEST_JOBS=1`（`test/runner/e2e_test.cpp` rewriteTestFile 注释），
   实操会写坏 .test 文件——失败时应直接从失败输出读取实际值，勿依赖回写。
-- **TCK 异常只验存在性**：无 GQLSTATUS 码断言，错误码回归当前测不出（REPORT methodology）。
+- **TCK 异常断言已升级（Phase 11）**：语料 20 处 GQLSTATUS 码三档断言（码匹配/无码 note/错码挂）；
+  但引擎透传错误仍无码（pass-with-note 档），码契约覆盖面 ≈13 处。
 - **规模盲区**：全部测试在极小图上进行（如 basic.test 每 CASE 仅 1–3 节点），无规模/并发/性能验证，
   翻译层与注册表的开销、`replaceExprs` 在大查询上的正确性均未压测。
 - **TCK 只跑了 untyped 图模式**（README "Measured … untyped-graph mode"；REPORT 同注）——
@@ -154,7 +156,7 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 
 **适合**：AI/工具按标准 GQL 生成的常见查询与写入（MATCH/SELECT/GROUP BY/路径模式/标签表达式/
 schema DDL），在 LadybugDB 上要**经双跑验证、错了会喊**的场景。它把"支持 GQL"从错觉变成
-可度量的承诺——85/85 双跑 + 165/206 TCK + 失败全响亮，是当前最诚实的口径。
+可度量的承诺——122/122 双跑 + 188/206 TCK 绿 + 失败全响亮，是当前最诚实的口径。
 
 **绝不可声称**：
 - **ISO GQL 合规认证**——165/206 ≠ 通过认证，19 条语义差异与第 3 节拒绝面客观存在；
@@ -167,8 +169,8 @@ schema DDL），在 LadybugDB 上要**经双跑验证、错了会喊**的场景�
 | 顺位 | 项 | 理由 |
 |---|---|---|
 | ~~1~~ | ~~扩展标量/聚合函数的跨类型 max/min（LIST(ANY) 支持）~~ **✅ 已交付（Phase 8，TCK 165→171）** | — |
-| 2 | GQLSTATUS 错误码信封 | 让 TCK 异常场景从"有错即可"升级为真断言 |
-| 3 | SCHEMA 命名空间模拟 | 解 TCK 最大失败块（13 场景） |
+| ~~2~~ | ~~GQLSTATUS 错误码信封~~ **✅ 已交付（Phase 11，窄贴码+三档断言，TCK 172→188）** | — |
+| ~~3~~ | ~~SCHEMA 命名空间模拟~~ **✅ 已交付（Phase 11，注册表模拟）** | — |
 | 4 | 原生 GQL 执行 / 双向互通 | **大工程**，≈重写半个 planner；维持远期选项 |
 
 （图类型注册表 WAL 持久化不在表内：已评估并有意推迟，前置依赖是"扩展附着持久化"引擎工程，

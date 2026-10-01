@@ -259,6 +259,32 @@ engine's native operators byte-for-byte.
     integer-vs-real path folds through double; a bare string that happens to
     spell JSON (`"true"`-like bare text) is inherently ambiguous — the
     storage erased the type, and the parse-first rule wins.
+22. **Schema namespaces are simulated in the extension registry** (Phase 11,
+    2026-10-02). `CREATE SCHEMA` / `DROP SCHEMA` (with `IF [NOT] EXISTS`)
+    maintain a per-database path set (`/myschema`, `/foo/myschema`); a
+    *directory* is any non-empty proper path prefix of a registered schema —
+    there is no directory entity. Qualified object names (`CREATE GRAPH
+    /foo/g ANY`, `CREATE GRAPH TYPE /foo/t {...}`, `DROP GRAPH /foo/g`,
+    `SESSION SET GRAPH /foo/g`) are rewritten to physical names
+    (`_gqlsch__foo__g`) through a bidirectional logical↔physical map; a
+    user-spelled identifier starting with `_gqlsch__` is loud-rejected.
+    Catalog error conditions (create existing / name identifies a directory,
+    graph or graph type; drop missing / directory / graph / graph type /
+    non-empty) raise `[42000]`, and a schema statement combined with other
+    statements in one program (including `NEXT`) raises `[42000]`; a
+    transaction-wrapped program whose transaction is `READ ONLY` raises
+    `[25G03]`, other transaction wrappers keep the untagged message. Error
+    tagging is deliberately narrow: only these schema/transaction rejections
+    carry codes (the corpus pins exactly these); engine passthrough errors
+    stay untagged, and a wrong tag is worse than none — the TCK harness
+    fails a scenario whose expected code differs from an emitted one.
+    Known edges: the registry is not WAL-persisted (like the graph-type
+    registry, difference 10 — restart loses schemas, DDL is re-runnable);
+    graphs created outside `CALL GQL` are invisible to the conflict checks
+    (the engine still rejects physical-name collisions loudly); relative
+    qualified names (`dir.name`) stay unsupported; bare `USE GRAPH /path`
+    does not parse in GQL.g4's use-graph clause (grammar ceiling — use
+    `SESSION SET GRAPH /path`, which does parse and is rewritten).
 
 ### Graph type → schema mapping
 
@@ -296,28 +322,40 @@ The vendored [opengql/tck](https://github.com/opengql/tck) suite (Apache-2.0,
 see `test/tck/NOTICE.md`) is executed by `test/tck/run_tck.py`, which converts
 the Gherkin scenarios to the same e2e harness the hand-written suite uses.
 
-Measured on 2026-10-01 (untyped-graph mode; `python extension/gql/test/tck/run_tck.py`):
+Measured on 2026-10-02 (untyped-graph mode; `python extension/gql/test/tck/run_tck.py`):
 
-| Feature area | run | passed | failed | skipped |
-|---|---|---|---|---|
-| expressions / boolean | 149 | 149 | 0 | 1 |
-| expressions / aggregation | 16 | 13 | 3 | 0 |
-| catalog / create graph types | 7 | 5 | 2 | 8 |
-| catalog / create graphs | 8 | 4 | 4 | 0 |
-| catalog / create+drop schemas | 14 | 1 | 13 | 2 |
-| debug | 1 | 0 | 1 | 0 |
-| **total** | **195** | **172** | **23** | **11** of 206 |
+| Feature area | run | passed | passed-with-note | failed | skipped |
+|---|---|---|---|---|---|
+| expressions / boolean | 149 | 31 | 118 | 0 | 1 |
+| expressions / aggregation | 16 | 13 | 0 | 3 | 0 |
+| catalog / create graph types | 7 | 4 | 1 | 2 | 8 |
+| catalog / create graphs | 8 | 3 | 1 | 4 | 0 |
+| catalog / create+drop schemas | 16 | 16 | 0 | 0 | 0 |
+| debug | 1 | 1 | 0 | 0 | 0 |
+| **total** | **197** | **68** | **120** | **9** | **9** of 206 |
 
-Failure classes: rejected-by-layer 19 (schema namespaces incl. one
-transaction-wrapped case, `LIKE`/`AS COPY OF`, multi-label node types,
-qualified graph names — unsupported by design), parse-error 4 (TCK setup uses
-openCypher `CREATE (...)`/`UNWIND`, which is not GQL — GQL writes `INSERT`/`FOR`;
-plus one `CREATE GRAPH ANY AS COPY OF` grammar ambiguity). All failures are
+Exception scenarios assert the corpus's GQLSTATUS code in three tiers
+(regex match = pass; error without any bracketed code = pass-with-note;
+different code = fail). 68 scenarios pass with codes or without error
+assertions; 120 pass-with-note are error scenarios whose error is loud but
+carries no GQLSTATUS code yet (engine passthrough errors — Binder,
+Conversion, … — are intentionally untagged; see difference 22).
+
+Failure classes: parse-error 4 (TCK setup uses openCypher `CREATE (...)` /
+`UNWIND`, which is not GQL — GQL writes `INSERT`/`FOR`; plus one
+`CREATE GRAPH ANY AS COPY OF` grammar ambiguity), rejected-by-layer 5
+(`LIKE`/`AS COPY OF` copy-statement forms, multi-label node types —
+unsupported by design). All failures are
 loud: the layer has **no silent wrong-answer class**. One passing scenario
 (`Aggregation3` [1]) is checked values-only — the vendored corpus's expected
 header row contradicts its own query (`n.name|sum(n.num)` vs `p.name,
 sum(p.age)`), so no implementation could pass a column-name check on it; the
 feature files are left unmodified and REPORT.md discloses the exception.
+Two corpus-side exceptions are likewise disclosed in REPORT.md: `Create1`
+schemas [7] re-reads its When as `CREATE SCHEMA IF NOT EXISTS` (the shipped
+text omits the keyword while its title and `+schemas | 0` require it), and
+`data/catalogs/catalog-1.gql` (referenced by `drop1` [1][2]) is restored as
+input data the vendored copy omitted.
 See `test/tck/REPORT.md` for the per-scenario listing and methodology
 (exception scenarios assert that *an* error is raised — GQLSTATUS codes are not
 emitted yet; side effects are checked only where observable).
