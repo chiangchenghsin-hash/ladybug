@@ -15,8 +15,9 @@
 **GQL→Cypher 翻译层本身就是本项目的贡献**。
 
 验收口径（计划与交接文档一致）：**"GQL 语句翻译成等价 Cypher 执行、双跑对照结果一致"**。
-**已达成（在已映射子集内）**：自测 **101/101** 双跑全绿；opengql/tck **172 过 / 23 挂 / 11 跳（206 场景）**，
-23 个失败全部响亮。**未达成且不声称**：ISO GQL 全量合规——21 条语义差异与响亮拒绝面见第 3 节。
+**已达成（在已映射子集内）**：自测 **112/112** 双跑全绿（Phase 10 起，+comparebridge 11）；
+opengql/tck **172 过 / 23 挂 / 11 跳（206 场景）**，23 个失败全部响亮。
+**未达成且不声称**：ISO GQL 全量合规——21 条语义差异与响亮拒绝面见第 3 节。
 
 ## 2. 成果
 
@@ -46,7 +47,8 @@
 | 宽容归一化 | `FROM GRAPH x`、`CREATE GRAPH g TYPE t` 预解析归一；`AS COPY OF` 文法歧义重解释 | README #14；`gql_function.cpp` normalize* |
 
 自测分布（`_HANDOVER_GQL.md`，与 .test 文件 CASE 计数逐一相符）：basic 11 / select 7 / groupby 4 /
-write 7 / routing 4 / path 18 / labels 3 / orderability 5 / schema 6 / unsupported 27 = **92/92**。
+write 7 / routing 4 / path 18 / labels 3 / orderability 5 / jsonagg 9 / comparebridge 11 /
+schema 6 / unsupported 27 = **112/112**。
 
 ### ③ 诚实性工程
 
@@ -95,8 +97,9 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
   全拒，#15）；异构列表字面量静态拒但**非字面量元素无法静态判别，运行时仍可能归一**（#17 残余）；
   GQL 跨类型全序 **已实现**（2026-10-01 Phase 8：`_gql_max`/`_gql_min` 扩展聚合 + FOR 源
   `_gql_to_json` 保型包装，min/max over 列表值/混合值/混合数值字面量全通——TCK +6）；
-  **ANY 图动态属性列是 JSON 类型**（`sum(p.age)` 报 `Actual: (JSON)`，无 JSON 聚合重载）——
-  数值聚合/比较在 ANY 图属性上会撞 binder 重载缺口，TCK "other 1" 的真根因（Q2，未做）。
+  **ANY 图动态属性列是 JSON 类型**——数值聚合已解（Phase 9：`_gql_sum`/`_gql_avg`），
+  **比较/排序已解**（Phase 10：六算子 `_gql_lt/le/gt/ge/eq/ne` + `_gql_sortkey`，README #21
+  由红线挂账改写为已修+已知残余，残余全部响亮或存储消型内在不歧义）。
 - **固定 schema 不匹配**：REMOVE≈`SET NULL`，`PROPERTY_EXISTS`/`properties()` 行为与 ISO 不同（#1）；
   NOT NULL 接受后丢弃（#12）；每个节点表带合成主键 `_gql_id`（#11）。
 - **程序模型**：`CALL GQL` 必须是批内唯一语句；事务包裹体（`START TRANSACTION <body> COMMIT`）
@@ -118,7 +121,8 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 | 异构列表字面量（map 值同类） | 4 | 静态拒绝（#17，Phase 6 起） |
 | `AS COPY OF <graph>`、多标签节点类型 | 2 + 2 | 设计内拒绝 |
 | min/max over 列表值、混合值（字典序/全序） | ~~other 2 + 异构拒 4~~ **已解（Phase 8）** | `_gql_max`/`_gql_min` + `_gql_to_json` 包装 |
-| ANY 图 JSON 属性数值聚合（`sum(p.age)`） | ~~other 1~~ **已解（Phase 9）** | `_gql_sum`/`_gql_avg` + splice；**比较/排序仍是红线缺口**（文本序静默错，README #21，修法咨询中 `docs/gql_consult_q2.md`） |
+| ANY 图 JSON 属性数值聚合（`sum(p.age)`） | ~~other 1~~ **已解（Phase 9）** | `_gql_sum`/`_gql_avg` + splice |
+| ANY 图 JSON 属性比较/排序（文本序静默错） | **已解（Phase 10）** | `_gql_lt/le/gt/ge/eq/ne` + `_gql_sortkey` 全序桥；残余响亮/不歧义，README #21 |
 | TCK 语料/文法问题 | parse-error 4：3 例 setup 用 openCypher `CREATE (…)`/`UNWIND`（GQL 应为 INSERT/FOR）+ 1 例 `CREATE GRAPH ANY AS COPY OF` 文法歧义 | 语料自身问题 |
 | GQLSTATUS 错误码 | 影响全部异常场景的断言深度（不计失败数） | 未实现 |
 | 其余拒绝面（自测 unsupported 27 例钉死，不进 TCK） | — | 多跳 QPPI、SIMPLE 路径模式、counted `SHORTEST k`/`SHORTEST GROUP(S)`、DIFFERENT EDGES、`WHERE IS [NOT] LABELED`、`%` 标签通配、边标签表达式、SESSION SET SCHEMA/TIME ZONE/PARAMETER、`FOR … WITH ORDINALITY/OFFSET`、`SELECT *`+GROUP BY、SET 加标签、复合查询（UNION/EXCEPT/INTERSECT）——逐条响亮报错 |

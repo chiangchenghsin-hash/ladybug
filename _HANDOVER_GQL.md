@@ -63,14 +63,15 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 101/101 全绿**（2026-10-01 Phase 9 Q2 聚合收工）：
+**✅ 112/112 全绿**（2026-10-02 Phase 10 Q2-A 比较桥收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
 **orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
 **jsonagg 9**（Q2 双跑：ANY 图 sum/avg/max/min、混合保型、空组 NULL、DISTINCT、乘数、native SUM 对拍、非数值响亮拒）/
+**comparebridge 11**（Q2-A 双跑：哨兵序算子、跨类序、三值 NULL/NOT、typed 操作数、sortkey ASC/DESC/多键、>2^53 精度、bool rank、等值桥、数组字典序、object 响亮拒）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
-**TCK 合规：206 场景 = 172 过 / 23 挂 / 11 跳**（明细 `extension/gql/test/tck/REPORT.md`）。
+**TCK 合规：206 场景 = 172 过 / 23 挂 / 11 跳**（明细 `extension/gql/test/tck/REPORT.md`；Phase 10 前后逐数一致、零回退）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
 - **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
@@ -237,6 +238,42 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   任务书要钉「小步写、报告 ≤40 行」。e2e 测试文件名**下划线开头不注册**（`_q2probe.test`
   0 tests，改名 `q2probe.test` 才进组）；GQL **无 `IN` 谓词**（`WHERE x IN [...]` parse 拒）；
   GQL INSERT **同变量名多 pattern 会合并成单节点**（六节点探机只活一个——测试造数必须变量互异）。
+
+### Phase 10（Q2-A 比较/排序全序桥）交付记录（2026-10-02，外部咨询回帖 + 验证 + 3 subagent 并行 + 集成收网）
+
+- **前置**：咨询回帖 `docs/gql_consult_q2_reply.md` 经我方独立验证
+  （`docs/gql_consult_q2_reply_verify.md`：探机表全复现、B1→B2 推荐序成立、裸文本存储等修正），
+  按修正后计划执行。B1 commit `c894d91`、B2 commit `e7c51a9`。
+- **扩展函数**（gql_json_functions.{h,cpp}）：`_GQL_LT/LE/GT/GE/EQ/NE`(ANY,ANY→BOOL) +
+  `_GQL_SORTKEY`(ANY→STRING)。操作数按 LogicalType 分类：JSON 解析成功→按值归类、
+  **解析失败→裸字符串**（属性写入器存 `x` 不带引号、`_gql_to_json` 产 `"x"`，两形态同列共存）；
+  引擎 BOOL→JSON 拼写 `True`/`False` 特判 bool（GQL INSERT 经 `_gql_to_json` 存小写 `true`/
+  `false`——两拼写都归 bool）。数字=**精确十进制**文本比较（任意长、零 double 兜底——
+  对 compareJsonNumbers 的关键升级；>2^53 有测试钉）。SQL NULL→NULL（三值，NOT(NULL)=NULL
+  引擎原生）。对象异内容/DATE/UUID/INTERVAL/SERIAL/DECIMAL/STRUCT/MAP/非有限 real→响亮拒。
+  sortkey：rank 前缀 a/b/c/d/e + 数组 **FDB tuple 式自定界**（0x00 终结+00 FF 转义；8 位十六进制
+  长度前缀会**静默错序**——任务书原方案有 bug，subagent 抓出并修正，Python 移植版 fuzz
+  49,455 嵌套数组对 0 错）+ number=符号+8 位偏置指数+40 位尾数（负 9 补码、-0≡0、5≡5.0 同键）。
+- **翻译 splice**（gql_transformer.cpp）：`emitValueExpression`/`emitExpr` 在
+  `ComparisonExprAltContext`（GQLParser.h:7561，left/compOp/right 子树天然切分）按
+  `labelGraphIsAny==true` 才改写（typed/nullopt 快路=sourceText 逐字节不变）；`=`/`<>` 由
+  `kSpliceEquality` 门控（B2 翻 true；门禁=语料分叉清单——vendored TCK 全部 `=`/`<>` 是
+  bool 定律（Boolean1-5）或裸串=串字面量（Boolean4 [1]），清单干净）。ORDER BY 键**别名映射后**
+  包 `_gql_sortkey`（renderOrderBy，ASC/DESC/NULLS 后缀保留）。接线全部查询路径
+  finishExpr 站点；FOR 源/pattern 属性表/显式 GROUP BY key/OFFSET-LIMIT/SET RHS 不接（有据）。
+- **comparebridge.test 11 组双跑**：哨兵序算子（>30→{33,33.5,100}、<30→{9,'x'}）、跨类序、
+  三值 NULL/NOT、typed 字面量、sortkey ASC/DESC/多键、2^53 精度、bool rank、等值桥
+  （33=33.0 语义真、<>）、数组字典序、object 响亮拒。首跑 10/11（BoolRank 显示大小写），
+  修后 11/11。
+- **红线缺口关闭**：README #21 由「挂账缺口」改写为「已修+已知残余」（CASE WHEN 简写比较/
+  聚合实参内比较不 splice；DESC 下 NULL 排最前=引擎惯例；数组内 >int64 的 int vs real 谓词
+  仍走 Phase 8 double 比较器；裸文本恰巧拼成 JSON（字符串 'true'）是存储消型的内在不歧义，
+  parse-first 规则胜出）。
+- **战果**：自测 **101→112**（comparebridge 11 新增）、TCK **172/23/11 零回退**（B1/B2 两刀
+  分别验证）；B2 门禁清单提前扫过=干净，B2 与 B1 同阶段落地。
+- **咨询验证自查纠错（重要）**：验证报告曾判「149 boolean 场景」为笔误（grep Scenario 数出
+  36）——**误判**：149 是 run_tck 展开后的**生成用例数**（Boolean1-5:30+30+30+51+8），
+  场景级 36 是另一口径。两口径都对，勿再混。验证报告修正 3 已撤回并注明。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

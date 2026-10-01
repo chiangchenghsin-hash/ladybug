@@ -109,6 +109,12 @@ integers prints `75`, of mixed numbers `3.5`; `avg` is always real, `2.0`).
 Nulls (SQL NULL and JSON `null`) are skipped; empty groups are NULL, matching
 LadybugDB's native `SUM`.
 
+On ANY graphs the comparison operators `<` `<=` `>` `>=` `=` `<>` and `ORDER
+BY` keys translate to the in-extension predicates `_gql_lt/le/gt/ge/eq/ne`
+(`ANY, ANY) → BOOL`) and the sort key `_gql_sortkey(ANY) → STRING`, which
+implement the GQL total order (see difference 21). Typed graphs keep the
+engine's native operators byte-for-byte.
+
 ### Known semantic differences
 
 1. **REMOVE property** is approximated as `SET n.prop = NULL` — on LadybugDB's
@@ -226,22 +232,33 @@ LadybugDB's native `SUM`.
     **ANY-graph JSON property columns** (e.g. `sum(p.age)`) work through the
     same extension aggregates (`_gql_sum`/`_gql_avg`, see the function-mapping
     note above) — that former gap is closed.
-21. **Comparison and ordering over ANY-graph JSON property columns use
-    text semantics in the engine** — a known red-line gap, currently open.
-    JSON properties are stored as JSON *text*, and the engine's operators
-    compare/sort that text: `WHERE p.age >= 100` matches ages `33`, `9`,
-    `33.5` (because `'33' >= '100'` lexicographically) and misses nothing it
-    should — it is simply the wrong order; `ORDER BY p.age` sorts `10, 100,
-    33, 33.5, 9`; `p.age = 33.0` is false against the stored `33` (text
-    inequality). Probed 2026-10-01 (text-order sentinels 9 vs 100). Arithmetic
-    is *not* silent-wrong: the engine coerces by the other operand's type and
-    raises a loud ConversionException on mismatch (`p.age + 1` on age `33.5`
-    fails loudly trying INT64), and `CAST(33.5 AS INT64)` fails loudly rather
-    than truncating. The comparison/order gap is a value-model mismatch that
-    predates the translation layer; a total-order comparison bridge is being
-    designed (`docs/gql_consult_q2.md` Q2-A). A blanket rejection of
-    comparisons on ANY graphs is not viable — the TCK expression suite runs on
-    ANY graphs and passes today where text order happens to equal value order.
+21. **Comparison and ordering over ANY-graph JSON property columns use the
+    GQL total order via the comparison bridge** (Phase 10, 2026-10-02).
+    Before the bridge the engine compared the stored JSON *text*: `WHERE
+    p.age >= 100` matched `33`, `9`, `33.5` (`'33' >= '100'` lexicographically)
+    and `p.age = 33.0` was false against the stored `33` — text order is not
+    value order, a silent wrong answer (probed 2026-10-01, sentinels 9 vs 100).
+    On ANY graphs the translator now splices `<` `<=` `>` `>=` `=` `<>` to
+    `_gql_lt/le/gt/ge/eq/ne` and wraps `ORDER BY` keys in `_gql_sortkey`.
+    The bridge classifies each operand by its logical type (JSON text is
+    parsed; unparsable text is the bare string the property writer stores —
+    `x`, not `"x"`; the engine's `True`/`False` BOOL→JSON spelling is a
+    boolean), compares numbers as exact decimal text (arbitrary length, never
+    through double — `9007199254740993` and `9007199254740994` stay ordered),
+    follows the rank `null < bool < array < string < number < object` pinned
+    by TCK Aggregation2 [11]/[12], yields NULL when either side is SQL NULL
+    (three-valued, `NOT(UNKNOWN)` stays UNKNOWN), and loud-rejects what has
+    no order: structurally distinct JSON objects, DATE/UUID/INTERVAL/SERIAL/
+    DECIMAL/STRUCT/MAP operands, and non-finite typed reals. Arithmetic was
+    already loud-or-correct (`p.age + 1` on `33.5` raises ConversionException;
+    `CAST(33.5 AS INT64)` fails loudly). Known residual edges (all loud or
+    out-of-reach, none silent): comparisons inside a searched-CASE `WHEN`
+    operand (`CASE x WHEN > 5`) and inside aggregate arguments are not
+    spliced; `ORDER BY ... DESC` sorts NULLs first (engine DESC convention);
+    nested arrays compare via the Phase 8 array comparator, whose >int64
+    integer-vs-real path folds through double; a bare string that happens to
+    spell JSON (`"true"`-like bare text) is inherently ambiguous — the
+    storage erased the type, and the parse-first rule wins.
 
 ### Graph type → schema mapping
 
