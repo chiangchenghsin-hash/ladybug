@@ -16,7 +16,7 @@
 |---|---|---|
 | 1 | 当前自测 112/112、TCK **172 过 / 23 挂 / 11 跳**（206 场景）；23 挂 = rejected-by-layer 19 + parse-error 4 + other 0 | 2026-10-02 实测 |
 | 2 | 19 个 rejected 里 **13 个是 SCHEMA 命名空间**（CREATE/DROP SCHEMA 8+5），另 2 多标签节点、其余 LIKE/AS COPY OF/qualified graph name | `tck/REPORT.md` |
-| 3 | vendored TCK 语料**不含任何 GQLSTATUS 码**（无 5 位码字样）；异常场景当前断言=「有错误抛出即可」（`error(regex)` `[\s\S]+`） | grep 全语料 |
+| 3 | ~~vendored TCK 语料不含任何 GQLSTATUS 码~~ **勘误（2026-10-02，回帖指出后我方复验属实）**：语料含 **20 处**码断言（`42000`×16、`25G03`、`22G0N`、`22G0P`、`G2000`，"an exception condition should be raised: \<code\>" 句式）；是 harness（run_tck.py:516）**主动丢弃**码断言，降级为「有错即可」。详见 `gql_consult_q3_reply_verify.md` §1 | 回帖 §0 + grep 复验 |
 | 4 | 我方错误路径三类：翻译层 `unsupported(...)` 抛 `RuntimeException: GQL feature not supported: X`（19 例 rejected 的来源）；ANTLR parse 报错（4 例 parse-error 的来源）；引擎异常（BinderException/ConversionException/RuntimeException）原样透传 | gql_transformer.cpp / gql_function.cpp |
 | 5 | 引擎异常对象**没有** GQL 状态码字段；翻译层对引擎错误只截获文本 | 引擎源码（扩展 API 面） |
 | 6 | schema 场景是**路径语义**：`CREATE SCHEMA /myschema`、`/dir/myschema`，副作用断言 `+schemas/+directories` 计数；DROP 钉「非空 schema 拒绝」「schema 名与 directory/graph/graph type 同名报错」 | Create1.feature [1]-[9]、drop1.feature [1]-[7] |
