@@ -159,6 +159,18 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   `PropertyExistsParity` 双跑。教训：矩阵里"parsed as-is"式 ✓ 必须过执行验证。
 - 参考资料（Neo4j .scala / Cypher25Parser.g4 / ISO BNF）整理入 **`docs/gql_ref/`**（索引 README，
   ISO BNF 不入库）；成果/缺点评估成文 **`docs/gql_compat_review.md`**。
+- **#13 误读修正（外部分析触发，2026-10-01）**：外部分析把 README #13 读成"输入 `:A:B` 会按图型
+  静默翻转求值"（ANY=AND / 表图=OR），建议加运行时提示、归入 #14、只出 `&|!`。对照两份文法原件 +
+  代码复核后确认**前提不成立**：`:A:B` 在输入侧就是 GQL 语法错——ISO `<label conjunction>` 只有
+  `&`、filler 单 `<is label expression>` 槽；GQL.g4 同构（`labelExpression` 仅 `&|!`、filler 单
+  `isLabelExpression`、`labelSetSpecification : labelName (AMPERSAND labelName)*`），parse 层即响亮
+  拒绝（`getNumberOfSyntaxErrors` → Failed to parse）。发射侧 match/谓词位从不生成 `:` 链（复合表达式
+  只从 `&|!` 渲染 WHERE 谓词，运算符语义图型无关：`&`=AND、`|`=OR 两侧一致）；唯一 `:A:B` 发射是
+  INSERT 创建位（仅 ANY 图、设双标签=事实非谓词）。三方分叉（ISO/GQL.g4=语法错、Cypher 25=AND、
+  引擎表图=OR）全是**目标方言侧**事实。处置：#13 成因句改写为"三方分叉 + 输入侧命运 + 发射侧保证"；
+  labels.test 增 `ColonLabelChainNotGqlSyntax` 钉住输入侧拒绝（MATCH/INSERT 各一）。分析里 `%`
+  通配"翻译无坑"也不准——文法一致但本层仍响亮拒（unsupported）。教训：差异条目凡涉及"同拼写反语义"，
+  必须写明病灶在**输入侧还是目标侧**，否则读者会脑补出不存在的静默执行路径。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

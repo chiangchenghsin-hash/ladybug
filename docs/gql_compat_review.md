@@ -41,7 +41,7 @@
 | 写入 | INSERT→CREATE（结构性发射，字面量 `'INSERT ME'` 安全）；SET 含无序赋值快照（#2）；REMOVE 属性→`SET n.prop=NULL` 近似（△，#1）；DELETE / DETACH DELETE | README 13.2–13.5 |
 | 目录/会话/事务 | CREATE/DROP GRAPH；`CREATE GRAPH TYPE`→`CREATE NODE/REL TABLE` DDL（合成主键 `_gql_id SERIAL PRIMARY KEY`，#11）；SESSION SET GRAPH→USE GRAPH（会话粘滞，#3）；START TRANSACTION/COMMIT/ROLLBACK | README 12.4–12.7、7、8 |
 | 路径 | 量词 `*`→`[e*0..]`（GQL `*`=**0** 起，裸 Cypher `*`=1 起）、`+`/`{m,n}`/`?`；单跳 QPPI；ANY/ALL SHORTEST；**路径模式精确**——TRAIL 多跳 + 每个 ACYCLIC 模式绑路径变量加 `IS_TRAIL`/`IS_ACYCLIC` 全路径谓词（引擎 `*ACYCLIC` 单用只约束中间节点，闭合走 1→2→1 会漏入，翻译层补齐） | README G035/G005/G010 行、#7 |
-| 标签表达式（G074） | `:A&B`/`:A\|B`/`:!A` 按**图型分流**：ANY 图→`list_contains(labels(v),'X')`（合取），表图→`labels(v)='X'`；`:` 拼写绝不复用于复合表达式——`:A:B` 在 ANY 图是 AND、表图是 OR（表并集），同拼写反语义 | README #13；`gql_transformer.cpp` 标签段 |
+| 标签表达式（G074） | `:A&B`/`:A\|B`/`:!A` 按**图型分流**：ANY 图→`list_contains(labels(v),'X')`（合取），表图→`labels(v)='X'`；`:` 拼写绝不复用于复合表达式——`:A:B` 在 ANY 图是 AND、表图是 OR（表并集），同拼写反语义（输入侧 `:A:B` 即 GQL 语法错，三方分叉全在目标方言侧，见 README #13） | README #13；`gql_transformer.cpp` 标签段 |
 | 函数 | 别名表 `COLLECT_LIST`→`COLLECT`、`CHAR_LENGTH`→`SIZE`、`PATH_LENGTH`→`LENGTH`、`ELEMENT_ID`→`internal_id`、`\|\|`→`+` 等 | README "Function-name mapping" |
 | 宽容归一化 | `FROM GRAPH x`、`CREATE GRAPH g TYPE t` 预解析归一；`AS COPY OF` 文法歧义重解释 | README #14；`gql_function.cpp` normalize* |
 

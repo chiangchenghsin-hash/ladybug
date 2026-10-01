@@ -2426,8 +2426,14 @@ std::string GqlToCypherTransformer::translateSessionSetGraphClause(
 //
 // GQL label semantics are set membership over a node's label set (ISO GQL
 // feature G074): `:A&B` = has both, `:A|B` = has either, `:!A` = lacks A.
-// LadybugDB spells these differently per graph kind — and the same colon
-// spelling means opposite things:
+//
+// Input side: a `:A:B` colon chain is not GQL label syntax — ISO's
+// <label conjunction> is `<label term> <ampersand> <label factor>` only and
+// an element pattern filler holds one <is label expression> slot (GQL.g4
+// mirrors both), so such input dies at the ANTLR parse, before this code
+// ever runs. There is no colon-conjunction case to handle here.
+//
+// Emit side: LadybugDB reads a colon chain differently per graph kind:
 //   - ANY graphs store labels in a STRING[] column; `:A:B` is an AND of
 //     list_contains checks (engine rewrite in bind_match.cpp), and labels(n)
 //     returns the array.
@@ -2435,9 +2441,12 @@ std::string GqlToCypherTransformer::translateSessionSetGraphClause(
 //     `:A:B` matches the UNION of the two tables, and labels(n) returns the
 //     scalar name. A conjunction of distinct labels is therefore unsatisfiable.
 // So compound expressions are translated to WHERE predicates over labels(v)
-// whose form follows the resolved graph kind, and simple labels keep the
-// pattern spelling `:Label` (table pruning on typed graphs). The same colon
-// spelling is never reused across kinds, so no silent opposite-meaning reuse.
+// whose form follows the resolved graph kind — the operators are kind-
+// independent (`&` is AND, `|` is OR on both kinds) — and simple labels keep
+// the pattern spelling `:Label` (table pruning on typed graphs). Invariant:
+// a colon chain is never emitted into a match/predicate position; the only
+// emission is the INSERT label-set splice (`CREATE (n:A:B ...)` on ANY
+// graphs stores both labels — a creation-time fact, not a predicate).
 // =============================================================================
 
 namespace {

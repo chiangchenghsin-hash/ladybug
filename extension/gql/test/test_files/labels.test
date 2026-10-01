@@ -136,3 +136,25 @@
 -STATEMENT MATCH (n) WHERE labels(n) = 'A' AND labels(n) = 'A' RETURN n.v AS v
 ---- 1
 1
+
+
+# The colon chain `:A:B` is not GQL label-expression syntax: ISO GQL's
+# <label conjunction> is `<label term> <ampersand> <label factor>` only, and
+# an element pattern filler holds exactly one <is label expression> slot (the
+# vendored GQL.g4 mirrors both). Such input dies at the GQL parser — loudly,
+# long before any target-dialect reading of the spelling can apply (Cypher 25
+# colon = AND; LadybugDB's engine: AND on ANY graphs, table union on typed).
+# Correct spellings are `:A&B` / `:A|B`.
+
+-CASE ColonLabelChainNotGqlSyntax
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("MATCH (n:A:B) RETURN 1")
+---- error(regex)
+Runtime exception: Failed to parse GQL query: MATCH .+
+
+-STATEMENT CALL GQL("INSERT (n:A:B {v:1})")
+---- error(regex)
+Runtime exception: Failed to parse GQL query: INSERT .+

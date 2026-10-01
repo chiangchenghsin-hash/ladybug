@@ -147,11 +147,23 @@ see `THIRD_PARTY_NOTICES.md`):
     set (`STRING[]`) and carry real multi-label nodes: `INSERT (n:A&B ...)`,
     `MATCH (n:A&B)`, `:A|B`, `:!A` all work there. Compound label expressions
     translate to WHERE predicates over `labels(v)` chosen by graph kind (ANY:
-    `list_contains`; typed: scalar equality) — the colon spelling is never
-    reused for compound expressions because `:A:B` means AND on ANY graphs but
-    OR (table union) on typed graphs. Multi-label node *types* in
-    `CREATE GRAPH TYPE` remain unsupported. Undirected edge types are rejected
-    too (LadybugDB rel tables are directed).
+    `list_contains`; typed: scalar equality); the operators themselves are
+    graph-kind independent (`&` is AND, `|` is OR on both kinds). Multi-label
+    node *types* in `CREATE GRAPH TYPE` remain unsupported. Undirected edge
+    types are rejected too (LadybugDB rel tables are directed).
+    **`:A:B` colon chains are not GQL label syntax at all** — ISO GQL spells
+    conjunction only as `&` (`<label conjunction> ::= <label term> <ampersand>
+    <label factor>`; an element pattern filler holds one label-expression
+    slot), so `MATCH (n:A:B)` is a GQL *syntax error* rejected at parse by
+    `CALL GQL` (use `:A&B`/`:A|B`; same for `INSERT (n:A:B ...)`). The
+    three-way fork lives in the target dialects, not in this layer: Cypher 25
+    reads `:` as AND (`labelExpression3: ... (AMPERSAND | COLON) ...`), while
+    LadybugDB's engine reads `:A:B` as AND on ANY graphs but table union (OR)
+    on typed graphs. The translator therefore renders label expressions only
+    from `&`/`|`/`!` and never emits a colon chain into a match/predicate
+    position; the one colon chain it emits is multi-label `INSERT` on an ANY
+    graph, where `:A:B` is a creation-time label set (it stores both labels),
+    not a predicate.
 14. **`CREATE GRAPH g t` spelling**: ISO GQL references a graph type by bare
     name; the commonly generated `CREATE GRAPH g TYPE t` is accepted as a
     lenient pre-parse normalization (same idea as `FROM GRAPH`).
