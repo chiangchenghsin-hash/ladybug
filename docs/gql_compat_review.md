@@ -93,7 +93,9 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 
 - **值模型不匹配**：无 map 值（表达式中 `{}`/`{k:v}` 拒绝，#17）；无 TIME 类型（LOCAL/ZONED TIME
   全拒，#15）；异构列表字面量静态拒但**非字面量元素无法静态判别，运行时仍可能归一**（#17 残余）；
-  GQL 跨类型全序（MIN/MAX/SUM over list）未实现——这是 TCK "other 3" 的根因。
+  GQL 跨类型全序（min/max over 列表值、混合数值字面量）未实现——TCK "other 2 + 4 异构拒" 的根因；
+  **ANY 图动态属性列是 JSON 类型**（`sum(p.age)` 报 `Actual: (JSON)`，无 JSON 聚合重载）——
+  数值聚合/比较在 ANY 图属性上会撞 binder 重载缺口，TCK "other 1" 的真根因。
 - **固定 schema 不匹配**：REMOVE≈`SET NULL`，`PROPERTY_EXISTS`/`properties()` 行为与 ISO 不同（#1）；
   NOT NULL 接受后丢弃（#12）；每个节点表带合成主键 `_gql_id`（#11）。
 - **程序模型**：`CALL GQL` 必须是批内唯一语句；事务包裹体（`START TRANSACTION <body> COMMIT`）
@@ -110,16 +112,17 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 
 | 缺口 | 场景数（30 挂的构成） | 性质 |
 |---|---|---|
-| SCHEMA 命名空间（CREATE/DROP SCHEMA） | **13**（12 例 CREATE + 1 例 DROP，最大单块；按原因计，与 README "create+drop schemas" 特征行的 13 挂口径不同但同数） | 设计内拒绝 |
-| 事务包裹体、qualified graph name | 1 + 1 | 设计内拒绝（#4；schemas 未映射） |
+| SCHEMA 命名空间（CREATE/DROP SCHEMA + 名称冲突错误条件） | **13**（create_schemas 8 + drop 5，最大单块；其中 1 例实际死在事务包裹拒绝） | 设计内拒绝 |
+| qualified graph name | 1 | 设计内拒绝（schemas 未映射） |
 | 异构列表字面量（map 值同类） | 4 | 静态拒绝（#17，Phase 6 起） |
 | `AS COPY OF <graph>`、多标签节点类型 | 2 + 2 | 设计内拒绝 |
-| MIN/MAX/SUM over list（binder 无列表聚合） | other 3 | 引擎函数重载缺失 |
+| min/max over 列表值（字典序） | other 2（Aggregation2 [9][10]） | binder 无列表聚合重载 |
+| ANY 图 JSON 属性数值聚合（`sum(p.age)`） | other 1（Aggregation3 [1]） | **根因修正（2026-01-10 复核）**：ANY 图动态属性列是 JSON 类型，`SUM` 无 JSON 重载——不是"列表聚合" |
 | TCK 语料/文法问题 | parse-error 4：3 例 setup 用 openCypher `CREATE (…)`/`UNWIND`（GQL 应为 INSERT/FOR）+ 1 例 `CREATE GRAPH ANY AS COPY OF` 文法歧义 | 语料自身问题 |
 | GQLSTATUS 错误码 | 影响全部异常场景的断言深度（不计失败数） | 未实现 |
 | 其余拒绝面（自测 unsupported 27 例钉死，不进 TCK） | — | 多跳 QPPI、SIMPLE 路径模式、counted `SHORTEST k`/`SHORTEST GROUP(S)`、DIFFERENT EDGES、`WHERE IS [NOT] LABELED`、`%` 标签通配、边标签表达式、SESSION SET SCHEMA/TIME ZONE/PARAMETER、`FOR … WITH ORDINALITY/OFFSET`、`SELECT *`+GROUP BY、SET 加标签、复合查询（UNION/EXCEPT/INTERSECT）——逐条响亮报错 |
 
-（rejected-by-layer 23 = SCHEMA 13 + 事务包裹 1 + qualified graph name 1 + 异构列表 4 + AS COPY OF 2 + 多标签 2；加 other 3、parse-error 4 = 30。）
+（rejected-by-layer 23 = SCHEMA 命名空间 13〔含 1 例事务包裹拒绝〕+ qualified graph name 1 + 异构列表 4 + AS COPY OF 2 + 多标签 2；加 other 3、parse-error 4 = 30。）
 
 ### ③ 语义近似残余（能跑但与 ISO 有差）
 

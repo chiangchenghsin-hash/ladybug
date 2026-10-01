@@ -106,7 +106,9 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   （elementPropertySpecification 是另一条语法规则）。
 - **TCK 新口径：206 场景 = 165 过 / 30 挂 / 11 跳**。失败全为响亮报错：
   rejected-by-layer 23（19 设计拒绝 + 4 异构列表）、parse-error 4（TCK 语料/文法）、
-  other 3（MIN/MAX/SUM 无列表重载，binder 响亮拒绝）。比计划 166 少 1：Agg2 [6] 旧口径
+  other 3（min/max 无列表重载 2 例 + ANY 图 JSON 属性聚合 1 例——**2026-10-01 根因修正**：
+  `sum(p.age)` 报 `Actual: (JSON)`，ANY 图动态属性列是 JSON 类型，SUM 无 JSON 重载，非"列表聚合"；
+  binder 均响亮拒绝）。比计划 166 少 1：Agg2 [6] 旧口径
   "过"是巧合（min 的提升后结果恰与期望同字面），现被异构检查拦下——正是 0 静默错的本意。
 
 ### Phase 7（多跳路径唯一性）交付记录（2026-10-01）
@@ -159,6 +161,8 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   `PropertyExistsParity` 双跑。教训：矩阵里"parsed as-is"式 ✓ 必须过执行验证。
 - 参考资料（Neo4j .scala / Cypher25Parser.g4 / ISO BNF）整理入 **`docs/gql_ref/`**（索引 README，
   ISO BNF 不入库）；成果/缺点评估成文 **`docs/gql_compat_review.md`**。
+  **外部咨询简报 `docs/gql_consult_brief.md`**（残留问题 + 关联资讯 + 7 个开放问题，带去外部分析用；
+  含 ANY 图 JSON 属性根因、TCK 失败构成勘误）。
 - **#13 误读修正（外部分析触发，2026-10-01）**：外部分析把 README #13 读成"输入 `:A:B` 会按图型
   静默翻转求值"（ANY=AND / 表图=OR），建议加运行时提示、归入 #14、只出 `&|!`。对照两份文法原件 +
   代码复核后确认**前提不成立**：`:A:B` 在输入侧就是 GQL 语法错——ISO `<label conjunction>` 只有
@@ -252,8 +256,9 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   真多标签（INSERT + MATCH）；表图合取=空/析取=并集，语义正确。
 - **图类型注册表 WAL 持久化**：评估后暂缓（扩展加载本身不持久，需先做扩展附着持久化
   引擎工程——见 Phase 7 记录，勿重复评估）。
-- **LIST(ANY)/GQL 跨类型全序**（TCK 3 例 MIN/MAX/SUM over LIST——优先扩展标量函数，
-  不动引擎算子）。
+- **LIST(ANY)/GQL 跨类型全序**（min/max over 列表值 2 例 + 混合数值字面量 4 例——优先扩展标量
+  函数，不动引擎算子；硬点：列表字面量进引擎绑定即同构化）；**ANY 图 JSON 属性数值聚合/比较**
+  （`sum(p.age)` 类，1 例 + 潜在面）——开放问题详见 `docs/gql_consult_brief.md` Q1/Q2。
 - GQLSTATUS 错误码信封、SCHEMA 命名空间模拟、原生执行/双向互通。
 - 多跳 QPPI（`( ()-[]->()-[]->() ){m,n}`）、DIFFERENT EDGES match mode、SIMPLE 路径模式、
   WHERE 的 `IS LABELED` 谓词、`%` 标签通配。
