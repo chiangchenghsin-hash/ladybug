@@ -10,6 +10,8 @@
 #include "extension/extension_manager.h"
 #include "common/exception/runtime.h"
 #include "common/string_utils.h"
+#include "common/vector/value_vector.h"
+#include "function/scalar_function.h"
 #include "function/table/bind_data.h"
 #include "function/table/bind_input.h"
 #include "function/table/table_function.h"
@@ -348,17 +350,21 @@ static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
 
     // Transform GQL to Cypher. The transformer reports unmapped GQL constructs
     // as "GQL feature not supported" — there is no silent pass-through.
-    // The graph-type registry lives in per-database extension state so that
-    // catalog semantics (CREATE GRAPH TYPE ...) stay scoped to one database.
+    // The graph-type registry and schema catalog live in per-database
+    // extension state (same slot) so that catalog semantics (CREATE GRAPH
+    // TYPE / CREATE SCHEMA ...) stay scoped to one database.
     auto *extMgr = extension::ExtensionManager::Get(*context);
-    GraphTypeRegistry registry = GqlToCypherTransformer::deserializeGraphTypes(
-        extMgr->getData("gql.graphTypes"));
-    GqlToCypherTransformer transformer(trimmed, &registry,
+    std::string catalogData = extMgr->getData("gql.graphTypes");
+    GraphTypeRegistry registry = GqlToCypherTransformer::deserializeGraphTypes(catalogData);
+    SchemaCatalog schemaCatalog = GqlToCypherTransformer::deserializeSchemaCatalog(catalogData);
+    GqlToCypherTransformer transformer(trimmed, &registry, &schemaCatalog,
                                        [context](const std::string &graphName) {
                                            return resolveAnyGraph(*context, graphName);
                                        });
     auto cypherQuery = transformer.Transform(*tree);
-    extMgr->setData("gql.graphTypes", GqlToCypherTransformer::serializeGraphTypes(registry));
+    extMgr->setData("gql.graphTypes",
+                    GqlToCypherTransformer::serializeGraphTypes(registry) +
+                        GqlToCypherTransformer::serializeSchemaCatalog(schemaCatalog));
 
     if (cypherQuery.empty()) {
         throw common::RuntimeException{"GQL translation produced no Cypher query: " + trimmed};
@@ -382,6 +388,82 @@ function_set GqlFunction::getFunctionSet() {
     func->initLocalStateFunc = TableFunction::initEmptyLocalState;
     func->rewriteFunc = rewriteFunc;
     func->canParallelFunc = [] { return false; };
+    functionSet.push_back(std::move(func));
+    return functionSet;
+}
+
+// =============================================================================
+// _gql_schemas() -> STRING
+// =============================================================================
+// Reads the schema catalog out of the per-database extension slot and renders
+// it as the JSON payload the TCK harness compares against its own model:
+// {"schemas":["/a","/b"],"directories":["/c"]} — both arrays lexicographically
+// sorted (std::set iteration order), compact separators (no spaces).
+
+static std::string jsonEscape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+        }
+        out += c;
+    }
+    return out;
+}
+
+static std::string buildSchemasJson(const SchemaCatalog &catalog) {
+    std::string out = "{\"schemas\":[";
+    bool first = true;
+    for (const auto &path : catalog.schemas) {
+        if (!first) {
+            out += ',';
+        }
+        first = false;
+        out += '"';
+        out += jsonEscape(path);
+        out += '"';
+    }
+    out += "],\"directories\":[";
+    first = true;
+    for (const auto &dir : catalog.directories()) {
+        if (!first) {
+            out += ',';
+        }
+        first = false;
+        out += '"';
+        out += jsonEscape(dir);
+        out += '"';
+    }
+    out += "]}";
+    return out;
+}
+
+void GqlSchemasFunction::execFunc(
+    const std::vector<std::shared_ptr<common::ValueVector>>& /*parameters*/,
+    const std::vector<common::SelectionVector*>& /*parameterSelVectors*/,
+    common::ValueVector& result, common::SelectionVector* resultSelVector, void* dataPtr) {
+    auto* bindData = reinterpret_cast<function::FunctionBindData*>(dataPtr);
+    if (bindData == nullptr || bindData->clientContext == nullptr) {
+        // Never silently return a wrong catalog: fail loudly if the bind-time
+        // context was not propagated to the executor.
+        throw common::RuntimeException{"_gql_schemas() requires a client context"};
+    }
+    auto* extMgr = extension::ExtensionManager::Get(*bindData->clientContext);
+    SchemaCatalog catalog = GqlToCypherTransformer::deserializeSchemaCatalog(
+        extMgr->getData("gql.graphTypes"));
+    std::string json = buildSchemasJson(catalog);
+    for (auto i = 0u; i < resultSelVector->getSelSize(); ++i) {
+        auto pos = (*resultSelVector)[i];
+        result.setNull(pos, false);
+        common::StringVector::addString(&result, pos, json);
+    }
+}
+
+function_set GqlSchemasFunction::getFunctionSet() {
+    function_set functionSet;
+    auto func = std::make_unique<ScalarFunction>(name,
+        std::vector<LogicalTypeID>{}, LogicalTypeID::STRING, execFunc);
     functionSet.push_back(std::move(func));
     return functionSet;
 }

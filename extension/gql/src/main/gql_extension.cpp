@@ -39,6 +39,8 @@ void GqlExtension::load(main::ClientContext* context) {
         catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
     addFunc<GqlSortKeyFunction>(db, GqlSortKeyFunction::name,
         catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
+    addFunc<GqlSchemasFunction>(db, GqlSchemasFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
 }
 
 } // namespace gql_extension

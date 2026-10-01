@@ -21,6 +21,249 @@ void GqlToCypherTransformer::unsupported(const std::string &feature) {
     throw common::RuntimeException{"GQL feature not supported: " + feature};
 }
 
+void GqlToCypherTransformer::schemaError(const std::string &message) {
+    throw common::RuntimeException{"[42000] " + message};
+}
+
+// =============================================================================
+// Schema catalog (Phase 11)
+// =============================================================================
+
+std::set<std::string> SchemaCatalog::directories() const {
+    std::set<std::string> dirs;
+    for (const auto &path : schemas) {
+        // Every non-empty proper prefix ending at a '/' boundary; the root
+        // "/" itself is never a directory.
+        size_t pos = path.find('/', 1);
+        while (pos != std::string::npos) {
+            dirs.insert(path.substr(0, pos));
+            pos = path.find('/', pos + 1);
+        }
+    }
+    return dirs;
+}
+
+bool SchemaCatalog::isDirectory(const std::string &path) const {
+    return directories().count(path) != 0;
+}
+
+bool SchemaCatalog::hasMembersUnder(const std::string &path) const {
+    const std::string prefix = path + "/";
+    for (const auto &[logical, member] : members) {
+        (void)member;
+        if (logical.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SchemaCatalog::addMember(const std::string &logical, const std::string &physical,
+                              MemberKind kind) {
+    // Drop any stale reverse entry for this logical path first so both maps
+    // stay consistent when a logical path is re-registered.
+    if (auto it = members.find(logical); it != members.end()) {
+        physicalToLogical.erase(it->second.physical);
+    }
+    members[logical] = Member{physical, kind};
+    physicalToLogical[physical] = logical;
+}
+
+void SchemaCatalog::removeMemberByLogical(const std::string &logical) {
+    if (auto it = members.find(logical); it != members.end()) {
+        physicalToLogical.erase(it->second.physical);
+        members.erase(it);
+    }
+}
+
+std::string GqlToCypherTransformer::manglePhysical(const std::string &logicalPath) {
+    std::string out = "_gqlsch__";
+    bool first = true;
+    size_t i = 0;
+    while (i < logicalPath.size()) {
+        if (logicalPath[i] == '/') {
+            ++i;
+            continue;
+        }
+        size_t end = logicalPath.find('/', i);
+        if (end == std::string::npos) {
+            end = logicalPath.size();
+        }
+        if (!first) {
+            out += "__";
+        }
+        out += logicalPath.substr(i, end - i);
+        first = false;
+        i = end;
+    }
+    return out;
+}
+
+void GqlToCypherTransformer::checkReservedPrefix(const std::string &identifier) {
+    if (identifier.rfind("_gqlsch__", 0) == 0) {
+        unsupported("identifier with reserved _gqlsch__ prefix (" + identifier + ")");
+    }
+}
+
+std::string GqlToCypherTransformer::serializeSchemaCatalog(const SchemaCatalog &catalog) {
+    constexpr char TAB = '\t';
+    constexpr char NL = '\n';
+    std::string out;
+    for (const auto &path : catalog.schemas) {
+        out += "Z";
+        out += TAB;
+        out += path;
+        out += NL;
+    }
+    for (const auto &[logical, member] : catalog.members) {
+        out += "M";
+        out += TAB;
+        out += logical;
+        out += TAB;
+        out += member.physical;
+        out += TAB;
+        out += member.kind == SchemaCatalog::MemberKind::GRAPH ? "G" : "T";
+        out += NL;
+    }
+    return out;
+}
+
+SchemaCatalog GqlToCypherTransformer::deserializeSchemaCatalog(const std::string &data) {
+    SchemaCatalog catalog;
+    std::istringstream in(data);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.size() < 2 || (line[0] != 'Z' && line[0] != 'M') || line[1] != '\t') {
+            continue;
+        }
+        if (line[0] == 'Z') {
+            catalog.schemas.insert(line.substr(2));
+            continue;
+        }
+        // M \t logical \t physical \t K
+        std::vector<std::string> parts;
+        std::string cur;
+        for (size_t i = 2; i < line.size(); ++i) {
+            if (line[i] == '\t') {
+                parts.push_back(cur);
+                cur.clear();
+            } else {
+                cur += line[i];
+            }
+        }
+        parts.push_back(cur);
+        if (parts.size() == 3) {
+            catalog.addMember(parts[0], parts[1],
+                              parts[2] == "T" ? SchemaCatalog::MemberKind::GRAPH_TYPE
+                                              : SchemaCatalog::MemberKind::GRAPH);
+        }
+    }
+    return catalog;
+}
+
+std::string GqlToCypherTransformer::normalizePathWhitespace(const std::string &raw) {
+    std::string out;
+    out.reserve(raw.size());
+    char quote = '\0';
+    for (char c : raw) {
+        if (quote != '\0') {
+            out += c;
+            if (c == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'' || c == '`') {
+            quote = c;
+            out += c;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            continue;
+        }
+        out += c;
+    }
+    return out;
+}
+
+// Strips one layer of delimiting quotes so the reserved-prefix check also
+// catches delimited spellings like "`_gqlsch__x`".
+static std::string stripDelims(const std::string &s) {
+    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
+                          (s.front() == '`' && s.back() == '`'))) {
+        return s.substr(1, s.size() - 2);
+    }
+    return s;
+}
+
+void GqlToCypherTransformer::checkReservedInPath(const std::string &path) {
+    size_t i = 0;
+    while (i < path.size()) {
+        if (path[i] == '/') {
+            ++i;
+            continue;
+        }
+        size_t end = path.find('/', i);
+        if (end == std::string::npos) {
+            end = path.size();
+        }
+        checkReservedPrefix(stripDelims(path.substr(i, end - i)));
+        i = end;
+    }
+}
+
+std::string GqlToCypherTransformer::resolvePhysical(const std::string &logicalPath,
+                                                    bool createMapping,
+                                                    SchemaCatalog::MemberKind kind) {
+    checkReservedInPath(logicalPath);
+    if (!schemaCatalog) {
+        return manglePhysical(logicalPath);
+    }
+    if (auto it = schemaCatalog->members.find(logicalPath); it != schemaCatalog->members.end()) {
+        return it->second.physical;
+    }
+    std::string physical = manglePhysical(logicalPath);
+    if (createMapping) {
+        schemaCatalog->addMember(logicalPath, physical, kind);
+    }
+    return physical;
+}
+
+std::string GqlToCypherTransformer::schemaPathText(
+    GQLParser::CatalogSchemaParentAndNameContext *ctx) {
+    if (!ctx) {
+        unsupported("schema statement without a schema name");
+    }
+    std::string path = normalizePathWhitespace(sourceText(ctx));
+    if (path.empty() || path.front() != '/') {
+        unsupported("relative schema path (" + path + ")");
+    }
+    checkReservedInPath(path);
+    return path;
+}
+
+std::string GqlToCypherTransformer::rewriteGraphExpression(
+    GQLParser::GraphExpressionContext *ctx) {
+    std::string raw = sourceText(ctx);
+    auto *ref = ctx->graphReference();
+    if (!ref || !ref->catalogObjectParentReference()) {
+        // Plain name / delimited name / CURRENT_GRAPH / parameter — unchanged.
+        // The reserved prefix still applies to user-spelled identifiers.
+        checkReservedPrefix(stripDelims(normalizePathWhitespace(raw)));
+        return raw;
+    }
+    std::string logical = normalizePathWhitespace(raw);
+    if (logical.empty() || logical.front() != '/') {
+        // Relative/dotted parent references stay loudly unsupported.
+        unsupported("qualified graph name (schemas are not mapped)");
+    }
+    checkReservedInPath(logical);
+    // Lookups resolve through the registry first; an unknown logical path
+    // still mangles deterministically (no member registration — USE/DROP must
+    // not invent catalog entries for graphs that may not exist).
+    return resolvePhysical(logical, /*createMapping=*/false, SchemaCatalog::MemberKind::GRAPH);
+}
+
 std::string GqlToCypherTransformer::snippet(const std::string &text) {
     std::string t;
     for (char c : text) {
@@ -296,6 +539,9 @@ std::string GqlToCypherTransformer::Transform(GQLParser::GqlProgramContext &root
     createGraphName.clear();
     autoPathIdx = 0;
     autoLabelIdx = 0;
+    // The schema-combination rule fires before any other translation-time
+    // rejection so its 42000 tag wins over generic NEXT / multi-catalog errors.
+    checkSchemaStatementAlone(&root);
     scanValueShapes(&root, query);
     resolveLabelGraphKind(&root);
 
@@ -352,9 +598,25 @@ std::string GqlToCypherTransformer::translateTransactionActivity(
         // A transaction-wrapped program would translate to
         // "BEGIN TRANSACTION; <body>; COMMIT" where only the COMMIT message is
         // visible to the caller (rewritten statements: last one wins). Reject
-        // instead of silently returning the wrong result shape.
-        unsupported("transaction-wrapped program in a single CALL GQL "
-                    "(issue BEGIN/COMMIT as separate CALL GQL statements)");
+        // instead of silently returning the wrong result shape. READ ONLY
+        // wrappers are tagged with GQLSTATUS 25G03 (read-only transaction
+        // cannot contain the write); every other wrapper keeps the untagged
+        // message — narrow tagging per Phase 11 rules.
+        bool readOnly = false;
+        if (auto *chars = start->transactionCharacteristics()) {
+            for (auto *mode : chars->transactionMode()) {
+                if (auto *access = mode->transactionAccessMode(); access && access->ONLY()) {
+                    readOnly = true;
+                }
+            }
+        }
+        const std::string feature =
+            "transaction-wrapped program in a single CALL GQL "
+            "(issue BEGIN/COMMIT as separate CALL GQL statements)";
+        if (readOnly) {
+            throw common::RuntimeException{"[25G03] GQL feature not supported: " + feature};
+        }
+        unsupported(feature);
     }
     std::string result;
     if (start) {
@@ -461,11 +723,11 @@ std::string GqlToCypherTransformer::translateLinearCatalog(
     if (auto *dropGraph = prim->dropGraphStatement()) {
         return translateDropGraphStatement(dropGraph);
     }
-    if (prim->createSchemaStatement()) {
-        unsupported("CREATE SCHEMA");
+    if (auto *createSchema = prim->createSchemaStatement()) {
+        return translateCreateSchemaStatement(createSchema);
     }
-    if (prim->dropSchemaStatement()) {
-        unsupported("DROP SCHEMA");
+    if (auto *dropSchema = prim->dropSchemaStatement()) {
+        return translateDropSchemaStatement(dropSchema);
     }
     if (auto *createGraphType = prim->createGraphTypeStatement()) {
         return translateCreateGraphTypeStatement(createGraphType);
@@ -599,7 +861,8 @@ std::string GqlToCypherTransformer::translateLinearQuery(
         }
         std::vector<std::string> parts;
         for (auto *part : focused->focusedLinearQueryStatementPart()) {
-            parts.push_back("USE GRAPH " + sourceText(part->useGraphClause()->graphExpression()) +
+            parts.push_back("USE GRAPH " +
+                            rewriteGraphExpression(part->useGraphClause()->graphExpression()) +
                             ";");
             for (auto *qs : part->simpleLinearQueryStatement()->simpleQueryStatement()) {
                 auto *prim = qs->primitiveQueryStatement();
@@ -611,7 +874,8 @@ std::string GqlToCypherTransformer::translateLinearQuery(
         }
         if (auto *tail = focused->focusedLinearQueryAndPrimitiveResultStatementPart()) {
             parts.push_back("USE GRAPH " +
-                            sourceText(tail->useGraphClause()->graphExpression()) + ";");
+                            rewriteGraphExpression(tail->useGraphClause()->graphExpression()) +
+                            ";");
             for (auto *qs : tail->simpleLinearQueryStatement()->simpleQueryStatement()) {
                 auto *prim = qs->primitiveQueryStatement();
                 if (!prim) {
@@ -622,7 +886,8 @@ std::string GqlToCypherTransformer::translateLinearQuery(
             parts.push_back(translatePrimitiveResult(tail->primitiveResultStatement()));
         } else if (auto *resultOnly = focused->focusedPrimitiveResultStatement()) {
             parts.push_back("USE GRAPH " +
-                            sourceText(resultOnly->useGraphClause()->graphExpression()) + ";");
+                            rewriteGraphExpression(resultOnly->useGraphClause()->graphExpression()) +
+                            ";");
             parts.push_back(translatePrimitiveResult(resultOnly->primitiveResultStatement()));
         } else {
             unsupported("focused linear query");
@@ -650,7 +915,8 @@ std::string GqlToCypherTransformer::translateLinearData(
             unsupported("nested data-modifying procedure specification");
         }
         auto *body = focused->focusedLinearDataModifyingStatementBody();
-        prefix = "USE GRAPH " + sourceText(body->useGraphClause()->graphExpression()) + ";";
+        prefix = "USE GRAPH " + rewriteGraphExpression(body->useGraphClause()->graphExpression()) +
+                 ";";
         accessing = body->simpleLinearDataAccessingStatement();
         result = body->primitiveResultStatement();
     } else {
@@ -1363,7 +1629,7 @@ std::string GqlToCypherTransformer::translateSelectStatement(
             unsupported("multiple FROM GRAPH MATCH clauses");
         }
         auto *graphMatch = matches->selectGraphMatch(0);
-        std::string graphText = sourceText(graphMatch->graphExpression());
+        std::string graphText = rewriteGraphExpression(graphMatch->graphExpression());
         if (!iequals(graphText, "CURRENT_GRAPH") &&
             !iequals(graphText, "CURRENT_PROPERTY_GRAPH")) {
             // Labels resolve against the session graph, so a named FROM GRAPH
@@ -2380,24 +2646,118 @@ std::string emitGraphTypeDdl(const std::string &graphName, const GraphTypeSpec &
     return out;
 }
 
-// Graph type reference → type name ("$param" and qualified names rejected).
-std::string graphTypeRefName(const std::string &query,
-                             GQLParser::GraphTypeReferenceContext *ref) {
-    if (!ref || !ref->catalogGraphTypeParentAndName()) {
-        GqlToCypherTransformer::unsupported("graph type reference parameter");
-    }
-    auto *parentAndName = ref->catalogGraphTypeParentAndName();
-    if (parentAndName->catalogObjectParentReference()) {
-        GqlToCypherTransformer::unsupported("qualified graph type name");
-    }
-    return ctxText(query, parentAndName->graphTypeName());
-}
+// Graph type reference → physical type name ("$param" rejected; qualified
+// references resolved through the schema catalog). Declared as a member —
+// see GqlToCypherTransformer::graphTypeRefName below.
 
 } // namespace
 
 // =============================================================================
 // Catalog / session
 // =============================================================================
+
+std::string GqlToCypherTransformer::graphTypeRefName(GQLParser::GraphTypeReferenceContext *ref) {
+    if (!ref || !ref->catalogGraphTypeParentAndName()) {
+        unsupported("graph type reference parameter");
+    }
+    auto *parentAndName = ref->catalogGraphTypeParentAndName();
+    if (parentAndName->catalogObjectParentReference()) {
+        std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+        if (logical.empty() || logical.front() != '/') {
+            unsupported("qualified graph type name");
+        }
+        return resolvePhysical(logical, /*createMapping=*/false,
+                               SchemaCatalog::MemberKind::GRAPH_TYPE);
+    }
+    std::string name = ctxText(query, parentAndName->graphTypeName());
+    checkReservedPrefix(stripDelims(name));
+    return name;
+}
+
+// Rejects a schema catalog statement combined with any other statement: a
+// program may contain exactly one statement and it must be that schema
+// statement (no NEXT chains, no juxtaposed catalog statements).
+void GqlToCypherTransformer::checkSchemaStatementAlone(antlr4::ParserRuleContext *ctx) {
+    bool hasSchema = false;
+    int stmtCount = 0;
+    bool multiCatalog = false;
+    std::function<void(antlr4::tree::ParseTree *)> walk = [&](antlr4::tree::ParseTree *node) {
+        if (dynamic_cast<GQLParser::CreateSchemaStatementContext *>(node) !=
+                nullptr ||
+            dynamic_cast<GQLParser::DropSchemaStatementContext *>(node) != nullptr) {
+            hasSchema = true;
+        }
+        if (dynamic_cast<GQLParser::StatementContext *>(node) != nullptr) {
+            stmtCount++;
+        }
+        if (auto *catalog = dynamic_cast<GQLParser::LinearCatalogModifyingStatementContext *>(node);
+            catalog != nullptr && catalog->simpleCatalogModifyingStatement().size() > 1) {
+            multiCatalog = true;
+        }
+        for (auto *child : node->children) {
+            walk(child);
+        }
+    };
+    walk(ctx);
+    if (hasSchema && (stmtCount > 1 || multiCatalog)) {
+        schemaError(
+            "GQL feature not supported: schema catalog statement combined "
+            "with other statements");
+    }
+}
+
+std::string GqlToCypherTransformer::translateCreateSchemaStatement(
+    GQLParser::CreateSchemaStatementContext *ctx) {
+    if (!schemaCatalog) {
+        unsupported("schema catalog unavailable");
+    }
+    std::string path = schemaPathText(ctx->catalogSchemaParentAndName());
+    if (schemaCatalog->schemas.count(path) != 0) {
+        if (ctx->IF() && ctx->NOT()) {
+            return EMPTY_RESULT_CYPHER;
+        }
+        schemaError("Schema " + path + " already exists");
+    }
+    if (schemaCatalog->isDirectory(path)) {
+        schemaError("Schema name " + path + " identifies a directory");
+    }
+    if (auto it = schemaCatalog->members.find(path); it != schemaCatalog->members.end()) {
+        if (it->second.kind == SchemaCatalog::MemberKind::GRAPH) {
+            schemaError("Schema name " + path + " identifies a graph");
+        }
+        schemaError("Schema name " + path + " identifies a graph type");
+    }
+    schemaCatalog->schemas.insert(path);
+    return EMPTY_RESULT_CYPHER;
+}
+
+std::string GqlToCypherTransformer::translateDropSchemaStatement(
+    GQLParser::DropSchemaStatementContext *ctx) {
+    if (!schemaCatalog) {
+        unsupported("schema catalog unavailable");
+    }
+    std::string path = schemaPathText(ctx->catalogSchemaParentAndName());
+    if (schemaCatalog->isDirectory(path)) {
+        schemaError("Schema name " + path + " identifies a directory");
+    }
+    if (auto it = schemaCatalog->members.find(path); it != schemaCatalog->members.end()) {
+        if (it->second.kind == SchemaCatalog::MemberKind::GRAPH) {
+            schemaError("Schema name " + path + " identifies a graph");
+        }
+        schemaError("Schema name " + path + " identifies a graph type");
+    }
+    if (schemaCatalog->schemas.count(path) == 0) {
+        if (ctx->IF()) {
+            return EMPTY_RESULT_CYPHER;
+        }
+        schemaError("Schema " + path + " does not exist");
+    }
+    if (schemaCatalog->hasMembersUnder(path)) {
+        schemaError("Cannot drop schema " + path + ": schema is not empty");
+    }
+    schemaCatalog->schemas.erase(path);
+    return EMPTY_RESULT_CYPHER;
+}
 
 std::string GqlToCypherTransformer::translateCreateGraphStatement(
     GQLParser::CreateGraphStatementContext *ctx) {
@@ -2409,7 +2769,9 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
     if (!parentAndName || !parentAndName->graphName()) {
         unsupported("CREATE GRAPH without a graph name");
     }
-    if (parentAndName->catalogObjectParentReference()) {
+    bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
+    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    if (qualified && (logical.empty() || logical.front() != '/')) {
         unsupported("qualified graph name (schemas are not mapped)");
     }
     std::string name = sourceText(parentAndName->graphName());
@@ -2423,8 +2785,19 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
         if (!of || !of->graphTypeReference() || !ctx->graphSource()) {
             unsupported("CREATE GRAPH named TYPE (quote the name: CREATE GRAPH \"TYPE\" ...)");
         }
-        std::string typeName = graphTypeRefName(query, of->graphTypeReference());
+        std::string typeName = graphTypeRefName(of->graphTypeReference());
+        // Logical path of the type being created (qualified refs already
+        // resolved to physical by graphTypeRefName; recover the logical text).
+        auto *typeParent = of->graphTypeReference()->catalogGraphTypeParentAndName();
+        std::string typeLogical =
+            (typeParent && typeParent->catalogObjectParentReference())
+                ? normalizePathWhitespace(sourceText(typeParent))
+                : "/" + typeName;
         std::string other = sourceText(ctx->graphSource()->graphExpression());
+        if (!other.empty() && other.front() == '/') {
+            other = resolvePhysical(normalizePathWhitespace(other), /*createMapping=*/false,
+                                    SchemaCatalog::MemberKind::GRAPH_TYPE);
+        }
         const GraphTypeSpec *srcSpec = findGraphType(*registry, other);
         if (!srcSpec) {
             throw common::RuntimeException{"Graph type " + other + " is not defined"};
@@ -2433,11 +2806,30 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
             throw common::RuntimeException{"Graph type " + typeName + " already exists"};
         }
         (*registry)[upperCopy(typeName)] = *srcSpec;
+        if (schemaCatalog) {
+            schemaCatalog->addMember(typeLogical, typeName,
+                                     SchemaCatalog::MemberKind::GRAPH_TYPE);
+        }
         return EMPTY_RESULT_CYPHER;
     }
 
     if (ctx->graphSource()) {
         unsupported("CREATE GRAPH ... AS COPY OF <graph>");
+    }
+    // Resolve the physical engine name: qualified paths mangle through the
+    // schema catalog; plain names pass through and register under "/<name>".
+    if (qualified) {
+        checkReservedInPath(logical);
+        name = resolvePhysical(logical, /*createMapping=*/true,
+                               SchemaCatalog::MemberKind::GRAPH);
+    } else {
+        checkReservedPrefix(stripDelims(name));
+        if (schemaCatalog) {
+            std::string rootLogical = "/" + name;
+            if (schemaCatalog->members.find(rootLogical) == schemaCatalog->members.end()) {
+                schemaCatalog->addMember(rootLogical, name, SchemaCatalog::MemberKind::GRAPH);
+            }
+        }
     }
     // GQL "IF NOT EXISTS" is enforced at rewrite time (LadybugDB Cypher has no
     // IF NOT EXISTS for CREATE GRAPH).
@@ -2460,7 +2852,7 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
     }
     GraphTypeSpec spec;
     if (of->graphTypeReference()) {
-        std::string typeName = graphTypeRefName(query, of->graphTypeReference());
+        std::string typeName = graphTypeRefName(of->graphTypeReference());
         const GraphTypeSpec *src = findGraphType(*registry, typeName);
         if (!src) {
             throw common::RuntimeException{"Graph type " + typeName + " is not defined"};
@@ -2480,10 +2872,26 @@ std::string GqlToCypherTransformer::translateCreateGraphTypeStatement(
     if (!parentAndName || !parentAndName->graphTypeName()) {
         unsupported("CREATE GRAPH TYPE without a type name");
     }
-    if (parentAndName->catalogObjectParentReference()) {
-        unsupported("qualified graph type name");
+    bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
+    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    std::string name;
+    if (qualified) {
+        if (logical.empty() || logical.front() != '/') {
+            unsupported("qualified graph type name");
+        }
+        name = resolvePhysical(logical, /*createMapping=*/true,
+                               SchemaCatalog::MemberKind::GRAPH_TYPE);
+    } else {
+        name = sourceText(parentAndName->graphTypeName());
+        checkReservedPrefix(stripDelims(name));
+        if (schemaCatalog) {
+            std::string rootLogical = "/" + name;
+            if (schemaCatalog->members.find(rootLogical) == schemaCatalog->members.end()) {
+                schemaCatalog->addMember(rootLogical, name,
+                                         SchemaCatalog::MemberKind::GRAPH_TYPE);
+            }
+        }
     }
-    std::string name = sourceText(parentAndName->graphTypeName());
     bool orReplace = ctx->OR() && ctx->REPLACE();
     bool ifNotExists = ctx->IF() && ctx->NOT();
 
@@ -2492,7 +2900,7 @@ std::string GqlToCypherTransformer::translateCreateGraphTypeStatement(
     if (src->nestedGraphTypeSpecification()) {
         spec = parseGraphTypeSpecification(src->nestedGraphTypeSpecification(), query);
     } else if (src->copyOfGraphType()) {
-        std::string other = graphTypeRefName(query, src->copyOfGraphType()->graphTypeReference());
+        std::string other = graphTypeRefName(src->copyOfGraphType()->graphTypeReference());
         const GraphTypeSpec *srcSpec = findGraphType(*registry, other);
         if (!srcSpec) {
             throw common::RuntimeException{"Graph type " + other + " is not defined"};
@@ -2517,10 +2925,28 @@ std::string GqlToCypherTransformer::translateDropGraphTypeStatement(
     if (!parentAndName || !parentAndName->graphTypeName()) {
         unsupported("DROP GRAPH TYPE without a type name");
     }
-    if (parentAndName->catalogObjectParentReference()) {
-        unsupported("qualified graph type name");
+    bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
+    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    std::string name;
+    if (qualified) {
+        if (logical.empty() || logical.front() != '/') {
+            unsupported("qualified graph type name");
+        }
+        name = resolvePhysical(logical, /*createMapping=*/false,
+                               SchemaCatalog::MemberKind::GRAPH_TYPE);
+        if (schemaCatalog) {
+            schemaCatalog->removeMemberByLogical(logical);
+        }
+    } else {
+        name = sourceText(parentAndName->graphTypeName());
+        checkReservedPrefix(stripDelims(name));
+        if (schemaCatalog) {
+            auto rit = schemaCatalog->physicalToLogical.find(name);
+            if (rit != schemaCatalog->physicalToLogical.end() && rit->second == "/" + name) {
+                schemaCatalog->removeMemberByLogical(rit->second);
+            }
+        }
     }
-    std::string name = sourceText(parentAndName->graphTypeName());
     if (registry->erase(upperCopy(name)) == 0) {
         if (ctx->IF()) return EMPTY_RESULT_CYPHER;
         throw common::RuntimeException{"Graph type " + name + " does not exist"};
@@ -2534,21 +2960,40 @@ std::string GqlToCypherTransformer::translateDropGraphStatement(
     if (!parentAndName || !parentAndName->graphName()) {
         unsupported("DROP GRAPH without a graph name");
     }
-    if (parentAndName->catalogObjectParentReference()) {
-        unsupported("qualified graph name (schemas are not mapped)");
+    bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
+    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    std::string name;
+    if (qualified) {
+        if (logical.empty() || logical.front() != '/') {
+            unsupported("qualified graph name (schemas are not mapped)");
+        }
+        name = resolvePhysical(logical, /*createMapping=*/false,
+                               SchemaCatalog::MemberKind::GRAPH);
+        if (schemaCatalog) {
+            schemaCatalog->removeMemberByLogical(logical);
+        }
+    } else {
+        name = sourceText(parentAndName->graphName());
+        checkReservedPrefix(stripDelims(name));
+        if (schemaCatalog) {
+            auto rit = schemaCatalog->physicalToLogical.find(name);
+            if (rit != schemaCatalog->physicalToLogical.end() && rit->second == "/" + name) {
+                schemaCatalog->removeMemberByLogical(rit->second);
+            }
+        }
     }
     std::string text = "DROP GRAPH ";
     if (ctx->IF()) {
         text += "IF EXISTS ";
     }
-    text += sourceText(parentAndName->graphName());
+    text += name;
     return text + "; " + EMPTY_RESULT_CYPHER;
 }
 
 std::string GqlToCypherTransformer::translateSessionSetGraphClause(
     GQLParser::SessionSetGraphClauseContext *ctx) {
     // SESSION SET GRAPH g == USE GRAPH g (both are session-sticky).
-    return "USE GRAPH " + finishExpr(sourceText(ctx->graphExpression()));
+    return "USE GRAPH " + finishExpr(rewriteGraphExpression(ctx->graphExpression()));
 }
 
 // =============================================================================
@@ -2640,13 +3085,13 @@ void GqlToCypherTransformer::resolveLabelGraphKind(GQLParser::GqlProgramContext 
             std::string name;
             bool isRef = false;
             if (auto *u = dynamic_cast<GQLParser::UseGraphClauseContext *>(node)) {
-                name = trimCopy(sourceText(u->graphExpression()));
+                name = trimCopy(rewriteGraphExpression(u->graphExpression()));
                 isRef = true;
             } else if (auto *s = dynamic_cast<GQLParser::SessionSetGraphClauseContext *>(node)) {
-                name = trimCopy(sourceText(s->graphExpression()));
+                name = trimCopy(rewriteGraphExpression(s->graphExpression()));
                 isRef = true;
             } else if (auto *m = dynamic_cast<GQLParser::SelectGraphMatchContext *>(node)) {
-                name = trimCopy(sourceText(m->graphExpression()));
+                name = trimCopy(rewriteGraphExpression(m->graphExpression()));
                 isRef = true;
             }
             if (isRef) {

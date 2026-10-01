@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,6 +46,41 @@ struct GraphTypeSpec {
 // (per-database state — see GqlExtension::load / ExtensionManager::setData).
 using GraphTypeRegistry = std::map<std::string, GraphTypeSpec>;
 
+// Schema catalog (Phase 11): logical schema paths + graph/graph-type member
+// registrations, serialized into the SAME ExtensionManager slot as the
+// graph-type registry (in-memory only, not WAL-backed — restart drops it).
+//
+// Model:
+//  - `schemas`: registered logical schema paths ("/myschema", "/foo/myschema").
+//  - `members`: logical path -> {physical engine name, kind} for graphs and
+//    graph types created through the layer (qualified or not; unqualified
+//    names register under the root path "/<name>").
+//  - directory := any non-empty proper prefix of a registered schema path at
+//    a '/' boundary ("/foo/myschema" registers directory "/foo"); no
+//    directory entity is stored.
+//  - physical name mangling for qualified paths: "_gqlsch__" + path segments
+//    joined by "__" ("/foo/mygraph" -> "_gqlsch__foo__mygraph").
+struct SchemaCatalog {
+    enum class MemberKind { GRAPH, GRAPH_TYPE };
+    struct Member {
+        std::string physical;
+        MemberKind kind = MemberKind::GRAPH;
+    };
+
+    std::set<std::string> schemas;
+    std::map<std::string, Member> members;             // logical -> physical
+    std::map<std::string, std::string> physicalToLogical; // physical -> logical
+
+    // Proper non-empty prefixes of every schema path ('/' boundary, no root).
+    std::set<std::string> directories() const;
+    bool isDirectory(const std::string &path) const;
+    // All members strictly under a schema path ("/foo" owns "/foo/g").
+    bool hasMembersUnder(const std::string &path) const;
+    void addMember(const std::string &logical, const std::string &physical,
+                   MemberKind kind);
+    void removeMemberByLogical(const std::string &logical);
+};
+
 // GQL → Cypher translator (the dialect bridge for LadybugDB's Cypher engine).
 //
 // Design: explicit top-level dispatch over the GQL parse tree — every statement
@@ -71,8 +107,10 @@ public:
     using AnyGraphResolver = std::function<std::optional<bool>(const std::string &)>;
 
     explicit GqlToCypherTransformer(const std::string &query_p, GraphTypeRegistry *registry_p,
+                                    SchemaCatalog *schemaCatalog_p = nullptr,
                                     AnyGraphResolver anyGraphResolver_p = nullptr)
-        : query(query_p), registry(registry_p), anyGraphResolver(std::move(anyGraphResolver_p)) {}
+        : query(query_p), registry(registry_p), schemaCatalog(schemaCatalog_p),
+          anyGraphResolver(std::move(anyGraphResolver_p)) {}
 
     // Absolute source span in `query`, with the replacement text to use when
     // the span is rewritten (aggregate → alias etc.).
@@ -109,6 +147,23 @@ public:
     // (De)serialization of the graph-type registry for per-database storage.
     static std::string serializeGraphTypes(const GraphTypeRegistry &registry);
     static GraphTypeRegistry deserializeGraphTypes(const std::string &data);
+
+    // Schema catalog is stored in the SAME ExtensionManager slot: appended
+    // after the graph-type lines as "Z\t<schema>" / "M\t<logical>\t<physical>\t<K>".
+    static std::string serializeSchemaCatalog(const SchemaCatalog &catalog);
+    // Parses only the schema-catalog records; graph-type lines are ignored.
+    static SchemaCatalog deserializeSchemaCatalog(const std::string &data);
+
+    // GQLSTATUS-tagged schema-catalog errors: message starts with
+    // "[42000] " (schema semantic errors + the statement-combination rule)
+    // or "[25G03] " (READ ONLY transaction-wrapped program rejection).
+    [[noreturn]] static void schemaError(const std::string &message);
+
+    // "_gqlsch__" + segments joined by "__": "/foo/mygraph" ->
+    // "_gqlsch__foo__mygraph"; "/myschema" -> "_gqlsch__myschema".
+    static std::string manglePhysical(const std::string &logicalPath);
+    // Loud rejection of user identifiers inside the reserved prefix.
+    static void checkReservedPrefix(const std::string &identifier);
 
     // GQL catalog statements produce empty results; LadybugDB DDL returns a
     // message row, so catalog translations end with this zero-row tail (TCK:
@@ -203,7 +258,31 @@ private:
     std::string translateCreateGraphTypeStatement(
         GQLParser::CreateGraphTypeStatementContext *ctx);
     std::string translateDropGraphTypeStatement(GQLParser::DropGraphTypeStatementContext *ctx);
+    std::string translateCreateSchemaStatement(GQLParser::CreateSchemaStatementContext *ctx);
+    std::string translateDropSchemaStatement(GQLParser::DropSchemaStatementContext *ctx);
     std::string translateSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *ctx);
+
+    // ---------- schema-path / qualified-name helpers ----------
+    // Logical path from a catalogSchemaParentAndName context ("/foo/myschema"),
+    // whitespace-normalized; validates the reserved prefix per segment.
+    std::string schemaPathText(GQLParser::CatalogSchemaParentAndNameContext *ctx);
+    // Removes whitespace outside quoted spans; keeps quoted content intact.
+    static std::string normalizePathWhitespace(const std::string &raw);
+    // Rejects any path segment whose identifier starts with "_gqlsch__".
+    static void checkReservedInPath(const std::string &path);
+    // Logical path ("/foo/g") -> registered-or-mangled physical name.
+    // createMapping also registers the logical->physical member entry.
+    std::string resolvePhysical(const std::string &logicalPath, bool createMapping,
+                                SchemaCatalog::MemberKind kind);
+    // Rewrites a graphExpression (USE GRAPH /foo/g, SESSION SET GRAPH, FROM ...)
+    // to the physical graph name; plain names unchanged.
+    std::string rewriteGraphExpression(GQLParser::GraphExpressionContext *ctx);
+    // Graph type reference -> physical type name ("$param" rejected; qualified
+    // references resolved through the schema catalog).
+    std::string graphTypeRefName(GQLParser::GraphTypeReferenceContext *ref);
+    // Rejects schema catalog statements combined with anything else
+    // (NEXT chains, juxtaposed catalog statements, other statement kinds).
+    void checkSchemaStatementAlone(antlr4::ParserRuleContext *ctx);
 
     // ---------- helpers ----------
     std::string sourceText(antlr4::ParserRuleContext *ctx) const;
@@ -260,6 +339,7 @@ private:
 
     const std::string &query;
     GraphTypeRegistry *registry;
+    SchemaCatalog *schemaCatalog;
 };
 
 } // namespace gql_extension
