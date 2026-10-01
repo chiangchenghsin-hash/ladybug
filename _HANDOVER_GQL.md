@@ -61,11 +61,11 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 81/81 全绿**（2026-10-01 Phase 6 收工）：
-basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
+**✅ 83/83 全绿**（2026-10-01 Phase 7 收工）：
+basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 **unsupported 27**（+map 值/异构列表字面量拒绝）。
-**TCK 合规：206 场景 = 165 过 / 30 挂 / 11 跳**（Phase 6 口径，明细 `extension/gql/test/tck/REPORT.md`）。
+**TCK 合规：206 场景 = 165 过 / 30 挂 / 11 跳**（Phase 6 口径不变，明细 `extension/gql/test/tck/REPORT.md`）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
 - **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
@@ -105,6 +105,27 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
   rejected-by-layer 23（19 设计拒绝 + 4 异构列表）、parse-error 4（TCK 语料/文法）、
   other 3（MIN/MAX/SUM 无列表重载，binder 响亮拒绝）。比计划 166 少 1：Agg2 [6] 旧口径
   "过"是巧合（min 的提升后结果恰与期望同字面），现被异构检查拦下——正是 0 静默错的本意。
+
+### Phase 7（多跳路径唯一性）交付记录（2026-10-01）
+- **多跳路径模式的 TRAIL/ACYCLIC 落地**：GQL 路径模式约束的是**整条路径**（ISO 20.5：
+  TRAIL=全边互异、ACYCLIC=全节点互异）。引擎递归类型只管单个 var-length 槽，故翻译层
+  对其表达不了的场景**绑定路径变量 + `IS_TRAIL`/`IS_ACYCLIC` 全路径谓词**（探针实证：
+  路径值 nodes 含首尾各一次，IS_TRAIL=全 rel internalID 互异、IS_ACYCLIC=全节点互异，
+  固定/变长段一致——正是 GQL 语义）。具体映射：
+  - TRAIL：单 var-length 槽 → `*TRAIL`（已精确）；**多跳（≥2 边）→ `p = ... WHERE IS_TRAIL(p)`**；
+  - ACYCLIC：**一律加 wrap**（引擎 `*ACYCLIC` 只约束中间节点，首尾自由——闭合走 1→2→1
+    会漏进结果），var-length 槽另注 `*ACYCLIC` 做预过滤；
+  - 路径变量：用户声明的 `p =` 复用其名；否则自动生成 `_gql_pp{N}`（每语句计数）；
+  - WALK/无前缀不变（引擎默认=可重复边）；多跳 SHORTEST/SIMPLE 仍显式拒绝。
+- **ACYCLIC 语义从近似升级为精确**：旧口径只用 `*ACYCLIC`（README #7 记近似），现
+  闭合走/自环被正确排除（`AcyclicModeParity` 期望更新：2 跳 1→2→1、3 跳 1→2→1→2 均 0 行；
+  单边自环 ACYCLIC 0 行 / TRAIL 1 行）。README #7 改写为精确语义说明。
+- **新测试**：`MultiHopTrailParity`（自环双边重走/4 跳重边被滤、WALK 对照保留）、
+  `MultiHopAcyclicParity`（自环/闭合走被滤、TRAIL 对照保留、固定+量词混合段双跑）。
+  GQL 与等价 Cypher（`p = ... WHERE IS_TRAIL(p)` 形式）双跑一致，共 83/83。
+- **实证备忘**：CREATE 链不按主键合并节点（`(:P{v:1})-[]->(:P{v:1})` 报重复主键）——
+  环/重边要 `MATCH ... CREATE` 分句造；`ORDER BY 别名` 若与节点变量同名会解析到节点
+  （报 Order by NODE is not supported），测试里别名避开模式变量名。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
@@ -147,7 +168,8 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
 - **引擎语义实证**（探针验证，勿重复实验）：Ladybug MATCH **允许边重复**（≈GQL REPEATABLE
   ELEMENTS/WALK，故 DIFFERENT EDGES 拒绝、REPEATABLE 丢弃）；`*0..` 下界 0 可用（0 跳行 start=end）；
   `*TRAIL` = 边互异（与 GQL 一致）；**`*ACYCLIC` = 仅中间节点互异**（首尾不受限，闭合行走得通——
-  与 GQL 全节点互异有差，README 已记近似）；SHORTEST/ALL_SHORTEST 要求 lower=1。
+  与 GQL 全节点互异有差；Phase 7 起翻译层用 `IS_ACYCLIC(p)` wrap 补成精确，见上）；
+  SHORTEST/ALL_SHORTEST 要求 lower=1。
 - **GQL 语言事实**：ISO GQL **无 `LENGTH()`**（只有 PATH_LENGTH/CHAR_LENGTH 等 lengthExpression），
   `length(e)` 在 GQL 层就是语法错；GQL 也**无裸 `SHORTEST` 前缀**（只有 ANY/ALL SHORTEST 或 counted）。
 - 引擎侧小改进：`gql_function.cpp` 解析错误现在带 ANTLR 明细（`Failed to parse ... (line 1:8 ...)`）。
@@ -174,9 +196,13 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
   `PropertyExistsToIsNotNull.scala`、ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。
   Neo4j GQL 合规附录（网页）是语义差异清单的权威参考。
 
-## 五、Phase 6+ 路线（Phase 5 已完成，后续未做）
+## 五、Phase 7+ 路线（Phase 7 第一项已做，其余未做）
 
-多跳路径模式的 TRAIL/ACYCLIC 唯一性谓词（抄 `AddElementUniquenessPredicates` 的
-DifferentRelationships/NoneOfNodes 谓词生成——引擎无现成谓子，需评估）、
-图类型注册表 WAL 持久化（现为每库内存）、布尔操作数类型校验（TCK 15 例）、
-GQLSTATUS 错误码信封、原生执行/双向互通。
+- ✅ **多跳路径模式 TRAIL/ACYCLIC**（Phase 7 已交付）：路径变量 + `IS_TRAIL`/`IS_ACYCLIC`
+  全路径谓词，语义精确。
+- **图类型注册表 WAL 持久化**（现为每库内存，进程重启丢失）。
+- **多标签节点**（ANY 图 `labels[]` + `:A:B` 合取改写路线，`bind_match.cpp` 已有基础）。
+- **LIST(ANY)/GQL 跨类型全序**（TCK 3 例 MIN/MAX/SUM over LIST——优先扩展标量函数，
+  不动引擎算子）。
+- GQLSTATUS 错误码信封、SCHEMA 命名空间模拟、原生执行/双向互通。
+- 多跳 QPPI（`( ()-[]->()-[]->() ){m,n}`）、DIFFERENT EDGES match mode、SIMPLE 路径模式。

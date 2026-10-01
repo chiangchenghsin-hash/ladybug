@@ -223,6 +223,7 @@ void scanValueShapes(antlr4::tree::ParseTree *node, const std::string &query) {
 std::string GqlToCypherTransformer::Transform(GQLParser::GqlProgramContext &root) {
     sawIfNotExistsCreateGraph = false;
     createGraphName.clear();
+    autoPathIdx = 0;
     scanValueShapes(&root, query);
 
     if (root.sessionCloseCommand()) {
@@ -930,16 +931,43 @@ std::string GqlToCypherTransformer::translatePathPattern(
     if (!term) {
         unsupported("path pattern union/multiset alternation");
     }
-    std::string body = translatePathTerm(term->pathTerm(), wheres, recType);
+    int edgeCount = 0;
+    std::string body = translatePathTerm(term->pathTerm(), wheres, recType, &edgeCount);
+
+    // GQL path modes constrain the whole path pattern (ISO 20.5): TRAIL = every
+    // edge of the matched path distinct, ACYCLIC = every node distinct. The
+    // engine's recursive types only constrain one var-length slot, so where
+    // they cannot express the whole-pattern constraint we bind the pattern to a
+    // path variable and filter with IS_TRAIL / IS_ACYCLIC (all-rel-distinct /
+    // all-node-distinct over the path value; verified exact for fixed and
+    // var-length segments alike, boundaries included once each):
+    //   TRAIL — a single var-length slot is exact via `*TRAIL`; multi-hop needs
+    //   the whole-pattern filter (cross-slot edge distinctness).
+    //   ACYCLIC — `*ACYCLIC` only distincts intermediate nodes (start/end are
+    //   free), so the filter is always required for exact GQL semantics.
+    std::string varName;
     if (ctx->pathVariableDeclaration()) {
-        return sourceText(ctx->pathVariableDeclaration()) + " " + body;
+        varName = sourceText(ctx->pathVariableDeclaration()->pathVariable());
+    }
+    const bool needTrailFilter = recType == "TRAIL" && edgeCount > 1;
+    const bool needAcyclicFilter = recType == "ACYCLIC";
+    if (needTrailFilter || needAcyclicFilter) {
+        if (varName.empty()) {
+            varName = "_gql_pp" + std::to_string(autoPathIdx++);
+        }
+        wheres.push_back(std::string(needTrailFilter ? "IS_TRAIL(" : "IS_ACYCLIC(") + varName +
+                         ")");
+        return varName + " = " + body;
+    }
+    if (!varName.empty()) {
+        return varName + " = " + body;
     }
     return body;
 }
 
 std::string GqlToCypherTransformer::translatePathTerm(
     GQLParser::PathTermContext *ctx, std::vector<std::string> &wheres,
-    const std::string &recType) {
+    const std::string &recType, int *edgeCountOut) {
     // Flatten factors into node-binding / edge events. Juxtaposition in GQL
     // identifies the end of one factor with the start of the next, so adjacent
     // node bindings merge into one node and an edge always sits between two
@@ -1081,7 +1109,10 @@ std::string GqlToCypherTransformer::translatePathTerm(
         }
         std::string recDetail;
         if (!ev.range.empty()) {
-            recDetail = "*" + ev.range;
+            // Per-slot recursive type: exact for whole-pattern TRAIL on a
+            // single slot, a valid prefilter otherwise (the whole-pattern
+            // constraint is added by translatePathPattern).
+            recDetail = "*" + (recType.empty() ? std::string() : recType + " ") + ev.range;
         }
         out += pendingNode + translateEdgePattern(ev.edge, recDetail);
         haveNode = false;
@@ -1091,64 +1122,23 @@ std::string GqlToCypherTransformer::translatePathTerm(
     if (haveNode) {
         out += pendingNode;
     }
-
-    // Path mode / search prefix maps onto a recursive type — only a single-edge
-    // pattern has one. Fixed single hops drop a no-op prefix silently.
-    if (!recType.empty() && edgeCount > 1) {
-        unsupported("path mode/search prefix on multi-hop pattern");
+    if (edgeCountOut) {
+        *edgeCountOut = edgeCount;
     }
-    if (edgeCount == 1 && !recType.empty()) {
-        FlatEvent &ev = *soleEdge;
-        if (ev.range.empty()) {
-            // Fixed 1-hop: every mode/search is a no-op on a single edge.
-            return out;
+
+    // A search prefix denotes whole-pattern search; only a single-edge pattern
+    // can map onto the engine's per-slot recursive search types (a fixed hop
+    // drops the prefix as a no-op — a one-edge path is trivially its own
+    // shortest). Multi-hop path modes are handled by the caller.
+    const bool isSearch = recType == "SHORTEST" || recType == "ALL SHORTEST";
+    if (isSearch) {
+        if (edgeCount > 1) {
+            unsupported("path mode/search prefix on multi-hop pattern");
         }
-        if ((recType == "SHORTEST" || recType == "ALL SHORTEST") &&
-            (ev.range.rfind("0", 0) == 0)) {
+        if (edgeCount == 1 && soleEdge && !soleEdge->range.empty() &&
+            soleEdge->range.rfind("0", 0) == 0) {
             unsupported("shortest path with lower bound 0 (empty paths)");
         }
-        // Re-emit the single edge with the recursive type injected.
-        std::string recDetail = "*" + recType + " " + ev.range;
-        std::string head, props;
-        EdgeShape shape = edgeShape(ev.edge);
-        if (shape.filler) {
-            std::vector<std::string> unused;
-            translateFiller(shape.filler, unused, head, props);
-        }
-        std::string left = "-[", right = "]-";
-        if (shape.dir == EdgeDir::Left) {
-            left = "<-[";
-        } else if (shape.dir == EdgeDir::Right) {
-            right = "]->";
-        }
-        // Rebuild the chain with the recType-bearing edge (out has exactly
-        // one edge between two node slots).
-        std::string rebuilt;
-        // Re-run the chain walk with a modified emitter.
-        pendingNode.clear();
-        haveNode = false;
-        for (auto &e2 : events) {
-            if (!e2.isEdge) {
-                std::string text = e2.nodeBinding.empty() ? "()" : e2.nodeBinding;
-                if (!haveNode) {
-                    pendingNode = text;
-                    haveNode = true;
-                } else if (pendingNode == "()") {
-                    pendingNode = text;
-                }
-                continue;
-            }
-            if (!haveNode) {
-                pendingNode = "()";
-                haveNode = true;
-            }
-            rebuilt += pendingNode + left + head + recDetail + props + right;
-            haveNode = false;
-        }
-        if (haveNode) {
-            rebuilt += pendingNode;
-        }
-        return rebuilt;
     }
     return out;
 }

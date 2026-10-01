@@ -81,6 +81,10 @@ public:
     bool sawIfNotExistsCreateGraph = false;
     std::string createGraphName;
 
+    // Counter for auto-generated path variable names (`_gql_pp0`, ...) used by
+    // whole-pattern path-mode filters. Reset per Transform call.
+    int autoPathIdx = 0;
+
     [[noreturn]] static void unsupported(const std::string &feature);
 
     // (De)serialization of the graph-type registry for per-database storage.
@@ -137,9 +141,13 @@ private:
                                       std::vector<std::string> &wheres);
     std::string translatePathPattern(GQLParser::PathPatternContext *ctx,
                                      std::vector<std::string> &wheres);
+    // `recType` is injected into each var-length slot ("", "TRAIL", "ACYCLIC",
+    // "SHORTEST", "ALL SHORTEST"). Whole-pattern mode semantics are applied by
+    // translatePathPattern via a path-variable wrap (IS_TRAIL / IS_ACYCLIC).
     std::string translatePathTerm(GQLParser::PathTermContext *ctx,
                                   std::vector<std::string> &wheres,
-                                  const std::string &recType);
+                                  const std::string &recType,
+                                  int *edgeCountOut = nullptr);
     std::string translateEdgePattern(GQLParser::EdgePatternContext *ctx,
                                      const std::string &recDetail);
     std::string translateNodePattern(GQLParser::NodePatternContext *ctx,

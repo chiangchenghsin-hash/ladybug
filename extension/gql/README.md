@@ -58,7 +58,7 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 |---|---|---|---|
 | G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✓ (single-hop) | quantified single edges and single-hop QPPIs `( ()-[]->() ){m,n}` → Cypher var-length `[e*m..n]`; multi-hop / node-quantified QPPIs ✗ |
 | G005/G015–G020 | Path search prefixes (ANY SHORTEST / ALL SHORTEST) | ✓ (single-hop) | → `[e*SHORTEST ...]` / `[e*ALL SHORTEST ...]`; counted `SHORTEST k`, `SHORTEST GROUP(S)`, `ALL/ANY PATHS` ✗ |
-| G010–G013 | Path modes (WALK/TRAIL/ACYCLIC) | ✓ (single-hop) | → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; WALK = engine default; SIMPLE ✗ (no engine counterpart); multi-hop path modes ✗ |
+| G010–G013 | Path modes (WALK/TRAIL/ACYCLIC) | ✓ | single var-length slot → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; multi-hop patterns (and every ACYCLIC pattern) additionally bind a path variable and filter with `IS_TRAIL`/`IS_ACYCLIC` over the whole path — exact ISO semantics (see difference 7); WALK = engine default; SIMPLE ✗ (no engine counterpart) |
 | G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✗ | rejected explicitly; plain `:Label` works |
 | G100 | ELEMENT_ID | ✓ | → `internal_id()` |
 | G115 | PROPERTY_EXISTS | ✓ | GQL native predicate (parsed as-is) |
@@ -109,10 +109,13 @@ see `THIRD_PARTY_NOTICES.md`):
 5. **NEXT composition** across statements is not supported (Cypher
    multi-statements do not share binding scope).
 6. `SELECT *` with GROUP BY/HAVING is not supported (use explicit items).
-7. **ACYCLIC path mode** is approximate: the engine enforces
-   intermediate-node distinctness only (start/end nodes are unconstrained, so
-   closed walks like `1 -> 2 -> 1` are returned). ISO GQL ACYCLIC requires all
-   nodes distinct. TRAIL matches GQL exactly (edges distinct).
+7. **Path modes are enforced exactly** (ISO GQL TRAIL = all edges distinct,
+   ACYCLIC = all nodes distinct). A single var-length segment maps onto the
+   engine's `*TRAIL`/`*ACYCLIC` recursive types — note the engine's `*ACYCLIC`
+   alone only distincts intermediate nodes (start/end unconstrained) — and
+   every ACYCLIC pattern, plus any TRAIL pattern with more than one edge, also
+   binds a path variable and filters with `IS_TRAIL`/`IS_ACYCLIC` over the
+   whole path (closed walks like `1 -> 2 -> 1` are correctly excluded).
 8. **GQL has no `LENGTH()`** — ISO GQL spells it `PATH_LENGTH()` for paths
    (mapped to LadybugDB `LENGTH`). A bare `length(...)` call is a GQL syntax
    error at the parser level.
