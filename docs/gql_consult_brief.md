@@ -218,3 +218,19 @@ TCK 要求的错误条件不少（重复创建、名与 graph/type/目录冲突�
 3. **双跑验收形态**：GQL 用例 + 等价 Cypher 用例长什么样（我们用 `.test` 声明式跑批）；
 4. **抄写来源**：可抄的上游文件/规范条文（我们按 Apache-2.0 署名留档）；
 5. **响亮性**：失败路径是否仍满足"0 静默错答案"。
+
+---
+
+## 8. 核验附录（2026-01-10，首轮外部方案落地前实探引擎）
+
+供下一轮讨论直接引用的新事实（均已读源码/实证）：
+
+| # | 事实 | 依据 | 影响 |
+|---|---|---|---|
+| 1 | **扩展 API 没有聚合注册口** | `src/include/extension/extension.h` 的 `ExtensionUtils` 仅有 `addTableFunc`/`addStandaloneTableFunc`/`addScalarFunc`/`addExportFunc` 系；无 aggregate | 扩展聚合（如 `_gql_max`）**今天做不了**；任何"扩展聚合"方案要么改引擎加 `addAggFunc` 扩展点（按约束 4 论证），要么改走标量桥+内建聚合/结构改写 |
+| 2 | **扩展标量注册可行，且 `extension/json` 已有全套 JSON 标量** | `extension/json/src/main/json_extension.cpp`：`to_json`/`cast_to_json`/`json_extract`/`json_array_length` 等 | `_gql_to_json`/`_gql_num` 类标量桥零障碍，甚至可别名复用现有 JSON 函数 |
+| 3 | **CAST FROM JSON 已存在**（走 string-cast 路径） | `vector_cast_functions.cpp:839`：`sourceTypeID == STRING \|\| JSON → bindCastFromStringFunction` | `CAST(p.age AS INT64/DOUBLE)` 大概率即探即过 → Q2 可零新函数先做翻译插 CAST；注意字符串解析语义（JSON 非数值→响亮 ConversionException，好） |
+| 4 | **ANY 图 JSON 列的等值/排序今天就工作** | labels.test：ANY 图 `ORDER BY n.v`、`{v:1}` 属性匹配均过 | Q2 缺口集中在**聚合重载**（binder 签名表无 JSON），比较位不必自动包——包装面收窄到聚合位 |
+| 5 | **输出保真坑比预想深** | TCK 期望 `75`；harness 期望格式走 `Value::toString`（double 是 `%.6f`） | `sum(CAST(... AS DOUBLE))` 会印 `75.000000` ≠ `75`——数值归一 harness 或 INT 保真必须先解决 |
+| 6 | **许可证按文件头，不按仓库** | `docs/gql_ref/` 已留档的 6 个 neo4j/neo4j 文件全是 Apache-2.0 文件头（front-end 为 openCypher 血统） | "neo4j/neo4j 全是 GPL 勿抄"的说法过度；正确规则=逐文件看头。`org.neo4j.values` 比较器类的模块需单独核头；CIP2016-06-14 是规范语义，实现无许可问题 |
+| 7 | 异构列表拒的落点是 **Transform 入口扫描**（`scanValueShapes`，`gql_transformer.cpp:188`）；FOR 发射在 `translateForStatement`（`:707`） | 读码确认 | 列表保型包装应落在 FOR/列表字面量翻译位，不是扫描器 |
