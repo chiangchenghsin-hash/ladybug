@@ -224,7 +224,9 @@ std::string GqlToCypherTransformer::Transform(GQLParser::GqlProgramContext &root
     sawIfNotExistsCreateGraph = false;
     createGraphName.clear();
     autoPathIdx = 0;
+    autoLabelIdx = 0;
     scanValueShapes(&root, query);
+    resolveLabelGraphKind(&root);
 
     if (root.sessionCloseCommand()) {
         unsupported("SESSION CLOSE");
@@ -840,20 +842,38 @@ std::string GqlToCypherTransformer::translatePathPatternPrefix(
 
 void GqlToCypherTransformer::translateFiller(
     GQLParser::ElementPatternFillerContext *ctx, std::vector<std::string> &wheres,
-    std::string &head, std::string &props) {
+    std::string &head, std::string &props, bool isNodePattern) {
     head.clear();
     props.clear();
     if (!ctx) {
         return;
     }
-    checkPatternSupported(ctx); // label-expression operators etc.
+    // Node fillers translate compound label expressions below; edge fillers
+    // keep rejecting them (edge types are not label sets).
+    checkPatternSupported(ctx, /*allowLabelExpr=*/isNodePattern);
+    std::string var;
     if (ctx->elementVariableDeclaration()) {
-        head += sourceText(ctx->elementVariableDeclaration());
+        var = sourceText(ctx->elementVariableDeclaration());
+        head += var;
     }
     if (auto *lab = ctx->isLabelExpression()) {
-        // Simple labels only (operators rejected above). Normalise both the
-        // `:Label` and `IS Label` spellings to Cypher's `:Label`.
-        head += ":" + sourceText(lab->labelExpression());
+        auto *expr = lab->labelExpression();
+        if (dynamic_cast<GQLParser::LabelExpressionNameContext *>(expr)) {
+            // Simple label: keep the pattern spelling (`:Label`) — table
+            // pruning on typed graphs, engine list_contains rewrite on ANY.
+            // Normalise both `:Label` and `IS Label` to Cypher's `:Label`.
+            head += ":" + sourceText(expr);
+        } else {
+            // Compound label expression (G074): WHERE predicate over labels().
+            if (!isNodePattern) {
+                unsupported("label expression on edge pattern");
+            }
+            if (var.empty()) {
+                var = "_gql_nl" + std::to_string(autoLabelIdx++);
+                head += var;
+            }
+            wheres.push_back(translateLabelExpression(expr, var));
+        }
     }
     if (auto *pred = ctx->elementPatternPredicate()) {
         if (auto *p = pred->elementPropertySpecification()) {
@@ -878,7 +898,7 @@ std::string GqlToCypherTransformer::translateEdgePattern(
     std::string head, props;
     if (shape.filler) {
         std::vector<std::string> unused;
-        translateFiller(shape.filler, unused, head, props);
+        translateFiller(shape.filler, unused, head, props, /*isNodePattern=*/false);
         // An inline WHERE on an edge filler cannot be hoisted from here (this
         // helper has no where sink); reject rather than drop it.
         if (shape.filler->elementPatternPredicate() &&
@@ -1561,7 +1581,84 @@ std::string GqlToCypherTransformer::translateInsertStatement(
     // of a whole-text keyword replace) keeps string literals intact.
     auto *pattern = ctx->insertGraphPattern();
     checkPatternSupported(pattern);
-    return "CREATE " + finishExpr(sourceText(pattern));
+
+    // INSERT label sets (labelSetSpecification = `A&B&...`) are a definite set
+    // of labels on the created node. Single labels pass through; multi-label
+    // sets colon-spell for ANY graphs (`CREATE (n:A:B ...)` stores both) and
+    // are rejected on typed graphs — LadybugDB's CREATE silently creates
+    // nothing for `:A:B` there, which would be a silent wrong answer.
+    struct Splice {
+        size_t start, stop;
+        std::string replacement;
+    };
+    std::vector<Splice> splices;
+    std::function<void(antlr4::tree::ParseTree *, bool)> walk =
+        [&](antlr4::tree::ParseTree *node, bool inEdge) {
+            if (dynamic_cast<GQLParser::InsertEdgePointingLeftContext *>(node) ||
+                dynamic_cast<GQLParser::InsertEdgePointingRightContext *>(node) ||
+                dynamic_cast<GQLParser::InsertEdgeUndirectedContext *>(node)) {
+                inEdge = true;
+            }
+            if (auto *set = dynamic_cast<GQLParser::LabelSetSpecificationContext *>(node)) {
+                auto names = set->labelName();
+                if (names.size() > 1) {
+                    if (inEdge) {
+                        unsupported("multi-label insert on an edge pattern");
+                    }
+                    if (!labelGraphIsAny.has_value()) {
+                        unsupported("label expression (graph kind not resolvable)");
+                    }
+                    if (!*labelGraphIsAny) {
+                        unsupported("multi-label insert on a typed graph");
+                    }
+                    std::string joined;
+                    for (size_t i = 0; i < names.size(); ++i) {
+                        if (i) {
+                            joined += ":";
+                        }
+                        joined += sourceText(names[i]);
+                    }
+                    // Also normalise an `IS A&B` spelling to `:A&B` (the
+                    // colon form keeps its existing colon outside the span).
+                    // Splice offsets are relative to the pattern's source span.
+                    const size_t base = pattern->getStart()->getStartIndex();
+                    size_t start = set->getStart()->getStartIndex();
+                    std::string replacement = joined;
+                    if (auto *spec = dynamic_cast<GQLParser::LabelAndPropertySetSpecificationContext *>(
+                            set->parent)) {
+                        if (auto *ioc = spec->isOrColon()) {
+                            if (ioc->IS()) {
+                                start = ioc->getStart()->getStartIndex();
+                                replacement = ":" + joined;
+                            }
+                        }
+                    }
+                    splices.push_back(
+                        {start - base, set->getStop()->getStopIndex() - base, replacement});
+                }
+                return;
+            }
+            for (auto *child : node->children) {
+                walk(child, inEdge);
+            }
+        };
+    walk(pattern, false);
+
+    std::string text = sourceText(pattern);
+    if (splices.empty()) {
+        return "CREATE " + finishExpr(text);
+    }
+    std::sort(splices.begin(), splices.end(),
+              [](const Splice &a, const Splice &b) { return a.start < b.start; });
+    std::string out;
+    size_t pos = 0;
+    for (const auto &s : splices) {
+        out += text.substr(pos, s.start - pos);
+        out += s.replacement;
+        pos = s.stop + 1;
+    }
+    out += text.substr(pos);
+    return "CREATE " + finishExpr(out);
 }
 
 std::string GqlToCypherTransformer::translateSetStatement(
@@ -2323,9 +2420,167 @@ std::string GqlToCypherTransformer::translateSessionSetGraphClause(
 // reject them up front with a named error instead.
 // =============================================================================
 
+// =============================================================================
+// Label expressions (Phase 7): GQL labelExpression / labelSetSpecification →
+// Cypher label predicates.
+//
+// GQL label semantics are set membership over a node's label set (ISO GQL
+// feature G074): `:A&B` = has both, `:A|B` = has either, `:!A` = lacks A.
+// LadybugDB spells these differently per graph kind — and the same colon
+// spelling means opposite things:
+//   - ANY graphs store labels in a STRING[] column; `:A:B` is an AND of
+//     list_contains checks (engine rewrite in bind_match.cpp), and labels(n)
+//     returns the array.
+//   - Typed/tabled graphs give a node exactly one label (its table name);
+//     `:A:B` matches the UNION of the two tables, and labels(n) returns the
+//     scalar name. A conjunction of distinct labels is therefore unsatisfiable.
+// So compound expressions are translated to WHERE predicates over labels(v)
+// whose form follows the resolved graph kind, and simple labels keep the
+// pattern spelling `:Label` (table pruning on typed graphs). The same colon
+// spelling is never reused across kinds, so no silent opposite-meaning reuse.
+// =============================================================================
+
 namespace {
 
-bool walkForUnsupportedPatterns(antlr4::tree::ParseTree *node, std::string &feature) {
+// Cypher string literal for a label name (source text, backticks stripped).
+std::string labelLiteral(const std::string &raw) {
+    std::string s = trimCopy(raw);
+    if (s.size() >= 2 && ((s.front() == '`' && s.back() == '`') ||
+                          (s.front() == '\'' && s.back() == '\'') ||
+                          (s.front() == '"' && s.back() == '"'))) {
+        s = s.substr(1, s.size() - 2);
+    }
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            out += "''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+bool isSimpleIdent(const std::string &s) {
+    if (s.empty()) return false;
+    auto ok = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    size_t i = 0;
+    if (s.size() >= 2 && s.front() == '`' && s.back() == '`') {
+        return s.find('`', 1) == s.size() - 1;
+    }
+    if (!(std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_')) return false;
+    for (i = 1; i < s.size(); ++i) {
+        if (!ok(s[i])) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+void GqlToCypherTransformer::resolveLabelGraphKind(GQLParser::GqlProgramContext *root) {
+    labelGraphIsAny.reset();
+    if (!anyGraphResolver) {
+        return;
+    }
+    // Collect the statement's graph targets. 0 references = current graph;
+    // otherwise every referenced graph must resolve to the same kind (a
+    // multi-graph statement mixing kinds is left unresolved and compound
+    // labels then reject).
+    std::vector<std::string> names;
+    std::function<void(antlr4::tree::ParseTree *)> walk =
+        [&](antlr4::tree::ParseTree *node) {
+            std::string name;
+            bool isRef = false;
+            if (auto *u = dynamic_cast<GQLParser::UseGraphClauseContext *>(node)) {
+                name = trimCopy(sourceText(u->graphExpression()));
+                isRef = true;
+            } else if (auto *s = dynamic_cast<GQLParser::SessionSetGraphClauseContext *>(node)) {
+                name = trimCopy(sourceText(s->graphExpression()));
+                isRef = true;
+            } else if (auto *m = dynamic_cast<GQLParser::SelectGraphMatchContext *>(node)) {
+                name = trimCopy(sourceText(m->graphExpression()));
+                isRef = true;
+            }
+            if (isRef) {
+                if (iequals(name, "CURRENT_GRAPH") || iequals(name, "CURRENT_PROPERTY_GRAPH") ||
+                    name.empty()) {
+                    name.clear(); // current graph
+                } else if (!isSimpleIdent(name)) {
+                    name = std::string(1, '\0'); // unresolvable marker
+                }
+                names.push_back(name);
+            }
+            for (auto *child : node->children) {
+                walk(child);
+            }
+        };
+    walk(root);
+
+    if (names.empty()) {
+        labelGraphIsAny = anyGraphResolver("");
+        return;
+    }
+    std::optional<bool> kind;
+    bool ok = true;
+    for (const auto &n : names) {
+        if (!n.empty() && n[0] == '\0') {
+            ok = false;
+            break;
+        }
+        auto k = anyGraphResolver(n);
+        if (!k.has_value()) {
+            ok = false;
+            break;
+        }
+        if (kind.has_value() && kind != k) {
+            ok = false;
+            break;
+        }
+        kind = k;
+    }
+    labelGraphIsAny = ok ? kind : std::nullopt;
+}
+
+std::string GqlToCypherTransformer::translateLabelExpression(
+    GQLParser::LabelExpressionContext *ctx, const std::string &var) {
+    if (!labelGraphIsAny.has_value()) {
+        unsupported("label expression (graph kind not resolvable)");
+    }
+    const bool anyGraph = *labelGraphIsAny;
+    auto has = [&](const std::string &label) {
+        std::string lit = labelLiteral(label);
+        if (anyGraph) {
+            return "list_contains(labels(" + var + "), " + lit + ")";
+        }
+        return "labels(" + var + ") = " + lit;
+    };
+    if (auto *name = dynamic_cast<GQLParser::LabelExpressionNameContext *>(ctx)) {
+        return has(sourceText(name->labelName()));
+    }
+    if (auto *neg = dynamic_cast<GQLParser::LabelExpressionNegationContext *>(ctx)) {
+        return "(NOT " + translateLabelExpression(neg->labelExpression(), var) + ")";
+    }
+    if (auto *conj = dynamic_cast<GQLParser::LabelExpressionConjunctionContext *>(ctx)) {
+        return "(" + translateLabelExpression(conj->labelExpression(0), var) + " AND " +
+               translateLabelExpression(conj->labelExpression(1), var) + ")";
+    }
+    if (auto *disj = dynamic_cast<GQLParser::LabelExpressionDisjunctionContext *>(ctx)) {
+        return "(" + translateLabelExpression(disj->labelExpression(0), var) + " OR " +
+               translateLabelExpression(disj->labelExpression(1), var) + ")";
+    }
+    if (auto *paren = dynamic_cast<GQLParser::LabelExpressionParenthesizedContext *>(ctx)) {
+        return translateLabelExpression(paren->labelExpression(), var);
+    }
+    unsupported("% label wildcard");
+}
+
+namespace {
+
+bool walkForUnsupportedPatterns(antlr4::tree::ParseTree *node, std::string &feature,
+                                bool allowLabelExpr) {
     if (dynamic_cast<GQLParser::GraphPatternQuantifierContext *>(node)) {
         feature = "quantified path pattern (...{*|+|{m,n}})";
         return true;
@@ -2342,16 +2597,24 @@ bool walkForUnsupportedPatterns(antlr4::tree::ParseTree *node, std::string &feat
         feature = "path search prefix (ALL/ANY/SHORTEST ...)";
         return true;
     }
-    if (dynamic_cast<GQLParser::LabelExpressionNegationContext *>(node) ||
-        dynamic_cast<GQLParser::LabelExpressionConjunctionContext *>(node) ||
-        dynamic_cast<GQLParser::LabelExpressionDisjunctionContext *>(node) ||
-        dynamic_cast<GQLParser::LabelExpressionWildcardContext *>(node) ||
-        dynamic_cast<GQLParser::LabelExpressionParenthesizedContext *>(node)) {
-        feature = "label expression operator (&, !, |, %, parentheses)";
+    if (dynamic_cast<GQLParser::LabelExpressionWildcardContext *>(node)) {
+        feature = "% label wildcard";
+        return true;
+    }
+    if (!allowLabelExpr &&
+        (dynamic_cast<GQLParser::LabelExpressionNegationContext *>(node) ||
+         dynamic_cast<GQLParser::LabelExpressionConjunctionContext *>(node) ||
+         dynamic_cast<GQLParser::LabelExpressionDisjunctionContext *>(node) ||
+         dynamic_cast<GQLParser::LabelExpressionParenthesizedContext *>(node))) {
+        feature = "label expression operator (&, !, |, parentheses)";
+        return true;
+    }
+    if (dynamic_cast<GQLParser::LabeledPredicateContext *>(node)) {
+        feature = "label predicate (IS [NOT] LABELED ...)";
         return true;
     }
     for (auto *child : node->children) {
-        if (walkForUnsupportedPatterns(child, feature)) {
+        if (walkForUnsupportedPatterns(child, feature, allowLabelExpr)) {
             return true;
         }
     }
@@ -2360,9 +2623,10 @@ bool walkForUnsupportedPatterns(antlr4::tree::ParseTree *node, std::string &feat
 
 } // namespace
 
-void GqlToCypherTransformer::checkPatternSupported(antlr4::ParserRuleContext *ctx) {
+void GqlToCypherTransformer::checkPatternSupported(antlr4::ParserRuleContext *ctx,
+                                                   bool allowLabelExpr) {
     std::string feature;
-    if (walkForUnsupportedPatterns(ctx, feature)) {
+    if (walkForUnsupportedPatterns(ctx, feature, allowLabelExpr)) {
         unsupported(feature);
     }
 }

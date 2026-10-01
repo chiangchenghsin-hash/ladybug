@@ -59,7 +59,7 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 | G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✓ (single-hop) | quantified single edges and single-hop QPPIs `( ()-[]->() ){m,n}` → Cypher var-length `[e*m..n]`; multi-hop / node-quantified QPPIs ✗ |
 | G005/G015–G020 | Path search prefixes (ANY SHORTEST / ALL SHORTEST) | ✓ (single-hop) | → `[e*SHORTEST ...]` / `[e*ALL SHORTEST ...]`; counted `SHORTEST k`, `SHORTEST GROUP(S)`, `ALL/ANY PATHS` ✗ |
 | G010–G013 | Path modes (WALK/TRAIL/ACYCLIC) | ✓ | single var-length slot → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; multi-hop patterns (and every ACYCLIC pattern) additionally bind a path variable and filter with `IS_TRAIL`/`IS_ACYCLIC` over the whole path — exact ISO semantics (see difference 7); WALK = engine default; SIMPLE ✗ (no engine counterpart) |
-| G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✗ | rejected explicitly; plain `:Label` works |
+| G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✓ (node patterns) | `:A&B`/`:A\|B`/`:!A`/parens → WHERE predicates over `labels(v)` (graph-kind-aware, see difference 13); simple `:Label` unchanged (table pruning); INSERT label sets `:A&B` → `CREATE (n:A:B ...)` on ANY graphs; `%` wildcard, edge label expressions, `IS LABELED` predicates ✗ |
 | G100 | ELEMENT_ID | ✓ | → `internal_id()` |
 | G115 | PROPERTY_EXISTS | ✓ | GQL native predicate (parsed as-is) |
 | GA05 | Cast specification | ✓ | `CAST` shared syntax |
@@ -137,9 +137,18 @@ see `THIRD_PARTY_NOTICES.md`):
     user property name.
 12. **`NOT NULL` is dropped**: GQL property types may carry `NOT NULL`; LadybugDB
     DDL has no NOT NULL constraint, so it is accepted and ignored.
-13. **Multi-label node types** (`:A&B`) are rejected — LadybugDB nodes carry a
-    single label (= table name). Undirected edge types are rejected too
-    (LadybugDB rel tables are directed).
+13. **Multi-label semantics depend on the graph kind.** Typed/tabled graphs
+    give a node exactly one label (= table name), so a conjunction of distinct
+    labels (`:A&B`) matches nothing and multi-label `INSERT` is rejected (the
+    engine would silently create nothing there). Open ANY graphs store a label
+    set (`STRING[]`) and carry real multi-label nodes: `INSERT (n:A&B ...)`,
+    `MATCH (n:A&B)`, `:A|B`, `:!A` all work there. Compound label expressions
+    translate to WHERE predicates over `labels(v)` chosen by graph kind (ANY:
+    `list_contains`; typed: scalar equality) — the colon spelling is never
+    reused for compound expressions because `:A:B` means AND on ANY graphs but
+    OR (table union) on typed graphs. Multi-label node *types* in
+    `CREATE GRAPH TYPE` remain unsupported. Undirected edge types are rejected
+    too (LadybugDB rel tables are directed).
 14. **`CREATE GRAPH g t` spelling**: ISO GQL references a graph type by bare
     name; the commonly generated `CREATE GRAPH g TYPE t` is accepted as a
     lenient pre-parse normalization (same idea as `FROM GRAPH`).

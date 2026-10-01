@@ -9,11 +9,13 @@
 #include "catalog/catalog_entry/graph_catalog_entry.h"
 #include "extension/extension_manager.h"
 #include "common/exception/runtime.h"
+#include "common/string_utils.h"
 #include "function/table/bind_data.h"
 #include "function/table/bind_input.h"
 #include "function/table/table_function.h"
 #include "main/client_context.h"
 #include "main/database.h"
+#include "main/database_manager.h"
 #include "transaction/transaction.h"
 
 #include <algorithm>
@@ -267,6 +269,33 @@ static std::string normalizeCreateGraphTypeRef(const std::string &text) {
 // Bind function: parses GQL and produces Cypher
 // =============================================================================
 
+// Whether a named graph ("" = the session's current graph) is an open ANY
+// graph (labels in a STRING[] column) vs a typed/tabled graph (one label =
+// table name). GQL label expressions translate differently per kind — see the
+// label-expression section in gql_transformer.cpp.
+static std::optional<bool> resolveAnyGraph(ClientContext &context, const std::string &name) {
+    auto *transaction = transaction::Transaction::Get(context);
+    auto useInternal = context.useInternalCatalogEntry();
+    if (name.empty()) {
+        auto *graphCatalog = DatabaseManager::Get(context)->getDefaultGraphCatalog();
+        if (graphCatalog == nullptr) {
+            return false; // main/default catalog = typed graphs
+        }
+        return graphCatalog->containsTable(transaction, "_nodes", useInternal);
+    }
+    auto upper = common::StringUtils::getUpper(name);
+    if (upper == "MAIN") {
+        return false;
+    }
+    auto *catalog = context.getDatabase()->getCatalog();
+    for (auto *entry : catalog->getGraphEntries(transaction)) {
+        if (common::StringUtils::getUpper(entry->getName()) == upper) {
+            return entry->isAnyGraphType();
+        }
+    }
+    return std::nullopt;
+}
+
 static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
                                                     const TableFuncBindInput *input) {
 
@@ -324,7 +353,10 @@ static std::unique_ptr<TableFuncBindData> bindFunc(ClientContext *context,
     auto *extMgr = extension::ExtensionManager::Get(*context);
     GraphTypeRegistry registry = GqlToCypherTransformer::deserializeGraphTypes(
         extMgr->getData("gql.graphTypes"));
-    GqlToCypherTransformer transformer(trimmed, &registry);
+    GqlToCypherTransformer transformer(trimmed, &registry,
+                                       [context](const std::string &graphName) {
+                                           return resolveAnyGraph(*context, graphName);
+                                       });
     auto cypherQuery = transformer.Transform(*tree);
     extMgr->setData("gql.graphTypes", GqlToCypherTransformer::serializeGraphTypes(registry));
 

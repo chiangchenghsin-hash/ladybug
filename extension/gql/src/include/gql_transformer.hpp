@@ -7,7 +7,9 @@
 #undef INVALID_INDEX
 #endif
 
+#include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,8 +62,16 @@ using GraphTypeRegistry = std::map<std::string, GraphTypeSpec>;
 // own function catalog. See THIRD_PARTY_NOTICES.md.
 class GqlToCypherTransformer {
 public:
-    explicit GqlToCypherTransformer(const std::string &query_p, GraphTypeRegistry *registry_p)
-        : query(query_p), registry(registry_p) {}
+    // Resolves whether a named graph ("" = the session's current graph) is an
+    // open ANY graph (labels live in a STRING[] column) vs a typed/tabled graph
+    // (one label = table name). Returns nullopt when the graph cannot be
+    // resolved. Used for label-expression translation, whose predicate form
+    // differs per graph kind.
+    using AnyGraphResolver = std::function<std::optional<bool>(const std::string &)>;
+
+    explicit GqlToCypherTransformer(const std::string &query_p, GraphTypeRegistry *registry_p,
+                                    AnyGraphResolver anyGraphResolver_p = nullptr)
+        : query(query_p), registry(registry_p), anyGraphResolver(std::move(anyGraphResolver_p)) {}
 
     // Absolute source span in `query`, with the replacement text to use when
     // the span is rewritten (aggregate → alias etc.).
@@ -84,6 +94,14 @@ public:
     // Counter for auto-generated path variable names (`_gql_pp0`, ...) used by
     // whole-pattern path-mode filters. Reset per Transform call.
     int autoPathIdx = 0;
+    // Counter for auto-generated node variable names (`_gql_nl0`, ...) used by
+    // compound label expressions on anonymous nodes.
+    int autoLabelIdx = 0;
+    // Graph kind for label-expression translation (true = ANY graph, false =
+    // typed/tabled graph), resolved at Transform entry. Nullopt = unresolvable
+    // (compound label expressions are then rejected).
+    std::optional<bool> labelGraphIsAny;
+    AnyGraphResolver anyGraphResolver;
 
     [[noreturn]] static void unsupported(const std::string &feature);
 
@@ -154,9 +172,20 @@ private:
                                      std::vector<std::string> &wheres);
     // Splits a filler into the bracket head (variable + :labels) and the
     // trailing property map; an inline WHERE is pushed onto `wheres`.
+    // `isNodePattern` enables compound label-expression translation (edge
+    // type expressions stay unsupported).
     void translateFiller(GQLParser::ElementPatternFillerContext *ctx,
                          std::vector<std::string> &wheres, std::string &head,
-                         std::string &props);
+                         std::string &props, bool isNodePattern = true);
+    // GQL label expression (ISO GQL feature G074) → Cypher boolean over the
+    // bound variable's labels. Simple names stay as pattern labels; compound
+    // expressions become WHERE predicates whose form depends on the graph
+    // kind (ANY: list_contains(labels(v), ...); typed: labels(v) = ...).
+    std::string translateLabelExpression(GQLParser::LabelExpressionContext *ctx,
+                                         const std::string &var);
+    // Resolve `labelGraphIsAny` from the statement's graph references
+    // (FROM GRAPH / USE GRAPH / SESSION SET GRAPH; empty name = current).
+    void resolveLabelGraphKind(GQLParser::GqlProgramContext *root);
     // Path mode / search prefix -> iC_RecursiveType text ("", "TRAIL",
     // "ACYCLIC", "SHORTEST", "ALL SHORTEST"). Throws on unsearchable forms.
     std::string translatePathPatternPrefix(GQLParser::PathPatternPrefixContext *ctx);
@@ -182,7 +211,9 @@ private:
 
     // Reject GQL-only pattern features (quantified paths, path modes/search
     // prefixes, exotic label expressions) with a named error.
-    void checkPatternSupported(antlr4::ParserRuleContext *ctx);
+    // `allowLabelExpr` = label-expression operators are translated elsewhere
+    // (filler label expressions) rather than rejected.
+    void checkPatternSupported(antlr4::ParserRuleContext *ctx, bool allowLabelExpr = false);
 
     // Collect absolute spans of every aggregateFunction subtree under ctx.
     static void collectAggregates(antlr4::tree::ParseTree *node,

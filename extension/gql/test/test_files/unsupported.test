@@ -151,9 +151,23 @@ Runtime exception: GQL feature not supported: SESSION SET SCHEMA
 -STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
 ---- ok
 
--STATEMENT CALL GQL("MATCH (n:(T&B)) RETURN n.v")
+# Compound label expressions on nodes are translated (see labels.test); the
+# remaining label constructs stay explicitly unsupported.
+-STATEMENT CALL GQL("MATCH (n:%) RETURN n.v")
 ---- error
-Runtime exception: GQL feature not supported: label expression operator (&, !, |, %, parentheses)
+Runtime exception: GQL feature not supported: % label wildcard
+
+-STATEMENT CALL GQL("MATCH (a)-[e:X&Y]->(b) RETURN a.v")
+---- error
+Runtime exception: GQL feature not supported: label expression operator (&, !, |, parentheses)
+
+-STATEMENT CALL GQL("MATCH (n:T) WHERE n IS LABELED T RETURN n.v")
+---- error
+Runtime exception: GQL feature not supported: label predicate (IS [NOT] LABELED ...)
+
+-STATEMENT CALL GQL("INSERT (n:T&S {v:1})")
+---- error
+Runtime exception: GQL feature not supported: multi-label insert on a typed graph
 
 
 -CASE UnsupportedQuantifiedPathPattern

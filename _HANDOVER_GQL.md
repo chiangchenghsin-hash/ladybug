@@ -61,10 +61,11 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 83/83 全绿**（2026-10-01 Phase 7 收工）：
+**✅ 85/85 全绿**（2026-10-01 Phase 7 收工）：
 basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
+**labels 2**（G074 标签表达式双跑：ANY 图 / 表图）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
-**unsupported 27**（+map 值/异构列表字面量拒绝）。
+**unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
 **TCK 合规：206 场景 = 165 过 / 30 挂 / 11 跳**（Phase 6 口径不变，明细 `extension/gql/test/tck/REPORT.md`）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
@@ -126,6 +127,26 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**�
 - **实证备忘**：CREATE 链不按主键合并节点（`(:P{v:1})-[]->(:P{v:1})` 报重复主键）——
   环/重边要 `MATCH ... CREATE` 分句造；`ORDER BY 别名` 若与节点变量同名会解析到节点
   （报 Order by NODE is not supported），测试里别名避开模式变量名。
+- **多标签标签表达式（G074 `&`/`|`/`!`）落地**：节点 pattern 的复合标签表达式翻译成
+  `labels(v)` 上的 WHERE 谓词，**形态按图型分流**——ANY 图 `list_contains(labels(v),'A')`
+  （labels() 返回 STRING[] 数组），表图 `labels(v) = 'A'`（labels() 返回标量表名）。
+  简单标签保持 pattern 拼写 `:A`（表图保留表级裁剪）。**绝不复用 `:A:B` 拼写**：ANY 图它是
+  AND（list_contains 合取）、表图它是 OR（表并集）——同拼写反语义，盲用=静默错答案。
+  - INSERT 标签集（labelSetSpecification 文法本身就是 `A&B` 合取名集合）：单标签透传；
+    多标签 ANY 图改写 `:A:B`（实证 CREATE 会设双标签）；表图**响亮拒绝**（引擎
+    `CREATE (n:A:B)` 静默零行）；边 pattern 多标签拒绝。
+  - 仍拒：`%` 通配、边标签表达式、WHERE 的 `IS [NOT] LABELED` 谓词（walker 显式拒绝）。
+  - 图型判定：`GraphCatalogEntry::isAnyGraphType()`（具名图）/ `getDefaultGraphCatalog()`
+    非空且含 `_nodes` 表（当前图；**main 时返回 nullptr = 表图**）。语句含多图目标且
+    类型不一致/不可解析时复合标签响亮拒绝。`labels(n)` 在 ANY 图对无标签 pattern 也正确
+    （节点属性全量预绑定，label 属性即 STRING[] 列）。
+  - **译码坑（已修）**：splice 改写用 ANTLR 绝对下标，必须先减去 pattern 起点再作用于
+    源文本子串；探机别忘 `load extension`（否则 "function GQL does not exist" 误判）。
+- **图类型注册表 WAL 持久化——评估后暂缓**：扩展加载本身不跨重启
+  （`loadLinkedExtensions` 只加载内建扩展，LOAD EXTENSION 无持久化钩子），注册表跟
+  ExtensionManager 进程生命周期一致；要真持久得先做"扩展附着持久化 + 扩展数据 checkpoint"
+  两项引擎工程（WAL typespec 新记录 + replayer + metadata 序列化）。当前失败面是响亮的
+  （重启后 CREATE GRAPH TYPE 重跑即可），按够用即可原则推迟，勿重复评估。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
@@ -196,13 +217,16 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**�
   `PropertyExistsToIsNotNull.scala`、ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。
   Neo4j GQL 合规附录（网页）是语义差异清单的权威参考。
 
-## 五、Phase 7+ 路线（Phase 7 第一项已做，其余未做）
+## 五、Phase 7+ 路线（Phase 7 前三议项已处理，其余未做）
 
 - ✅ **多跳路径模式 TRAIL/ACYCLIC**（Phase 7 已交付）：路径变量 + `IS_TRAIL`/`IS_ACYCLIC`
   全路径谓词，语义精确。
-- **图类型注册表 WAL 持久化**（现为每库内存，进程重启丢失）。
-- **多标签节点**（ANY 图 `labels[]` + `:A:B` 合取改写路线，`bind_match.cpp` 已有基础）。
+- ✅ **多标签标签表达式 G074**（Phase 7 已交付）：`labels(v)` 谓词按图型分流；ANY 图
+  真多标签（INSERT + MATCH）；表图合取=空/析取=并集，语义正确。
+- **图类型注册表 WAL 持久化**：评估后暂缓（扩展加载本身不持久，需先做扩展附着持久化
+  引擎工程——见 Phase 7 记录，勿重复评估）。
 - **LIST(ANY)/GQL 跨类型全序**（TCK 3 例 MIN/MAX/SUM over LIST——优先扩展标量函数，
   不动引擎算子）。
 - GQLSTATUS 错误码信封、SCHEMA 命名空间模拟、原生执行/双向互通。
-- 多跳 QPPI（`( ()-[]->()-[]->() ){m,n}`）、DIFFERENT EDGES match mode、SIMPLE 路径模式。
+- 多跳 QPPI（`( ()-[]->()-[]->() ){m,n}`）、DIFFERENT EDGES match mode、SIMPLE 路径模式、
+  WHERE 的 `IS LABELED` 谓词、`%` 标签通配。
