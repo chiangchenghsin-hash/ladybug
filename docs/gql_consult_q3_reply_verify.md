@@ -101,3 +101,96 @@ D. Q3-B 静态收窄:可选小切片,不阻塞
 - Create1/drop1/graph-types/Create2/Boolean/Debug 语料逐格读 ✅;REPORT.md 全量对账 ✅
 - 探机:`CREATE GRAPH \`foo/bar\` ANY` → IO exception 文件路径(引擎级与 CALL GQL 级双复现)✅
 - `data/catalogs/` 目录不存在、catalog-1 仅 drop1 2 例引用 ✅;探机临时文件已清理 ✅
+
+---
+
+# 附:Phase 11 落地过程、结果与下轮咨询问题(2026-10-02,请外部 AI 回帖)
+
+> 上文是回帖验证;§4 落地序已按修正版执行完毕。本附给出**关联过程**、**落地后钉死事实**与**下轮开放问题**。
+> 项目硬约束不变:GQL→Cypher 翻译层、不改 GQL.g4/Cypher.g4/引擎语义、红线 0 静默错答、
+> TCK 语料冻结(输入数据补全/语料自相矛盾走脚注披露)、门禁「TCK 188 不降」+自测 122 全绿。
+
+## A. 关联过程(决策链,供对齐——每一步都可复验)
+
+1. **Q3 简报**(62a53a9)→ 外部回帖 → **独立验证**(513e9b1,即上文):回帖事实勘误**成立**
+   (我方简报事实 #3 收回:语料含 20 处 GQLSTATUS 码,harness 主动丢弃);给回帖 4 处修正——
+   G2000 脚枪(无差别贴 42000 会砸 Create2 [7] 绿场景)、[8] 光贴码转不绿(harness 前导 OK 期望
+   + 切分)、[9] 本已绿、20 处升级高估≈13 处。
+2. **修正落地序**获批:A 注册表+翻译 → B 收窄贴码 → C harness 四件套 → D 静态收窄(可选)。
+3. **2 subagent 并行**:产品侧(注册表/改名/贴码/`_gql_schemas()`/自测)∥ harness 侧(run_tck.py
+   三档断言/例外整体化/catalog-1 fixture/副作用校验)——两者文件零交集。产品侧 agent 两次撞
+   32k 单次输出上限(全量测试输出塞进响应),主会话接管收尾(补写 schemapath 10 例双跑)。
+4. **集成中新发现**(简报/回帖/验证三轮均未见,已处置):
+   - **Create1 [7] 语料自相矛盾**:When 文本漏 `IF NOT EXISTS`,但标题与 `+schemas | 0` 期望
+     要求它(与 [3] 同 When 文、不同期望)。按问题语料先例(Aggregation3 values-only 同款):
+     allowlist 重释 When + 脚注,语料不动。若不重释,[7] 与 [3] 不可能同时过。
+   - **`USE GRAPH /path` 文法天花板**:use-graph 名位不收 `/path`(parse error at `/`),
+     `SESSION SET GRAPH /path` 收(graphExpression)。roundtrip 测试改走后者。
+5. **门禁**:自测 122/122(schemapath 10 新增)、TCK 188 绿(68 过+120 note)/9 挂/9 跳、
+   wrong-GQLSTATUS=0;三刀本地提交 8ad735e(产品)/5280124(harness)/4cf598c(文档)。
+
+## B. Phase 11 落地事实(已实现并双跑验收,勿重议;细节见 `_HANDOVER_GQL.md` Phase 11、README #22)
+
+| # | 事实 | 证据 |
+|---|---|---|
+| 1 | SCHEMA 注册表模拟:逻辑路径集合 + 目录=非空真前缀(无目录实体)+ 逻辑↔物理双向映射;物理名 `_gqlsch__`+段拼 `__`;保留前缀响亮拒 | schemapath.test 10/10 |
+| 2 | CREATE/DROP SCHEMA(IF [NOT] EXISTS)九错条件 + 语句组合拒(NEXT/多语句并存)全贴 `[42000]`;READ ONLY 事务包裹贴 `[25G03]`,其余事务包裹消息一字不改 | TCK Create1/drop1/Debug 全绿 |
+| 3 | 限定名改写已通(CREATE/DROP GRAPH[TYPE]、SESSION SET GRAPH);`USE GRAPH /path` 为 grammar 面不收 | 探机 + GQLParser.h:3118 |
+| 4 | 三档码断言已启用:码匹配=过 / 无码=passed-with-note / 异码=failed wrong-GQLSTATUS(首失败守卫);`when_exception` 整段单 CALL GQL | run_tck.py + REPORT |
+| 5 | 战果:TCK **188 绿(68 过+120 note)/ 9 挂 / 9 跳**,wrong-GQLSTATUS=0;9 挂=语料 openCypher setup 3 + `AS COPY OF` 文法 1 + 多标签 2 + LIKE 1 + AS COPY OF 2 | REPORT.md |
+| 6 | 码契约现状:20 处语料码断言中 **≈13 处为真契约**(schema 族 12 + Create2 [7] G2000 走 note);引擎透传错误(Binder/Conversion)**有意不贴码** | REPORT methodology |
+| 7 | 语料例外 2 件(脚注披露):Create1 [7] allowlist 重释;`data/catalogs/catalog-1.gql` 为补全语料引用的缺失输入数据 | REPORT 脚注 |
+| 8 | 问题语料先例已用两次(Aggregation3 values-only、Create1 [7] 重释)——均「语料不动、harness 例外、脚注披露」 | REPORT |
+
+## C. 开放问题(求「推荐 + 理由 + 最小切片 + 不做什么」)
+
+### Q-D typed 图异构列表残余:挂账,还是静态收窄?(Q3-B 遗留)
+
+现状:静态防线覆盖字面量;运行时残余=非字面量列表在引擎 bind 期静默同化(STRING 万能汇),
+守卫函数已判死刑(同化在信息抹除点上游)。ANY 图免疫(JSON 保型);typed 图 ORDER BY 不 splice
+=「同化后自洽、与 GQL 原义偏离」(#17 已记)。
+候选 A=翻译期查 catalog 对 typed 图 FOR 源/ORDER BY 实参做列类型静态判别(同型放行/异型拒/
+判不出放行记 #17)——残余从「不可判」收窄到「判不出」,纯自测覆盖(语料无 collect,无 TCK 网兜)。
+候选 B=挂账。
+**问**:窄上窄的面 + 无语料网兜,值不值得做?若做,表达式类型类推断规则的最小集是什么?
+
+### Q-E GQLSTATUS 残余三问(均涉「错码比无码更糟」的权衡)
+
+- **E1 引擎透传错误**:今天 Binder/Conversion 等不贴码(三档落 note)。要不要做**文本前缀映射表**
+  (如 ConversionException→22xxx 族)?引擎错误对象无码字段(事实,勿重议),映射只能靠文本匹配
+  ——文本契约脆弱,收益=真契约档+1,风险=引擎改文案即错码(=挂)。做/不做?
+- **E2 AS COPY OF 的 G2000 反转**:Create2 [7] 今天绿在 note 档(层拒 AS COPY OF 无码,语料钉
+  G2000)。候选:贴 `[G2000]`(「贴码反转」同 [8]/[9],契约升真档——但 G2000 语义是「拷贝类型
+  不匹配」,我们拒的是「功能不支持」,对**合法**拷贝语句贴 G2000 是错码)vs 维持无码。
+- **E3 22G0N/22G0P 跳过场景**:graph-types [7][8] 钉 22G0N/22G0P 但被 harness 跳过
+  (`$(randomLabelSet(...))` 模板替换 + 运行时 label-set 生成)。要不要给 harness 补模板机制
+  过这 2 例(码契约 +2)?最小模板替换面怎么圈?
+
+### Q-F `USE GRAPH /path` 文法天花板:边界成立,还是我们读错了语法?
+
+GQL.g4 的 use-graph 从句名位实测不收 `/path`(parse error at `/`),而 CREATE GRAPH /
+SESSION SET GRAPH 的名位收。同一个 catalogGraphParentAndName 系规则为何 USE 位不对称——
+是我们探机拼写不对(ISO 正确拼写是什么?如 `USE GRAPH GRAPH /foo.g`、双引号限定名、
+`foo.g` 点号形),还是 grammar 真不对称?若真不对称:文档边界即可,还是值得在翻译层
+支持某个替代拼写(语法不动)?
+
+### Q-G 层外建图的冲突检查盲区
+
+经层外(纯 Cypher `CREATE GRAPH`)建的图不在注册表,CREATE SCHEMA 的「名字是图」冲突检查看不见
+(引擎物理名冲突仍响亮报错,无静默错)。候选 A=冲突检查时并查引擎 catalog(翻译期可查,
+`resolveAnyGraph` 先例)vs B=挂账(README #22 已记)。并查的最小接口面?
+
+## D. 已定事项(勿重议)
+
+- 收窄贴码策略(schema/READ ONLY 专属码、AS COPY OF 无码)、三档断言设计、mangling 方案、
+  目录前缀推导、问题语料脚注口径(两例先例)均已定并落地。
+- 注册表 WAL 持久化=暂缓(勿重复评估);Q6 plan cache、Q7 语料约定=纯内部不咨询。
+- 语料 parse-error 4(3 例 openCypher setup + 1 例文法歧义)、多标签 2=短期不修(语料/模型边界)。
+- 门禁:「TCK 188 不降」+ 自测 122 全绿。
+
+## E. 回帖格式
+
+1. 每条断言带证据(探机/行号);纯外部事实标来源+许可证。
+2. 每问给「推荐 + 理由 + 最小落地切片 + 不做什么」;若认为某问不值得做,直接说「挂账」并给判据。
+3. 若发现 §B/§A 事实有误,请先指出(可独立复验)。
+4. 篇幅 ≤ 150 行。
