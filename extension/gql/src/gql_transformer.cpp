@@ -2724,11 +2724,90 @@ static void mapIdentifiersInto(const std::string &text, std::string &out) {
             }
             std::string word = text.substr(start, i - start);
             bool afterDot = start > 0 && text[start - 1] == '.';
+            std::string upper(word.size(), '\0');
+            std::transform(word.begin(), word.end(), upper.begin(),
+                           [](unsigned char ch) { return std::toupper(ch); });
+            // GQL PROPERTY_EXISTS(v, prop) -> (v.prop IS NOT NULL). Adapted
+            // from Neo4j's PropertyExistsToIsNotNull (Apache-2.0, see
+            // THIRD_PARTY_NOTICES.md). LadybugDB has no PROPERTY_EXISTS and a
+            // fixed schema, so "property present" is modeled as "column not
+            // null" — the same approximation as REMOVE -> SET n.prop = NULL
+            // (README difference 1). Parenthesized so the predicate composes
+            // under NOT / AND / OR without precedence surprises.
+            if (!afterDot && upper == "PROPERTY_EXISTS") {
+                size_t j = i;
+                auto skipWs = [&]() {
+                    while (j < text.size() &&
+                           std::isspace(static_cast<unsigned char>(text[j]))) {
+                        ++j;
+                    }
+                };
+                auto scanIdent = [&](std::string &id) -> bool {
+                    if (j < text.size() && text[j] == '`') {
+                        size_t s = j++;
+                        while (j < text.size()) {
+                            if (text[j] == '`') {
+                                if (j + 1 < text.size() && text[j + 1] == '`') {
+                                    j += 2;
+                                    continue;
+                                }
+                                break;
+                            }
+                            ++j;
+                        }
+                        if (j >= text.size()) {
+                            return false;
+                        }
+                        ++j;
+                        id = text.substr(s, j - s);
+                        return true;
+                    }
+                    if (j < text.size() &&
+                        (std::isalpha(static_cast<unsigned char>(text[j])) ||
+                         text[j] == '_')) {
+                        size_t s = j;
+                        while (j < text.size() &&
+                               (std::isalnum(static_cast<unsigned char>(text[j])) ||
+                                text[j] == '_')) {
+                            ++j;
+                        }
+                        id = text.substr(s, j - s);
+                        return true;
+                    }
+                    return false;
+                };
+                std::string var, prop;
+                skipWs();
+                bool ok = j < text.size() && text[j] == '(';
+                if (ok) {
+                    ++j;
+                    skipWs();
+                    ok = scanIdent(var);
+                    skipWs();
+                    ok = ok && j < text.size() && text[j] == ',';
+                    if (ok) {
+                        ++j;
+                    }
+                    skipWs();
+                    ok = ok && scanIdent(prop);
+                    skipWs();
+                    ok = ok && j < text.size() && text[j] == ')';
+                }
+                if (ok) {
+                    out += '(';
+                    out += var;
+                    out += '.';
+                    out += prop;
+                    out += " IS NOT NULL)";
+                    i = j + 1;
+                    continue;
+                }
+                // Not the canonical (v, prop) call shape — fall through and
+                // copy the word so whatever spelling this is gets rejected
+                // loudly downstream.
+            }
             bool isCall = i < text.size() && text[i] == '(';
             if (!afterDot && isCall) {
-                std::string upper(word.size(), '\0');
-                std::transform(word.begin(), word.end(), upper.begin(),
-                               [](unsigned char ch) { return std::toupper(ch); });
                 bool mapped = false;
                 for (auto &entry : GQL_FUNCTION_MAP) {
                     if (upper == entry.first) {

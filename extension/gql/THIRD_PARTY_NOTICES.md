@@ -60,3 +60,12 @@ https://www.apache.org/licenses/LICENSE-2.0
   standards.iso.org) is used as the reference for language-scope decisions.
 - The standard document itself is copyrighted by ISO; only its published
   grammar artifact is used as a language definition reference.
+
+## Reference copies in this repository
+
+Local copies of several sources listed above (Neo4j rewriters and the Cypher 25
+grammar, the ISO GQL grammar artifact) are kept in `docs/gql_ref/` for
+consulting while maintaining the translation layer; its `README.md` indexes
+them and records which piece of `src/gql_transformer.cpp` each one informed.
+The ISO grammar artifact is internal reference only and is not committed to
+git.

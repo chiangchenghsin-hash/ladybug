@@ -46,7 +46,9 @@
 - `extension/gql/README.md`：分级兼容矩阵（Neo4j 合规附录格式）+ 已知语义差异。
 - `extension/gql/THIRD_PARTY_NOTICES.md`：Neo4j/opengql/ISO 来源登记（Apache-2.0 署名）。
 - `_build_gql.bat`：聚焦构建脚本（VS2026，`-DBUILD_EXTENSIONS="gql"`，target e2e_test+lbug_gql_extension）。
-- `_tmp_gql_ref/`：下载的参考代码（Neo4j 4 个 rewriter .scala、ISO 官方 BNF、Cypher25Parser.g4）——未入库。
+- `docs/gql_ref/`：参考资料目录（Neo4j 5 个 .scala、Cypher25Parser.g4、ISO 官方 BNF + 索引 README）。
+  Apache-2.0 部分随库；ISO BNF 是 ISO 版权数字工件，内部参考、不入库（.gitignore 排除）。
+  成果/缺点评估：`docs/gql_compat_review.md`（2026-10-01）。
 
 ## 二、构建与测试方法
 
@@ -61,8 +63,8 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 85/85 全绿**（2026-10-01 Phase 7 收工）：
-basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
+**✅ 86/86 全绿**（2026-10-01 Phase 7 收工 + 评估日修正）：
+basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 2**（G074 标签表达式双跑：ANY 图 / 表图）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
@@ -148,6 +150,16 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**�
   两项引擎工程（WAL typespec 新记录 + replayer + metadata 序列化）。当前失败面是响亮的
   （重启后 CREATE GRAPH TYPE 重跑即可），按够用即可原则推迟，勿重复评估。
 
+### 评估日修正（2026-10-01）
+- **G115 PROPERTY_EXISTS 矩阵虚标消灭**：README 原记 ✓（"parsed as-is"），实际原样透传到
+  Cypher 后执行时死在 `function PROPERTY_EXISTS does not exist`（transformer/Cypher.g4/binder
+  三处 0 支持）。已按 Neo4j `PropertyExistsToIsNotNull`（Apache-2.0）抄写改译
+  `PROPERTY_EXISTS(v, prop)` → `(v.prop IS NOT NULL)`（`mapIdentifiersInto` 内，括号包裹防
+  NOT/AND 优先级意外；与 REMOVE≈SET NULL 同一固定 schema 模型），select.test 增
+  `PropertyExistsParity` 双跑。教训：矩阵里"parsed as-is"式 ✓ 必须过执行验证。
+- 参考资料（Neo4j .scala / Cypher25Parser.g4 / ISO BNF）整理入 **`docs/gql_ref/`**（索引 README，
+  ISO BNF 不入库）；成果/缺点评估成文 **`docs/gql_compat_review.md`**。
+
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
   `GraphTypeSpec`（节点类型 = 名字+属性类型；边类型 = 名字+端点对+属性类型，别名剥除——
@@ -194,8 +206,10 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**�
 - **GQL 语言事实**：ISO GQL **无 `LENGTH()`**（只有 PATH_LENGTH/CHAR_LENGTH 等 lengthExpression），
   `length(e)` 在 GQL 层就是语法错；GQL 也**无裸 `SHORTEST` 前缀**（只有 ANY/ALL SHORTEST 或 counted）。
 - 引擎侧小改进：`gql_function.cpp` 解析错误现在带 ANTLR 明细（`Failed to parse ... (line 1:8 ...)`）。
-- 参考代码新增 `_tmp_gql_ref/astRewriters/{AddPathPredicates,AddElementUniquenessPredicates,
-  AddVarLengthBoundPredicates}.scala` + `ir/QuantifiedPathPatternConverters.scala`（未入库）。
+- 路径量词/唯一性参考了 Neo4j `AddPathPredicates`/`AddElementUniquenessPredicates`/
+  `AddVarLengthBoundPredicates`/`QuantifiedPathPatternConverters`（**查阅未留档**，
+  上游路径见 `extension/gql/THIRD_PARTY_NOTICES.md` 与 `docs/gql_ref/README.md` 的
+  "Consulted but not kept"；要抄细节时按那里的路径重取）。
 
 ## 四、关键事实备忘（调研结论，勿重复调研）
 
@@ -213,9 +227,10 @@ basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / **path 18**�
   （路径）/internal_id/TIMESTAMP/DATE/DURATION 均内建；**无 STDDEV、无 TIME 类型**（LOCAL_TIME/ZONED_TIME 显式拒）。
 - 测试框架：`.test` 声明式（`-CASE`/`-STATEMENT`/`---- ok|N|error|error(regex)`/`-CHECK_ORDER`），
   组名 = 路径 `~` 连接（`gql~test~test_files~select`）；gtest_filter 用这个。
-- 外部参考（已下载 `_tmp_gql_ref/`）：Neo4j `GQLAliasFunctionNameRewriter.scala`（函数别名表）、
-  `PropertyExistsToIsNotNull.scala`、ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。
-  Neo4j GQL 合规附录（网页）是语义差异清单的权威参考。
+- 外部参考已整理入 **`docs/gql_ref/`**（含索引 README）：Neo4j 4 个 astRewriter .scala
+  （函数别名表/标签表达式归一/PROPERTY_EXISTS）、`GraphTypeCanonicalizer.scala`、
+  ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。Neo4j GQL 合规附录（网页）是语义
+  差异清单的权威参考。
 
 ## 五、Phase 7+ 路线（Phase 7 前三议项已处理，其余未做）
 

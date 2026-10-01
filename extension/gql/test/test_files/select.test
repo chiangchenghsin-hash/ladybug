@@ -159,3 +159,40 @@ Alice
 -STATEMENT MATCH (n:Person) RETURN n.name AS name
 ---- 1
 Alice
+
+
+# PROPERTY_EXISTS (G115) -> (v.prop IS NOT NULL), the fixed-schema model of
+# "property present" (consistent with REMOVE -> SET n.prop = NULL).
+-CASE PropertyExistsParity
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE Person(name STRING, email STRING, PRIMARY KEY(name))
+---- ok
+
+-STATEMENT CALL GQL("INSERT (n:Person {name: 'Alice', email: 'alice@example.com'})")
+---- 0
+
+-STATEMENT CALL GQL("INSERT (n:Person {name: 'Bob'})")
+---- 0
+
+-CHECK_ORDER
+-STATEMENT CALL GQL("SELECT n.name AS name FROM GRAPH main MATCH (n:Person) WHERE PROPERTY_EXISTS(n, email) ORDER BY n.name")
+---- 1
+Alice
+
+-CHECK_ORDER
+-STATEMENT MATCH (n:Person) WHERE (n.email IS NOT NULL) RETURN n.name AS name ORDER BY n.name
+---- 1
+Alice
+
+-CHECK_ORDER
+-STATEMENT CALL GQL("SELECT n.name AS name FROM GRAPH main MATCH (n:Person) WHERE NOT PROPERTY_EXISTS(n, email) ORDER BY n.name")
+---- 1
+Bob
+
+-CHECK_ORDER
+-STATEMENT MATCH (n:Person) WHERE NOT (n.email IS NOT NULL) RETURN n.name AS name ORDER BY n.name
+---- 1
+Bob

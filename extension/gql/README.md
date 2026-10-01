@@ -61,7 +61,7 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 | G010–G013 | Path modes (WALK/TRAIL/ACYCLIC) | ✓ | single var-length slot → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; multi-hop patterns (and every ACYCLIC pattern) additionally bind a path variable and filter with `IS_TRAIL`/`IS_ACYCLIC` over the whole path — exact ISO semantics (see difference 7); WALK = engine default; SIMPLE ✗ (no engine counterpart) |
 | G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✓ (node patterns) | `:A&B`/`:A\|B`/`:!A`/parens → WHERE predicates over `labels(v)` (graph-kind-aware, see difference 13); simple `:Label` unchanged (table pruning); INSERT label sets `:A&B` → `CREATE (n:A:B ...)` on ANY graphs; `%` wildcard, edge label expressions, `IS LABELED` predicates ✗ |
 | G100 | ELEMENT_ID | ✓ | → `internal_id()` |
-| G115 | PROPERTY_EXISTS | ✓ | GQL native predicate (parsed as-is) |
+| G115 | PROPERTY_EXISTS | ✓ | → `(v.prop IS NOT NULL)` (fixed-schema model of "property present", consistent with difference 1) |
 | GA05 | Cast specification | ✓ | `CAST` shared syntax |
 | GC03 | CREATE GRAPH TYPE | ✓ (basic) | graph type → node/rel table schema bridge; multi-label node types and `LIKE <graph>` ✗ |
 
@@ -96,6 +96,9 @@ see `THIRD_PARTY_NOTICES.md`):
 1. **REMOVE property** is approximated as `SET n.prop = NULL` — on LadybugDB's
    fixed schema the property column still exists (as NULL); ISO GQL "property
    removed" would make `PROPERTY_EXISTS`/`properties()` behave differently.
+   The layer's `PROPERTY_EXISTS` mapping (G115 → `(v.prop IS NOT NULL)`) is the
+   same fixed-schema model, so removed reads as not present consistently
+   (`properties()` still lists every column).
 2. **SET assignment order** — GQL evaluates all RHS values before assigning
    (order-independent); Cypher `SET` is sequential. The translator snapshots
    RHS values via `WITH` when items interfere; otherwise direct mapping is
