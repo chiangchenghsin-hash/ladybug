@@ -194,3 +194,59 @@ SESSION SET GRAPH 的名位收。同一个 catalogGraphParentAndName 系规则�
 2. 每问给「推荐 + 理由 + 最小落地切片 + 不做什么」;若认为某问不值得做,直接说「挂账」并给判据。
 3. 若发现 §B/§A 事实有误,请先指出(可独立复验)。
 4. 篇幅 ≤ 150 行。
+
+---
+
+# 附二:Q4 回帖验证(2026-10-02,对象 `docs/gql_consult_phase11_reply.md`)
+
+> 方法同前:GQL.g4 原文对码 + e2e 探机真跑。结论:**Q-F 双方各对一半——文法读对了、操作结论证伪了;
+> 真拼写是「USE 前缀从句」,独立 USE 根本不是 GQL 语句**。其余四问旁证齐、均可采纳。
+
+## 1. Q-F 三层反转(头条)
+
+| # | 回帖断言 | 复验 | 判定 |
+|---|---|---|---|
+| 1 | `useGraphClause : USE graphExpression`,USE 后**无 GRAPH 关键字** | GQL.g4:773-775 原文 | ✅ |
+| 2 | `GRAPH` 在 `nonReservedWords`(:3061 起),`USE GRAPH /path` 中 GRAPH 被当图名吃掉 | 文法原文 + 探机 4(见下) | ✅ 机制证实 |
+| 3 | `/path` 在 USE 名位可收(graphExpression→graphReference→catalogObjectParentReference→schemaReference→absoluteDirectoryPath,GQL.g4:246/1421/1469/1387/1407) | 原文逐环对码 | ✅ |
+| 4 | 「`USE /path` 大概率今天就能跑」(独立语句) | **探机 1-4 全挂**:`USE /foo/g`、`USE mygraph`、`USE GRAPH /x/y`、`USE GRAPH other` 全部 parse error | ❌ **证伪** |
+| 5 | (回帖未提的真形态)`USE /path` 作**查询前缀从句** | **探机 5-7**:`USE /foo/g MATCH (n:Person) RETURN n.name` → `1\nA` 全链通(改写+mangling+执行);`USE mygraph MATCH ...` 同通;`USE GRAPH other MATCH ...` 在 "USE GRAPH other" 处挂(GRAPH 被当图名,`other` 起不来查询) | ✅ 今日已通 |
+| 6 | 我方原「文法天花板:名位不收 /path」(README #22 现文) | 名位**收** /path;真因=① useGraphClause 是查询/数据修改语句的**前缀从句**(GQL.g4:382-386、:539-551),独立 USE 构不成 statement;② `USE GRAPH x` 的 GRAPH 是被吃掉的图名 | ❌ **机制归因错,需改文案** |
+
+**真拼写**(`extension/third_party/opengql/GQL.g4`,与探机互证):
+- 限定名查询:`USE /foo/g MATCH (n:Person) RETURN n.name`——**今天就通**(物理名改写同 SESSION SET 码路,gql_transformer.cpp:865-918)。
+- 会话切换:`SESSION SET GRAPH /foo/g`——今天已通(此语句的 GRAPH 是其自身规则的一部分,:43-45)。
+- **别写**:`USE GRAPH x`——GRAPH 是 nonReserved 图名,语义是「用名叫 GRAPH 的图」后跟 `x`;解析错误极具迷惑性。
+- 独立 `USE x` 不是 GQL 语句(USE 只能前缀查询/数据修改语句)——**不是天花板,是文法本义**。
+- 回帖「勿做 `USE GRAPH x→USE x` 宽容归一」的警告**正确**(会吃掉名叫 graph 的合法图名),采纳。
+
+## 2. 其余四问核验
+
+| 问 | 回帖裁决 | 核验 | 判定 |
+|---|---|---|---|
+| Q-E1 文本映射 | 不做 | 架构一致:standalone_call_rewriter 把 CALL GQL 拼接成 Cypher 后走引擎正常管线,执行期异常**不过扩展调用栈**;文本映射只盖 bind 期→「同错有时有码有时无码」比无码糟 | ✅ 采纳 |
+| Q-E2 AS COPY OF | 维持无码 | 与我方验证 §3.1 同一论证(贴码反转前提是钉码语义=拒因) | ✅ 采纳 |
+| Q-E3 模板场景 | harness 半 | `$(randomLabelSet(...))` 全语料**恰 2 处**(Create1.feature:86/:97)✅;「先探零标签形态」接受为前置;2 跳→2 跑的账成立 | ✅ 采纳 |
+| Q-G 层外建图 | 做 | `Catalog::getGraphEntry/getGraphEntries` 实在(src/include/catalog/catalog.h:214-217),且我方 gql_function.cpp:87/:293 **已在用**——helper 面比 ~15 行更小 | ✅ 采纳 |
+| Q-D 异构残余 | 挂账 | 与我方倾向一致(窄上窄+无语料网兜) | ✅ 采纳 |
+
+## 3. 修正后的落地序(待批)
+
+```
+1. Q-F 余尾(半小时):schemapath.test 加「USE 限定名前缀从句」+「USE 普通名前缀」双跑;
+   README #22 文案改写(前缀从句/无 GRAPH 关键字/勿写 USE GRAPH x/独立 USE 非语句)——
+   现文「名位不收 /path」是已证伪的错误归因,必须改。
+2. Q-G(半天内):CREATE SCHEMA 冲突检查并查 getGraphEntries(层外建图盲区闭合)。
+3. Q-E3(半天):run_tck 模板替换 $(randomLabelSet(k)) + min/max=1 脚注;
+   前置探机零标签形态;贴 22G0N/22G0P 可选(语义与拒因相符)。
+其余(Q-D/Q-E1/Q-E2)零工时,文档关闭。
+```
+
+预期:**TCK 188 不降;E3 后跳 9→7、码契约 ≈13→15**;自测 +2 例 USE 前缀双跑。
+
+## 4. 复验留痕
+
+- GQL.g4:773-775/246/1421/1469/1381-1412/3061-3075 原文逐环对码 ✅
+- e2e 探机 7 组(独立 USE 四形态全挂;前缀从句限定名/普通名通;USE GRAPH 前缀仍挂)✅
+- `$(randomLabelSet` 语料计数=2 ✅;`getGraphEntry/getGraphEntries` 定义+我方既有使用 ✅
+- 探机临时文件已清理 ✅
