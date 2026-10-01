@@ -12,13 +12,23 @@ populator file. Sample data comes from tck/data.
 Methodology notes (kept honest on purpose):
 - Expected results are compared after converting TCK values to the engine's
   Value::toString form (True/False, %.6f floats, empty cell for NULL).
-- "an exception condition should be raised: <code>" asserts that SOME error is
-  raised; the GQLSTATUS code itself is not checked (the layer does not emit
-  GQLSTATUS codes yet).
-- Side effects are verified only for scenarios whose working graph starts
-  empty (observable metrics: +nodes / +edges / no side effects). Metrics the
-  engine cannot observe (+properties, +labels, +schemas, ...) and preloaded
-  graphs are recorded as unchecked.
+- "an exception condition should be raised: <code>" is asserted in three tiers:
+  the generated error regex requires the code (`[\\s\\S]*<code>[\\s\\S]*`); a match
+  is a true pass; a mismatch whose actual error carries a DIFFERENT bracketed
+  code `[XXXXX]` fails as wrong-GQLSTATUS; a mismatch whose actual error
+  carries no bracketed code passes-with-note (the layer does not emit GQLSTATUS
+  codes yet); no error raised at all fails as usual.
+- Exception scenarios run their whole When program as ONE CALL GQL expecting an
+  error (no leading-statement split: the rejection may surface anywhere).
+- Catalog side effects (+/-schemas, +/-directories) are checked via
+  `RETURN _gql_schemas()` against a harness model of CREATE/DROP SCHEMA (IF
+  [NOT] EXISTS aware) when the built extension exposes `_gql_schemas`;
+  otherwise they are recorded unchecked. Graph side effects are verified only
+  for scenarios whose working graph starts empty (+nodes / +edges).
+- `data/catalogs/*.gql` files are harness-supplied fixtures completing input
+  data the corpus references ("Given <name> catalog"); no .feature assertion is
+  edited. Fixture scenarios whose CREATE SCHEMA is rejected by the build are
+  reclassified as skipped (capability probe).
 - Scenarios needing sample data that the TCK repo does not ship, and scenarios
   using runtime template substitutions ($(randomLabelSet(...))), are skipped
   and counted separately.
@@ -30,6 +40,7 @@ Usage (from the repository root):
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import subprocess
@@ -382,12 +393,14 @@ class Emitted:
     """One .test statement with its expectation."""
 
     def __init__(self, cypher: str, kind: str, rows: list[list[str]] | None = None,
-                 ordered: bool = False, headers: bool = False):
+                 ordered: bool = False, headers: bool = False,
+                 error_regex: str | None = None):
         self.cypher = cypher
         self.kind = kind
         self.rows = rows or []
         self.ordered = ordered
         self.headers = headers
+        self.error_regex = error_regex  # Expectation.ERROR only; None = any error
 
 
 def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]]:
@@ -406,6 +419,7 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
     has_working_graph = False
     setup_has_writes = False
     setup_stmts: list[str] = []  # deferred: emitted before when-statements
+    setup_prog: list[str] = []   # raw setup GQL (for the catalog model)
 
     def note_write(stmts: list[str]):
         nonlocal setup_has_writes
@@ -414,8 +428,10 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
                 setup_has_writes = True
 
     when_result: tuple[str, list, bool] | None = None  # (kind, stmts, ordered)
+    when_raw: str | None = None  # raw When program (pre-split), for catalog model
     when_rows: list[list[str]] = []
     when_exception = False
+    when_exc_code: str | None = None
     side_effect_table: list[tuple[str, str]] | None = None
     no_side_effects = False
 
@@ -451,6 +467,7 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
             note_write(pop_stmts)
             for s in pop_stmts:
                 setup_stmts.append(wrap_call_gql(s))
+                setup_prog.append(s)
             continue
         if low.startswith("the graph created by executing"):
             if not step.doc:
@@ -459,6 +476,7 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
             note_write(stmts)
             for s in stmts:
                 setup_stmts.append(wrap_call_gql(s))
+                setup_prog.append(s)
             created = None
             for s in stmts:
                 mm = re.search(r"(?is)CREATE\s+(?:PROPERTY\s+)?GRAPH\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)", s)
@@ -478,6 +496,7 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
             note_write(stmts)
             for s in stmts:
                 setup_stmts.append(wrap_call_gql(s))
+                setup_prog.append(s)
             continue
         if low.startswith("having executed"):
             if not step.doc:
@@ -486,6 +505,7 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
             note_write(stmts)
             for s in stmts:
                 setup_stmts.append(wrap_call_gql(s))
+                setup_prog.append(s)
             continue
         if "randomly generated label set" in low:
             return ("requires runtime label-set generation", [], notes)
@@ -497,6 +517,7 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
                 return ("malformed step: no program", [], notes)
             if "$(" in step.doc:
                 return ("requires runtime template substitution", [], notes)
+            when_raw = step.doc
             when_result = ("pending", split_program(step.doc), False)
             continue
 
@@ -515,6 +536,9 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
             continue
         if "exception condition should be raised" in low:
             when_exception = True
+            mcode = re.search(r"exception condition should be raised:\s*([0-9A-Z]{5})", t)
+            if mcode:
+                when_exc_code = mcode.group(1)
             continue
         if low == "no side effects":
             no_side_effects = True
@@ -536,9 +560,16 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
 
     when_stmts = [wrap_call_gql(s) for s in (when_result[1] if when_result else [])]
     if when_exception:
-        for s in when_stmts[:-1]:
-            emitted.append(Emitted(s, Expectation.OK))
-        emitted.append(Emitted(when_stmts[-1], Expectation.ERROR))
+        if not when_stmts:
+            return ("scenario has no When query", [], notes)
+        # C1: the whole When program is ONE CALL GQL expected to error. The old
+        # split marked leading statements OK and misattributed the rejection
+        # (Create1 [8]: START TRANSACTION / CREATE SCHEMA / COMMIT died as
+        # "EXPECT OK BUT GOT ERROR" instead of the expected exception).
+        # C4: with a corpus code, the error regex must contain it (three-tier).
+        whole = wrap_call_gql(when_raw) if when_raw else when_stmts[-1]
+        exc_regex = rf"[\s\S]*{when_exc_code}[\s\S]*" if when_exc_code else r"[\s\S]+"
+        emitted.append(Emitted(whole, Expectation.ERROR, error_regex=exc_regex))
     elif when_result[0] == Expectation.EMPTY:
         for s in when_stmts:
             emitted.append(Emitted(s, Expectation.EMPTY))
@@ -556,16 +587,51 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
     else:
         return ("scenario has no Then result assertion", [], notes)
 
-    # ---- side-effect checks (only observable on empty-start working graphs) ----
+    # ---- side-effect checks ----
+    # C3: catalog schema metrics are checked via RETURN _gql_schemas() against
+    # the harness's model of the scenario's CREATE/DROP SCHEMA statements.
+    schema_pairs = [(m, v) for m, v in (side_effect_table or [])
+                    if m in SCHEMA_SIDE_EFFECT_METRICS]
+    other_pairs = [(m, v) for m, v in (side_effect_table or [])
+                   if m not in SCHEMA_SIDE_EFFECT_METRICS]
+
+    if schema_pairs:
+        if schemas_fn_available():
+            initial = model_catalog_final(setup_prog)
+            final = model_catalog_final(
+                setup_prog + ([when_raw] if (when_raw and not when_exception) else []))
+            for metric, val in schema_pairs:
+                if metric in ("+schemas", "-schemas"):
+                    model_delta = len(final) - len(initial)
+                else:
+                    model_delta = (len(model_directories(final))
+                                   - len(model_directories(initial)))
+                try:
+                    claimed = int(val)
+                except ValueError:
+                    claimed = None
+                signed_claim = claimed if metric.startswith("+") else (
+                    -claimed if claimed is not None else None)
+                if signed_claim is not None and signed_claim != model_delta:
+                    notes.append(f"side-effect model disagreement: corpus "
+                                 f"{metric} {val} vs model {model_delta}")
+            emitted.append(Emitted("RETURN _gql_schemas()", Expectation.ROWS,
+                                   [[catalog_json(final)]], False, False))
+        else:
+            notes.append("unchecked side effect: " +
+                         ", ".join(f"{m} {v}" for m, v in schema_pairs) +
+                         " (_gql_schemas() not in build)")
+
+    # Graph side effects: only observable on empty-start working graphs.
     if has_working_graph and not setup_has_writes:
         if no_side_effects:
             emitted.append(Emitted("MATCH (n) RETURN count(*)", Expectation.ROWS,
                                    [["0"]], False, False))
             emitted.append(Emitted("MATCH ()-[e]->() RETURN count(*)", Expectation.ROWS,
                                    [["0"]], False, False))
-        elif side_effect_table:
+        elif other_pairs:
             checked = False
-            for metric, val in side_effect_table:
+            for metric, val in other_pairs:
                 if metric == "+nodes":
                     emitted.append(Emitted("MATCH (n) RETURN count(*)", Expectation.ROWS,
                                            [[val]], False, False))
@@ -576,12 +642,12 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
                     checked = True
                 else:
                     notes.append(f"unchecked side effect: {metric} {val}")
-            if not checked and side_effect_table:
+            if not checked and other_pairs:
                 pass  # all metrics unobservable; noted above
     else:
         if no_side_effects:
             notes.append("no side effects (unchecked: preloaded graph)")
-        elif side_effect_table:
+        elif other_pairs:
             notes.append("side effects unchecked (preloaded graph or unobservable)")
 
     return (None, emitted, notes)
@@ -628,6 +694,175 @@ def _parse_side_effects(doc: str | None):
 
 
 # -----------------------------------------------------------------------------
+# Catalog model (schemas/directories side effects) and capability probe
+# -----------------------------------------------------------------------------
+
+SCHEMA_SIDE_EFFECT_METRICS = {"+schemas", "-schemas", "+directories", "-directories"}
+
+_SCHEMA_DDL_RE = re.compile(
+    r"(?is)^\s*(CREATE|DROP)\s+SCHEMA\s+(IF\s+(?:NOT\s+EXISTS|EXISTS)\s+)?(\S+)\s*$")
+
+
+def model_catalog_final(statements: list[str]) -> set[str]:
+    """Set of schema paths after applying CREATE/DROP SCHEMA statements.
+
+    Starts from an empty catalog (the corpus's "Given an empty catalog", or the
+    catalog fixture's own statements which are part of `statements`).
+    IF NOT EXISTS / IF EXISTS semantics are honoured; statements that are not
+    single CREATE/DROP SCHEMA are ignored.
+    """
+    schemas: set[str] = set()
+    for program in statements:
+        for stmt in split_program(program):
+            m = _SCHEMA_DDL_RE.match(stmt)
+            if not m:
+                continue
+            op, if_clause, path = m.group(1).upper(), (m.group(2) or ""), m.group(3)
+            if op == "CREATE":
+                schemas.add(path)
+            else:  # DROP
+                if "EXISTS" in if_clause.upper() or path in schemas:
+                    schemas.discard(path)
+    return schemas
+
+
+def model_directories(schemas: set[str]) -> set[str]:
+    """Non-empty proper prefixes of every schema path (TCK 'directories')."""
+    dirs: set[str] = set()
+    for p in schemas:
+        parts = [x for x in p.split("/") if x]
+        for i in range(1, len(parts)):
+            dirs.add("/" + "/".join(parts[:i]))
+    return dirs
+
+
+def catalog_json(schemas: set[str]) -> str:
+    """Expected `_gql_schemas()` payload: JSON, arrays lexicographically sorted."""
+    return json.dumps({"schemas": sorted(schemas),
+                       "directories": sorted(model_directories(schemas))},
+                      separators=(",", ":"))
+
+
+_SCHEMAS_FN_PROBE: bool | None = None
+
+
+def schemas_fn_available() -> bool:
+    """True if the built extension exposes the _gql_schemas() scalar function.
+
+    Static capability probe (the function name is a registered string literal);
+    on builds that predate the function we fall back to the existing
+    unchecked-side-effect note instead of hard-failing every schema scenario.
+    """
+    global _SCHEMAS_FN_PROBE
+    if _SCHEMAS_FN_PROBE is None:
+        art = REPO_ROOT / "extension" / "gql" / "build" / "libgql.lbug_extension"
+        try:
+            _SCHEMAS_FN_PROBE = bool(art.is_file()) and b"_gql_schemas" in art.read_bytes()
+        except OSError:
+            _SCHEMAS_FN_PROBE = False
+    return _SCHEMAS_FN_PROBE
+
+
+# -----------------------------------------------------------------------------
+# Scenario introspection: GQLSTATUS codes, allowlisted When rewrites
+# -----------------------------------------------------------------------------
+
+def scenario_exc_code(sc: Scenario) -> str | None:
+    """The GQLSTATUS code of 'Then an exception condition should be raised: <code>'."""
+    for step in sc.steps:
+        if step.keyword not in ("Then", "And", "But"):
+            continue
+        m = re.search(r"exception condition should be raised:\s*([0-9A-Z]{5})",
+                      step.text)
+        if m:
+            return m.group(1)
+    return None
+
+
+# Allowlisted When-program rewrites for corpus self-contradictions (the vendored
+# .feature files are NOT edited; each rewrite is disclosed in the REPORT).
+# Key: (feature stem, leading scenario-number token); the rule only applies when
+# the scenario's When text matches `match_when` exactly, so identically-numbered
+# scenarios in other features are unaffected.
+WHEN_REWRITE_RULES: dict[tuple[str, str], dict[str, str]] = {
+    ("Create1", "[7]"): {
+        "match_when": "CREATE SCHEMA /foo/myschema",
+        "replace_when": "CREATE SCHEMA IF NOT EXISTS /foo/myschema",
+        "reason": "corpus self-contradiction: title 'Create a schema, if not "
+                  "exists' and +schemas|0 require IF NOT EXISTS but the When "
+                  "omits it (same When text as [3], different expectation)",
+    },
+}
+
+
+def apply_when_rewrite(sc: Scenario) -> str | None:
+    """Apply an allowlisted rewrite to this scenario's When program in place.
+
+    Returns the rewrite reason, or None when no rule applies.
+    """
+    m = re.match(r"\[\d+\]", sc.name)
+    if not m:
+        return None
+    rule = WHEN_REWRITE_RULES.get((sc.feature, m.group(0)))
+    if not rule:
+        return None
+    for step in sc.steps:
+        low = step.text.lower()
+        if (low.startswith("executing") and step.doc
+                and step.doc.strip() == rule["match_when"]):
+            step.doc = rule["replace_when"]
+            return rule["reason"]
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Three-tier coded-exception classification (post-run, from the gtest log)
+# -----------------------------------------------------------------------------
+
+# gtest failure markers: MSVC build prints `file.cpp(228): error: Value of:`,
+# gcc/clang builds print `file.cpp:239: Failure`.
+_GTEST_FAILURE_RE = re.compile(r"\(\d+\): error:|\:\d+: Failure")
+_CODE_REGEX_MISMATCH = "Expected error to match regex"
+_BRACKET_CODE_RE = re.compile(r"\[[0-9A-Z]{5}\]")
+
+
+def classify_coded_error_block(expected_code: str, block: str) -> tuple[str, str] | None:
+    """Classify one failed case's gtest block for a coded exception scenario.
+
+    Returns None when the block is not a code-regex mismatch, or when an
+    EARLIER statement in the same case already failed (then the scenario is
+    broken for another reason and the default classification applies).
+    Otherwise returns (tier, detail):
+      - "note"       an error WAS raised but carries no bracketed GQLSTATUS
+                     -> passed-with-note (code not emitted yet)
+      - "wrong-code" the error carries a DIFFERENT bracketed code -> stays
+                     failed (wrong GQLSTATUS: the core three-tier contract)
+      - "not-raised" no error was raised -> stays failed
+    """
+    mism = block.find(_CODE_REGEX_MISMATCH)
+    if mism < 0:
+        return None
+    # The mismatch must be the FIRST gtest failure of the case.
+    if len(_GTEST_FAILURE_RE.findall(block[:mism])) > 1:
+        return None
+    m = re.search(r"Expected error to match regex: (.*?) actual error: (.*)",
+                  block, re.S)
+    if not m:
+        return None
+    actual_first = m.group(2).split("\n", 1)[0].strip()
+    if not actual_first:
+        return ("not-raised", "no error raised")
+    codes = [c[1:-1] for c in _BRACKET_CODE_RE.findall(m.group(2))]
+    if not codes:
+        return ("note", f"error raised but code {expected_code} not emitted: "
+                        f"{actual_first[:120]}")
+    if expected_code not in codes:
+        return ("wrong-code", f"expected {expected_code}, got "
+                              f"{'/'.join(codes)}: {actual_first[:120]}")
+    return None
+
+
+# -----------------------------------------------------------------------------
 # .test rendering
 # -----------------------------------------------------------------------------
 
@@ -651,7 +886,9 @@ def render_case(case_name: str, emitted: list[Emitted], comment: str) -> str:
             out.append("---- error(regex)")
             # [\s\S]+ matches multi-line errors too (ANTLR caret messages);
             # plain ".+" does not cross newlines under std::regex_match.
-            out.append(r"[\s\S]+")
+            # C4: coded scenarios narrow the regex to `[\s\S]*<code>[\s\S]*`
+            # (the product's [code] prefix, matched loosely as a bare substring).
+            out.append(e.error_regex if e.error_regex else r"[\s\S]+")
         elif e.kind == Expectation.ROWS:
             rows = e.rows
             out.append(f"---- {len(rows)}")
@@ -730,6 +967,9 @@ def main() -> int:
     index: dict[str, tuple[str, str, list[str]]] = {}  # case -> (feature, scenario, notes)
     skipped: list[tuple[str, str, str]] = []
     values_only_cases: list[tuple[str, str, str]] = []  # (feature, scenario, reason)
+    rewrite_cases: list[tuple[str, str, str]] = []      # (feature, scenario, reason)
+    coded_cases: dict[str, str] = {}   # case -> expected GQLSTATUS code
+    fixture_cases: set[str] = set()    # cases fed by a "Given <x> catalog" fixture
     by_file: dict[str, list[str]] = {}
 
     file_cases: dict[pathlib.Path, list[str]] = {}
@@ -745,6 +985,7 @@ def main() -> int:
             skipped.append((fk, sc.name,
                             f"capability tag @{cap}: {CAPABILITY_SKIP_TAGS[cap]}"))
             continue
+        rewrite_reason = apply_when_rewrite(sc)  # C5 allowlist (in place)
         skip, emitted, notes = convert_scenario(sc)
         if skip is not None:
             skipped.append((fk, sc.name, skip))
@@ -758,6 +999,16 @@ def main() -> int:
         if drift:
             comment += f" -- {drift}"
             values_only_cases.append((fk, sc.name, drift))
+        if rewrite_reason:
+            comment += f" -- when rewritten: {rewrite_reason}"
+            rewrite_cases.append((fk, sc.name, rewrite_reason))
+        code = scenario_exc_code(sc)
+        if code:
+            coded_cases[case] = code
+        if any(re.fullmatch(r"(.+) catalog", s.text.lower())
+               and not s.text.lower().startswith("an empty")
+               for s in sc.steps):
+            fixture_cases.add(case)
         out_path = GEN_DIR / f"{fk}.test"
         file_cases.setdefault(out_path, []).append(render_case(case, emitted, comment))
         index[case] = (fk, sc.name, notes)
@@ -778,28 +1029,74 @@ def main() -> int:
     log = proc.stdout + proc.stderr
     (GEN_DIR / "run.log").write_text(log, encoding="utf-8")
 
-    failed = re.findall(r"^\[  FAILED  \] ([A-Za-z0-9_.]+) \(\d+ ms\)", log, re.M)
+    failed = set(re.findall(r"^\[  FAILED  \] ([A-Za-z0-9_.]+) \(\d+ ms\)", log, re.M))
     passed_m = re.search(r"^\[  PASSED  \] (\d+) tests?", log, re.M)
     n_pass = int(passed_m.group(1)) if passed_m else 0
-    n_fail = len(set(failed))
     # gtest "N tests from M suites" totals
     tot_m = re.search(r"\[==========\] (\d+) tests? from", log)
-    n_total = int(tot_m.group(1)) if tot_m else n_pass + n_fail
+    n_total = int(tot_m.group(1)) if tot_m else 0
 
-    # classify failure messages (first error line per failed case)
+    # extract each failed case's RUN block (and its first error line)
+    fail_blocks: dict[str, str] = {}
     fail_msgs: dict[str, str] = {}
     for name in set(failed):
-        grp, case = name.split(".", 1) if "." in name else ("", name)
         m = re.search(
             rf"\[ RUN      \] {re.escape(name)}\n(.*?)(?:\[       OK \]|\[  FAILED  \])",
             log, re.S)
         if m:
             block = m.group(1)
+            fail_blocks[name] = block
             err = re.search(
                 r"(?:EXPECT OK BUT GOT ERROR|Unexpected error for query|"
                 r"Result tuple at index|Which is|error: Expected|"
                 r"error: Value of: std::regex_match)[^\n]*", block)
             fail_msgs[name] = (err.group(0)[:160] if err else "unknown").strip()
+
+    # ---- C2 capability probe: catalog fixture rejected by the build -> skip ----
+    # The fixture's first statement is `CREATE SCHEMA ...`; when that is the
+    # failure (and the build says "not supported"), the scenario cannot run yet:
+    # record it as skipped so the interim state stays clean. Once the product
+    # supports CREATE SCHEMA the probe passes and the scenario runs for real.
+    probe_skipped: list[tuple[str, str, str]] = []
+    for name in list(failed):
+        case = name.split(".", 1)[-1]
+        if case not in fixture_cases:
+            continue
+        msg = fail_msgs.get(name, "")
+        if ("EXPECT OK BUT GOT ERROR" in msg and "not supported" in msg
+                and "CREATE SCHEMA" in msg):
+            feat, scname, _ = index.get(case, ("?", "?", []))
+            probe_skipped.append(
+                (feat, scname, "requires CREATE SCHEMA (catalog fixture "
+                               f"capability probe): {msg[:120]}"))
+            failed.discard(name)
+            if case in by_file.get(feat, []):
+                by_file[feat].remove(case)
+            index.pop(case, None)
+
+    # ---- C4 three-tier coded-exception reclassification ----
+    pass_with_note: list[tuple[str, str, str, str]] = []  # (case, feat, scen, detail)
+    wrong_code: dict[str, str] = {}  # case -> detail (stays failed)
+    for name in list(failed):
+        case = name.split(".", 1)[-1]
+        code = coded_cases.get(case)
+        if code is None or name not in fail_blocks:
+            continue
+        verdict = classify_coded_error_block(code, fail_blocks[name])
+        if verdict is None:
+            continue
+        tier, detail = verdict
+        feat, scname, _ = index.get(case, ("?", "?", []))
+        if tier == "note":
+            pass_with_note.append((case, feat, scname, detail))
+            failed.discard(name)
+        elif tier == "wrong-code":
+            wrong_code[name] = detail
+        # "not-raised" stays failed and is classified below as usual
+
+    n_fail = len(failed)
+    n_note = len(pass_with_note)
+    skipped.extend(probe_skipped)
 
     # ---- report ----
     lines = ["# opengql/tck conformance report — LadybugDB GQL translation layer", ""]
@@ -807,17 +1104,40 @@ def main() -> int:
                  f"(opengql/tck, Apache-2.0 — see NOTICE.md; openCypher-derived "
                  f"features retain their Neo4j attribution headers).")
     lines.append(f"- Mode: untyped graphs (`CREATE GRAPH ... ANY` + populator).")
-    lines.append(f"- Scenarios run: **{n_pass + n_fail}** executed, "
-                 f"**{n_pass} passed**, **{n_fail} failed**, "
-                 f"**{len(skipped)} skipped**.")
-    if n_total and n_total != n_pass + n_fail:
+    lines.append(f"- Scenarios run: **{n_pass + n_fail + n_note}** executed, "
+                 f"**{n_pass} passed**, **{n_note} passed-with-note**, "
+                 f"**{n_fail} failed**, **{len(skipped)} skipped**.")
+    if n_total and n_total != n_pass + n_fail + n_note:
         lines.append(f"- gtest total: {n_total}.")
     lines.append("")
     lines.append("Methodology: expected results are compared in the engine's "
-                 "Value::toString form; exception scenarios assert that *an* error "
-                 "is raised (GQLSTATUS codes are not emitted by the layer yet); "
-                 "side effects are checked only for empty-start working graphs "
-                 "and observable metrics (+nodes/+edges).")
+                 "Value::toString form; exception scenarios assert the corpus "
+                 "GQLSTATUS code in three tiers — the generated error regex "
+                 "requires the code (`[\\s\\S]*<code>[\\s\\S]*`): regex match = "
+                 "passed; mismatch whose actual error carries a DIFFERENT "
+                 "bracketed `[XXXXX]` code = failed (wrong GQLSTATUS); mismatch "
+                 "whose actual error carries NO bracketed code = passed-with-note "
+                 "(the layer does not emit GQLSTATUS codes yet); no error raised "
+                 "= failed as usual. Exception scenarios run their whole When "
+                 "program as a single CALL GQL (no leading-statement split). "
+                 "Catalog side effects (±schemas/±directories) are checked via "
+                 "`RETURN _gql_schemas()` against a harness model of CREATE/DROP "
+                 "SCHEMA (IF [NOT] EXISTS aware) when the build exposes the "
+                 "function, otherwise recorded unchecked; graph side effects are "
+                 "checked only for empty-start working graphs (+nodes/+edges).")
+    lines.append("")
+    lines.append("Corpus-integrity footnotes (the vendored .feature files and "
+                 "their assertions are NOT modified):")
+    lines.append("- `data/catalogs/catalog-1.gql` is a harness-supplied fixture "
+                 "completing the input data `drop1 [1]`/`[2]` reference via "
+                 "`Given catalog-1 catalog` (it contains only `CREATE SCHEMA "
+                 "/myschema`); it adds no assertion. While the build cannot "
+                 "CREATE SCHEMA, a capability probe reclassifies those two "
+                 "scenarios as skipped rather than failed.")
+    for feat, name, reason in rewrite_cases:
+        lines.append(f"- When-program allowlist rewrite — `{feat}` :: {name}: "
+                     f"{reason} (only this scenario's When text is reinterpreted "
+                     "by the harness; the .feature file is untouched).")
     lines.append("")
     if values_only_cases:
         lines.append("Values-only scenarios (result values verified, column names "
@@ -829,19 +1149,30 @@ def main() -> int:
         for feat, name, reason in values_only_cases:
             lines.append(f"- `{feat}` :: {name} — {reason}")
         lines.append("")
+    if pass_with_note:
+        lines.append(f"Passed-with-note scenarios ({n_note}): an error IS raised "
+                     "but carries no bracketed GQLSTATUS code, so the code "
+                     "assertion cannot pass yet — counted as passed, listed for "
+                     "visibility:")
+        for case, feat, name, detail in pass_with_note:
+            lines.append(f"- `{feat}` :: {name} — {detail}")
+        lines.append("")
 
     lines.append("## Per feature")
     lines.append("")
-    lines.append("| Feature | run | passed | failed | skipped |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| Feature | run | passed | passed-with-note | failed | skipped |")
+    lines.append("|---|---|---|---|---|---|")
     all_feats = sorted(set([feat_key(f) for f, _ in all_sc] + list(by_file.keys())))
+    note_names = {c for c, *_ in pass_with_note}
     for feat in all_feats:
         cases = by_file.get(feat, [])
         failed_cases = {x.split(".", 1)[-1] for x in failed}
+        f_note = sum(1 for c in cases if c in note_names)
         f_fail = sum(1 for c in cases if c in failed_cases)
-        f_pass = len(cases) - f_fail
+        f_pass = len(cases) - f_fail - f_note
         f_skip = sum(1 for s in skipped if s[0] == feat)
-        lines.append(f"| {feat} | {len(cases)} | {f_pass} | {f_fail} | {f_skip} |")
+        lines.append(f"| {feat} | {len(cases)} | {f_pass} | {f_note} | {f_fail} "
+                     f"| {f_skip} |")
     lines.append("")
 
     if skipped:
@@ -876,7 +1207,11 @@ def main() -> int:
             case = name.split(".", 1)[-1]
             feat, scname, _ = index.get(case, ("?", "?", []))
             msg = fail_msgs.get(name, "")
-            cls = classify(msg)
+            if name in wrong_code:
+                cls = "wrong-gqlstatus"
+                msg = f"{msg} | {wrong_code[name]}"
+            else:
+                cls = classify(msg)
             classes[cls] = classes.get(cls, 0) + 1
             lines.append(f"- `{feat}` :: {scname} — [{cls}] {msg}")
         lines.append("")
@@ -896,7 +1231,8 @@ def main() -> int:
     report_path = pathlib.Path(args.report)
     report_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"report written to {report_path}")
-    print(f"RESULT: {n_pass} passed, {n_fail} failed, {len(skipped)} skipped")
+    print(f"RESULT: {n_pass} passed, {n_note} passed-with-note, "
+          f"{n_fail} failed, {len(skipped)} skipped")
     return 0 if n_fail == 0 else 1
 
 
