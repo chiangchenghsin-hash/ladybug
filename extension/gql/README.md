@@ -100,6 +100,15 @@ columns is unchanged. Heterogeneous / nested-list `FOR` sources are wrapped
 element-wise in `_gql_to_json(ANY) → JSON` so their element types survive
 LadybugDB's list homogenization (see difference 17).
 
+GQL `SUM`/`AVG` likewise translate to the in-extension aggregates
+`_gql_sum`/`_gql_avg`. Typed inputs produce exactly what native `SUM`/`AVG`
+produce (INT128/UINT128/DOUBLE, display included — the parity tests compare
+against the native aggregates directly); JSON inputs (ANY-graph properties,
+`_gql_to_json`-wrapped values) return JSON that preserves int-ness (`sum` of
+integers prints `75`, of mixed numbers `3.5`; `avg` is always real, `2.0`).
+Nulls (SQL NULL and JSON `null`) are skipped; empty groups are NULL, matching
+LadybugDB's native `SUM`.
+
 ### Known semantic differences
 
 1. **REMOVE property** is approximated as `SET n.prop = NULL` — on LadybugDB's
@@ -214,8 +223,25 @@ LadybugDB's list homogenization (see difference 17).
     Cypher orderability CIP for those three classes; the TCK is treated as the
     executable spec here. Structurally distinct JSON objects are un-orderable
     and raise a loud error rather than guessing. Numeric aggregates over
-    **ANY-graph JSON property columns** (e.g. `sum(p.age)`) are still rejected
-    by the binder (no JSON overload) — known gap, see `docs/gql_consult_brief.md` Q2.
+    **ANY-graph JSON property columns** (e.g. `sum(p.age)`) work through the
+    same extension aggregates (`_gql_sum`/`_gql_avg`, see the function-mapping
+    note above) — that former gap is closed.
+21. **Comparison and ordering over ANY-graph JSON property columns use
+    text semantics in the engine** — a known red-line gap, currently open.
+    JSON properties are stored as JSON *text*, and the engine's operators
+    compare/sort that text: `WHERE p.age >= 100` matches ages `33`, `9`,
+    `33.5` (because `'33' >= '100'` lexicographically) and misses nothing it
+    should — it is simply the wrong order; `ORDER BY p.age` sorts `10, 100,
+    33, 33.5, 9`; `p.age = 33.0` is false against the stored `33` (text
+    inequality). Probed 2026-10-01 (text-order sentinels 9 vs 100). Arithmetic
+    is *not* silent-wrong: the engine coerces by the other operand's type and
+    raises a loud ConversionException on mismatch (`p.age + 1` on age `33.5`
+    fails loudly trying INT64), and `CAST(33.5 AS INT64)` fails loudly rather
+    than truncating. The comparison/order gap is a value-model mismatch that
+    predates the translation layer; a total-order comparison bridge is being
+    designed (`docs/gql_consult_q2.md` Q2-A). A blanket rejection of
+    comparisons on ANY graphs is not viable — the TCK expression suite runs on
+    ANY graphs and passes today where text order happens to equal value order.
 
 ### Graph type → schema mapping
 
@@ -258,21 +284,24 @@ Measured on 2026-10-01 (untyped-graph mode; `python extension/gql/test/tck/run_t
 | Feature area | run | passed | failed | skipped |
 |---|---|---|---|---|
 | expressions / boolean | 149 | 149 | 0 | 1 |
-| expressions / aggregation | 16 | 12 | 4 | 0 |
+| expressions / aggregation | 16 | 13 | 3 | 0 |
 | catalog / create graph types | 7 | 5 | 2 | 8 |
 | catalog / create graphs | 8 | 4 | 4 | 0 |
 | catalog / create+drop schemas | 14 | 1 | 13 | 2 |
 | debug | 1 | 0 | 1 | 0 |
-| **total** | **195** | **171** | **24** | **11** of 206 |
+| **total** | **195** | **172** | **23** | **11** of 206 |
 
 Failure classes: rejected-by-layer 19 (schema namespaces incl. one
 transaction-wrapped case, `LIKE`/`AS COPY OF`, multi-label node types,
 qualified graph names — unsupported by design), parse-error 4 (TCK setup uses
 openCypher `CREATE (...)`/`UNWIND`, which is not GQL — GQL writes `INSERT`/`FOR`;
-plus one `CREATE GRAPH ANY AS COPY OF` grammar ambiguity), other 1 (`sum()` over
-an ANY-graph JSON property column — the binder has no JSON aggregate overload;
-see difference 20 / consult brief Q2). All failures are loud: the layer has
-**no silent wrong-answer class**. See `test/tck/REPORT.md` for the per-scenario listing and methodology
+plus one `CREATE GRAPH ANY AS COPY OF` grammar ambiguity). All failures are
+loud: the layer has **no silent wrong-answer class**. One passing scenario
+(`Aggregation3` [1]) is checked values-only — the vendored corpus's expected
+header row contradicts its own query (`n.name|sum(n.num)` vs `p.name,
+sum(p.age)`), so no implementation could pass a column-name check on it; the
+feature files are left unmodified and REPORT.md discloses the exception.
+See `test/tck/REPORT.md` for the per-scenario listing and methodology
 (exception scenarios assert that *an* error is raised — GQLSTATUS codes are not
 emitted yet; side effects are checked only where observable).
 

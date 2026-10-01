@@ -1,12 +1,14 @@
 #include "function/gql_json_functions.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <memory>
 #include <type_traits>
 
 #include "common/assert.h"
+#include "common/exception/binder.h"
 #include "common/exception/runtime.h"
 #include "common/json_utils.h"
 #include "common/type_utils.h"
@@ -14,6 +16,7 @@
 #include "common/types/types.h"
 #include "common/vector/value_vector.h"
 #include "function/aggregate_function.h"
+#include "function/arithmetic/add.h"
 #include "function/comparison/comparison_functions.h"
 #include "function/scalar_function.h"
 #include "yyjson.h"
@@ -560,6 +563,402 @@ function_set buildMinMaxFunctionSet(const std::string& funcName) {
     return result;
 }
 
+// =============================================================================
+// _GQL_SUM / _GQL_AVG(ANY) -> <bound result type>
+// =============================================================================
+// Extended GQL numeric aggregates. They take ANY so JSON columns (ANY-graph
+// dynamic properties) can aggregate where the native SUM/AVG overloads reject
+// JSON outright (`Function SUM did not receive correct arguments: Actual:
+// (JSON)`). bindFunc pins the result type from the argument:
+//
+//   signed integers (incl. SERIAL) -> SUM: INT128, AVG: DOUBLE
+//   unsigned integers              -> SUM: UINT128, AVG: DOUBLE
+//   FLOAT / DOUBLE                 -> SUM: DOUBLE, AVG: DOUBLE
+//   JSON                           -> SUM: JSON, AVG: JSON (JSON number text)
+//   anything else                  -> rejected loudly at bind time
+//
+// Value semantics mirror the engine's SumFunction/AvgFunction
+// (src/include/function/aggregate/sum.h, avg.h): SQL NULLs and JSON `null`
+// contribute nothing, multiplicity re-adds the value in a loop (never a
+// multiply — same rounding as the native sum), an empty or all-NULL group
+// keeps AggregateStateWithNull.isNull so the framework writes NULL (never a
+// synthesized 0), and AVG divides by the multiplicity-weighted count of
+// contributing values. JSON numbers accumulate with full integer tracking:
+// integers stay exact in an int128_t (every uint64 yyjson can emit fits),
+// reals go to a double and set sawReal — a sum that never saw a real keeps
+// exact integer text (`75`, `-3`), a mixed sum renders as a JSON real
+// (`2.0`, `37.5`), and an AVG is always a JSON real. Non-numeric JSON,
+// unparsable text and non-finite results throw with the `_GQL_SUM/_GQL_AVG:`
+// prefix instead of guessing.
+
+std::string sumAvgUnsupportedTypeError(const LogicalType& type) {
+    return std::format("_GQL_SUM/_GQL_AVG: unsupported input type {}",
+        LogicalTypeUtils::toString(type.getLogicalTypeID()));
+}
+
+// Renders a double the way yyjson writes JSON reals: shortest round-trip
+// digits with an explicit fraction for integral values (`2.0`, not `2`;
+// `3.5` stays `3.5`, never printf padding). Non-finite sums have no JSON
+// representation and fail loudly rather than emitting text that only breaks
+// downstream parsers.
+std::string formatJsonReal(double val) {
+    if (!std::isfinite(val)) {
+        throw RuntimeException(std::format(
+            "_GQL_SUM/_GQL_AVG: non-finite value cannot be encoded as JSON: {}", val));
+    }
+    auto text = std::format("{}", val);
+    if (text.find_first_of(".e") == std::string::npos) {
+        text += ".0";
+    }
+    return text;
+}
+
+// Local mirrors of CastInt128ToFloating / CastUint128ToFloating
+// (src/common/types/int128_t.cpp): AVG must fold an integer sum exactly the
+// way the engine's native AvgState::finalize does for the same values, and
+// the Int128_t helper class is not part of the extension-facing API surface.
+template<typename REAL_T>
+REAL_T int128ToFloating(int128_t input) {
+    if (input.high == -1) {
+        // The default branch's (2^64 - 1) multiplier overshoots by one for
+        // values in [-2^64, -1]; negate the low half exactly instead.
+        return -static_cast<REAL_T>(UINT64_MAX - input.low) - 1;
+    }
+    return static_cast<REAL_T>(input.high) * static_cast<REAL_T>(UINT64_MAX) +
+           static_cast<REAL_T>(input.low);
+}
+
+template<typename REAL_T>
+REAL_T uint128ToFloating(uint128_t input) {
+    return static_cast<REAL_T>(input.high) * static_cast<REAL_T>(UINT64_MAX) +
+           static_cast<REAL_T>(input.low);
+}
+
+// Aggregate state for _GQL_SUM/_GQL_AVG.
+//
+// Contract (see AggregateState in function/aggregate_function.h): states are
+// memcpy'd into factorized tables and their destructors never run, so every
+// member must be trivially destructible — no strings live here, JSON text is
+// parsed per value and only accumulators are kept. `storedType` is the bound
+// argument's logical type: one query binds one type (bindFunc rejects
+// everything else), so it is constant for the lifetime of a non-null state;
+// ANY only ever appears while `isNull` is still true. Unused accumulators
+// stay zero for the input family in play, which makes combine a plain
+// field-wise add. `count` and `sawReal` are read only by their own
+// instantiation (AVG and JSON respectively).
+template<bool IS_AVG>
+struct GqlSumAvgState : public AggregateStateWithNull {
+    LogicalTypeID storedType = LogicalTypeID::ANY;
+    int128_t intSum{};    // signed int inputs; JSON integer part
+    uint128_t uintSum{};  // unsigned int inputs
+    double dblSum{};      // FLOAT/DOUBLE inputs; JSON real part
+    uint64_t count{};     // multiplicity-weighted count of contributing values (AVG)
+    bool sawReal{};       // JSON: a real number was accumulated
+
+    uint32_t getStateSize() const override { return sizeof(*this); }
+    void writeToVector(ValueVector* outputVector, uint64_t pos) override;
+};
+
+template<bool IS_AVG>
+void GqlSumAvgState<IS_AVG>::writeToVector(ValueVector* outputVector, uint64_t pos) {
+    if (storedType == LogicalTypeID::ANY) {
+        throw RuntimeException("_GQL_SUM/_GQL_AVG: no value to materialize");
+    }
+    if (storedType == LogicalTypeID::JSON) {
+        std::string text;
+        if constexpr (IS_AVG) {
+            // GQL/Cypher avg is always a real, even over whole numbers.
+            text = formatJsonReal(static_cast<double>(
+                (int128ToFloating<long double>(intSum) + static_cast<long double>(dblSum)) /
+                static_cast<long double>(count)));
+        } else if (sawReal) {
+            // Mixed int/real sums fold the exact integer part in once — the
+            // same conversion the engine's own int128 casts use.
+            text = formatJsonReal(int128ToFloating<double>(intSum) + dblSum);
+        } else {
+            // All-integer sums keep exact decimal text (`75`, `-3`), never
+            // routed through double.
+            text = TypeUtils::toString(intSum);
+        }
+        StringVector::addString(outputVector, pos, text);
+        return;
+    }
+    // Typed results follow the type bindFunc pinned: AVG is always DOUBLE,
+    // SUM keeps the accumulator matching the input family (SumState writes
+    // its accumulator the same way, src/include/function/aggregate/sum.h:14).
+    TypeUtils::visit(LogicalType(storedType),
+        [&]<SignedIntegerTypes T>(T) {
+            if constexpr (IS_AVG) {
+                outputVector->setValue(pos, static_cast<double>(
+                    int128ToFloating<long double>(intSum) / static_cast<long double>(count)));
+            } else {
+                outputVector->setValue(pos, intSum);
+            }
+        },
+        [&]<UnsignedIntegerTypes T>(T) {
+            if constexpr (IS_AVG) {
+                outputVector->setValue(pos, static_cast<double>(
+                    uint128ToFloating<long double>(uintSum) / static_cast<long double>(count)));
+            } else {
+                outputVector->setValue(pos, uintSum);
+            }
+        },
+        [&]<FloatingPointTypes T>(T) {
+            if constexpr (IS_AVG) {
+                // Same expression as AvgState<FloatingPointTypes>::finalize
+                // (avg.h:34): sum / count in double.
+                outputVector->setValue(pos, dblSum / count);
+            } else {
+                outputVector->setValue(pos, dblSum);
+            }
+        },
+        [&](auto) -> void {
+            throw RuntimeException(sumAvgUnsupportedTypeError(LogicalType(storedType)));
+        });
+}
+
+// Parses one JSON input value (same stringToJsonNoError path as
+// compareJsonTexts, inline yyjson accessors like compareJsonNumbers) and
+// folds it into the state. JSON `null` means "no value": a group of only
+// JSON nulls stays NULL, matching the SQL NULL path. Multiplicity re-adds
+// the value exactly like SumFunction::updateSingleValue (sum.h:42-48), and
+// the first contribution assigns rather than adds so a lone -0.0 keeps its
+// sign. Non-numeric content throws loudly — never a silent wrong answer.
+template<bool IS_AVG>
+void accumulateJson(GqlSumAvgState<IS_AVG>* state, const string_t& value, uint64_t multiplicity) {
+    auto doc = stringToJsonNoError(
+        std::string(reinterpret_cast<const char*>(value.getData()), value.len));
+    if (doc.ptr == nullptr) {
+        throw RuntimeException(
+            std::format("_GQL_SUM/_GQL_AVG: invalid JSON value: {}", jsonTextSnippet(value)));
+    }
+    auto* root = yyjson_doc_get_root(doc.ptr);
+    if (yyjson_is_null(root)) {
+        return;
+    }
+    if (yyjson_is_real(root)) {
+        auto val = yyjson_get_real(root);
+        for (uint64_t j = 0; j < multiplicity; ++j) {
+            if (state->isNull) {
+                state->dblSum = val;
+                state->isNull = false;
+            } else {
+                Add::operation(state->dblSum, val, state->dblSum);
+            }
+            state->sawReal = true;
+        }
+    } else if (yyjson_is_int(root)) {
+        // yyjson only emits uint64 or sint64 integers with default read
+        // flags; both fit an int128, so integer JSON accumulates exactly.
+        int128_t val = yyjson_is_uint(root) ? int128_t(yyjson_get_uint(root)) :
+                                              int128_t(yyjson_get_sint(root));
+        for (uint64_t j = 0; j < multiplicity; ++j) {
+            if (state->isNull) {
+                state->intSum = val;
+                state->isNull = false;
+            } else {
+                Add::operation(state->intSum, val, state->intSum);
+            }
+        }
+    } else {
+        throw RuntimeException(std::format(
+            "_GQL_SUM/_GQL_AVG: non-numeric JSON value in aggregate: {}", jsonTextSnippet(value)));
+    }
+    if constexpr (IS_AVG) {
+        state->count += multiplicity;
+    }
+}
+
+template<bool IS_AVG>
+void updateSumAvgSingle(GqlSumAvgState<IS_AVG>* state, ValueVector* input, uint32_t pos,
+    uint64_t multiplicity) {
+    if (input->isNull(pos)) {
+        return;
+    }
+    const auto typeID = input->dataType.getLogicalTypeID();
+    if (state->isNull) {
+        state->storedType = typeID;
+    } else if (state->storedType != typeID) {
+        // Unreachable through the binder (bindFunc pins one concrete type per
+        // query); guarded anyway in the same shape as _GQL_MAX/_GQL_MIN.
+        throw RuntimeException(std::format("_GQL_SUM/_GQL_AVG: cannot aggregate {} with {}",
+            LogicalTypeUtils::toString(state->storedType), LogicalTypeUtils::toString(typeID)));
+    }
+    if (typeID == LogicalTypeID::JSON) {
+        accumulateJson(state, input->getValue<string_t>(pos), multiplicity);
+        return;
+    }
+    // Typed inputs accumulate into the family's wide accumulator, mirroring
+    // SumFunction::updateSingleValue: loop multiplicity times, assigning on
+    // the first contribution and Add-ing after (sum.h:42-48). The fallback
+    // only fires for types bindFunc already rejected — kept so an
+    // unsupported value fails loudly instead of silently skipping.
+    TypeUtils::visit(input->dataType,
+        [&]<SignedIntegerTypes T>(T) {
+            T val = input->getValue<T>(pos);
+            for (uint64_t j = 0; j < multiplicity; ++j) {
+                if (state->isNull) {
+                    state->intSum = val;
+                    state->isNull = false;
+                } else {
+                    Add::operation(state->intSum, val, state->intSum);
+                }
+            }
+        },
+        [&]<UnsignedIntegerTypes T>(T) {
+            T val = input->getValue<T>(pos);
+            for (uint64_t j = 0; j < multiplicity; ++j) {
+                if (state->isNull) {
+                    state->uintSum = val;
+                    state->isNull = false;
+                } else {
+                    Add::operation(state->uintSum, val, state->uintSum);
+                }
+            }
+        },
+        [&]<FloatingPointTypes T>(T) {
+            T val = input->getValue<T>(pos);
+            for (uint64_t j = 0; j < multiplicity; ++j) {
+                if (state->isNull) {
+                    state->dblSum = val;
+                    state->isNull = false;
+                } else {
+                    Add::operation(state->dblSum, val, state->dblSum);
+                }
+            }
+        },
+        [&](auto) -> void {
+            throw RuntimeException(sumAvgUnsupportedTypeError(input->dataType));
+        });
+    if constexpr (IS_AVG) {
+        // AvgFunction counts each non-null value's multiplicity (avg.h:75).
+        state->count += multiplicity;
+    }
+}
+
+template<bool IS_AVG>
+void sumAvgUpdateAll(uint8_t* state_, ValueVector* input, uint64_t multiplicity,
+    InMemOverflowBuffer* /*overflowBuffer*/) {
+    DASSERT(!input->state->isFlat());
+    auto* state = reinterpret_cast<GqlSumAvgState<IS_AVG>*>(state_);
+    input->forEachNonNull(
+        [&](auto pos) { updateSumAvgSingle<IS_AVG>(state, input, pos, multiplicity); });
+}
+
+template<bool IS_AVG>
+void sumAvgUpdatePos(uint8_t* state_, ValueVector* input, uint64_t multiplicity, uint32_t pos,
+    InMemOverflowBuffer* /*overflowBuffer*/) {
+    // The caller filters nulls, but filtering here too is harmless (same as
+    // _GQL_MAX/_GQL_MIN's updatePos).
+    updateSumAvgSingle<IS_AVG>(reinterpret_cast<GqlSumAvgState<IS_AVG>*>(state_), input, pos,
+        multiplicity);
+}
+
+// Field-wise merge shaped like SumFunction::combine (sum.h:52-65): null
+// short-circuits, a null receiver adopts the other state wholesale, and two
+// live states add. Accumulators the input family never touched are zero on
+// both sides, so adding all of them is safe; sawReal and count merge with
+// OR / + so a JSON sum stays exact-integer on both sides and a mixed sum
+// keeps its real flag across partitions.
+template<bool IS_AVG>
+void sumAvgCombine(uint8_t* state_, uint8_t* otherState_,
+    InMemOverflowBuffer* /*overflowBuffer*/) {
+    auto* other = reinterpret_cast<GqlSumAvgState<IS_AVG>*>(otherState_);
+    if (other->isNull) {
+        return;
+    }
+    auto* state = reinterpret_cast<GqlSumAvgState<IS_AVG>*>(state_);
+    if (state->isNull) {
+        state->storedType = other->storedType;
+        state->intSum = other->intSum;
+        state->uintSum = other->uintSum;
+        state->dblSum = other->dblSum;
+        state->count = other->count;
+        state->sawReal = other->sawReal;
+        state->isNull = false;
+        return;
+    }
+    if (state->storedType != other->storedType) {
+        throw RuntimeException(std::format("_GQL_SUM/_GQL_AVG: cannot combine {} with {}",
+            LogicalTypeUtils::toString(state->storedType),
+            LogicalTypeUtils::toString(other->storedType)));
+    }
+    Add::operation(state->intSum, other->intSum, state->intSum);
+    Add::operation(state->uintSum, other->uintSum, state->uintSum);
+    Add::operation(state->dblSum, other->dblSum, state->dblSum);
+    state->count += other->count;
+    state->sawReal = state->sawReal || other->sawReal;
+}
+
+template<bool IS_AVG>
+std::unique_ptr<AggregateState> sumAvgInitialize() {
+    return std::make_unique<GqlSumAvgState<IS_AVG>>();
+}
+
+// Same shape as bindAggregate above: pin the definition's parameter to the
+// concrete argument type and return the result type from the matrix in the
+// section header. Unresolved ANY placeholders (prepared statements) keep an
+// ANY result and are re-bound with concrete types before execution — the
+// AggregateFunctionExpression::cast path _GQL_MAX/_GQL_MIN also relies on.
+// Every concrete type outside the matrix fails loudly here: the ANY wildcard
+// matched the overload, so this check is the only gate before execution.
+template<bool IS_AVG>
+std::unique_ptr<FunctionBindData> bindSumAvg(const ScalarBindFuncInput& input) {
+    DASSERT(input.arguments.size() == 1);
+    auto* aggFuncDefinition = reinterpret_cast<AggregateFunction*>(input.definition);
+    const auto& argType = input.arguments[0]->dataType;
+    aggFuncDefinition->parameterTypeIDs[0] = argType.getLogicalTypeID();
+    if (argType.getLogicalTypeID() == LogicalTypeID::ANY) {
+        return std::make_unique<FunctionBindData>(argType.copy());
+    }
+    LogicalTypeID resultTypeID;
+    switch (argType.getLogicalTypeID()) {
+    case LogicalTypeID::JSON:
+        resultTypeID = LogicalTypeID::JSON;
+        break;
+    case LogicalTypeID::INT8:
+    case LogicalTypeID::INT16:
+    case LogicalTypeID::INT32:
+    case LogicalTypeID::INT64:
+    case LogicalTypeID::INT128:
+    case LogicalTypeID::SERIAL:
+        resultTypeID = IS_AVG ? LogicalTypeID::DOUBLE : LogicalTypeID::INT128;
+        break;
+    case LogicalTypeID::UINT8:
+    case LogicalTypeID::UINT16:
+    case LogicalTypeID::UINT32:
+    case LogicalTypeID::UINT64:
+    case LogicalTypeID::UINT128:
+        resultTypeID = IS_AVG ? LogicalTypeID::DOUBLE : LogicalTypeID::UINT128;
+        break;
+    case LogicalTypeID::FLOAT:
+    case LogicalTypeID::DOUBLE:
+        // Matches appendSumOrAvgFuncs: floats sum as DOUBLE, avg is always
+        // DOUBLE (src/function/aggregate_function.cpp:32-59).
+        resultTypeID = LogicalTypeID::DOUBLE;
+        break;
+    default:
+        throw BinderException(sumAvgUnsupportedTypeError(argType));
+    }
+    return std::make_unique<FunctionBindData>(LogicalType(resultTypeID));
+}
+
+template<bool IS_AVG>
+function_set buildSumAvgFunctionSet(const std::string& funcName) {
+    function_set result;
+    // Matching is exact on isDistinct (built_in_function_utils.cpp), so both
+    // overloads are mandatory; the executor's distinct hash table does the
+    // deduplication, the callbacks never see repeats.
+    for (auto isDistinct : std::vector<bool>{true, false}) {
+        result.push_back(std::make_unique<AggregateFunction>(funcName,
+            std::vector<LogicalTypeID>{LogicalTypeID::ANY}, LogicalTypeID::ANY /* bindFunc wins */,
+            sumAvgInitialize<IS_AVG>, sumAvgUpdateAll<IS_AVG>, sumAvgUpdatePos<IS_AVG>,
+            sumAvgCombine<IS_AVG>, finalize /* no-op, shared with _GQL_MAX/_GQL_MIN above */,
+            isDistinct, bindSumAvg<IS_AVG>, nullptr /* paramRewriteFunc */));
+    }
+    return result;
+}
+
 } // namespace
 
 function_set GqlMaxFunction::getFunctionSet() {
@@ -568,6 +967,14 @@ function_set GqlMaxFunction::getFunctionSet() {
 
 function_set GqlMinFunction::getFunctionSet() {
     return buildMinMaxFunctionSet<false>(name);
+}
+
+function_set GqlSumFunction::getFunctionSet() {
+    return buildSumAvgFunctionSet<false>(name);
+}
+
+function_set GqlAvgFunction::getFunctionSet() {
+    return buildSumAvgFunctionSet<true>(name);
 }
 
 } // namespace gql_extension

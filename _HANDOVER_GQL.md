@@ -63,13 +63,14 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 92/92 全绿**（2026-10-01 Phase 8 Q1 收工）：
+**✅ 101/101 全绿**（2026-10-01 Phase 9 Q2 聚合收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
 **orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
+**jsonagg 9**（Q2 双跑：ANY 图 sum/avg/max/min、混合保型、空组 NULL、DISTINCT、乘数、native SUM 对拍、非数值响亮拒）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
-**TCK 合规：206 场景 = 171 过 / 24 挂 / 11 跳**（明细 `extension/gql/test/tck/REPORT.md`）。
+**TCK 合规：206 场景 = 172 过 / 23 挂 / 11 跳**（明细 `extension/gql/test/tck/REPORT.md`）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
 - **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
@@ -203,6 +204,39 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
 - 实现分工：3 个 general-purpose subagent 并行（函数/翻译/harness+测试），集成编译一次过、
   92/92 首跑全绿。测试包纠正了任务书笔误（字符串 max 应为 `c`——TCK [8] 钉代码序）。
 - **勿重复调研**：扩展聚合注册链/API 面见 `docs/gql_consult_brief.md` §8（双 subagent 核验）。
+
+### Phase 9（Q2 聚合桥）交付记录（2026-10-01，4 subagent 并行 + 集成收网）
+
+- **扩展聚合 `_GQL_SUM`/`_GQL_AVG`**（gql_json_functions.{h,cpp}，+407 行）：ANY 参数 +
+  bindFunc 钉型——整数族 SUM→INT128/UINT128、浮点→DOUBLE、AVG 恒 DOUBLE（与原生
+  `appendSumOrAvgFuncs` 对齐）；**JSON 进 JSON 出保型**（SUM 全整数→`75`、含实数→`3.5`/
+  整值 real 补 `.0`；AVG 恒 real `2.0`）。multiplicity 循环加（抄 SumFunction）；空组/全 NULL
+  →NULL（AggregateStateWithNull，非 Cypher 的 0）；跳过 SQL NULL 与 JSON `null`；非数值/
+  非有限→响亮抛。**bindFunc 同样钉参数类型**（ANY 占位延迟），SERIAL 纳入、DECIMAL 拒
+  （对齐原生注册表）。DISTINCT 去重在 executor（distinct hash table），state 不去重、
+  仅注册 isDistinct 双重载。
+- **翻译 splice 扩容**（gql_transformer.cpp）：`rewriteMaxMinAggCalls`→`rewriteGqlAggCalls`，
+  call-position 词表 `max|min|sum|avg` → `_gql_*`（iequals，字面量/词边界/点号属性安全）；
+  列名保护链验证无污染（`` RETURN _gql_sum(p.age) AS `sum(p.age)` ``）。
+- **jsonagg.test 9 组双跑**：含**与 native SUM/AVG 直接对拍**（typed 显示/空组 NULL 一致性的
+  硬证明）、笛卡尔乘数钉（(33+42)*3=225）、JSON 保型显示钉（`3` 非 `3.0`）、非数值响亮拒钉。
+  首跑全绿。
+- **TCK 171→172**：Aggregation3 [1]（`sum(p.age)` ANY 图 JSON 属性）翻绿。语料期望列名
+  自相矛盾（`n.name|sum(n.num)` vs 查询 `p.name, sum(p.age)`——无实现能过列名校验）：
+  **不改 vendored 语料**，run_tck.py 加 `HEADER_DRIFT_SCENARIOS` values-only 例外 + REPORT
+  methodology 脚注透明披露。失败构成 23 = rejected 19 + parse-error 4 + **other 0**。
+- **红线探机结论（重要，勿重复探）**：ANY 图 JSON 属性的**比较/排序=文本序=静默错**
+  （`>=100` 命中 33/9/33.5；ORDER BY 出 10,100,33,33.5,9；`33 = 33.0` False）；算术**无静默错**
+  （按另一侧类型数值化，不匹配响亮 ConversionException，如 `"33.5"→INT64`）；CAST 不静默截断。
+  属性相等是 `EQUALS(prop, CAST(literal, JSON))` 文本等（同形字面量碰巧对）。
+  **粗粒度响亮拒比较被 TCK 约束排除**（TCK expressions 149 场景跑在 ANY 图上、靠幸运文本序全绿，
+  一刀切拒会砍掉 ~50 绿场景）——修法必须是语义正确的全序比较桥，分叉与咨询中，
+  见 `docs/gql_consult_q2.md` Q2-A（六算子 `_gql_gt` 系 + ORDER BY 多键 rank/numkey/strkey）。
+  README 已记差异 #21（红线缺口显式挂账）。
+- **探机工具坑（二连撞）**：subagent 连续两次撞 32000 output token 上限（单次大 Write/大报告）；
+  任务书要钉「小步写、报告 ≤40 行」。e2e 测试文件名**下划线开头不注册**（`_q2probe.test`
+  0 tests，改名 `q2probe.test` 才进组）；GQL **无 `IN` 谓词**（`WHERE x IN [...]` parse 拒）；
+  GQL INSERT **同变量名多 pattern 会合并成单节点**（六节点探机只活一个——测试造数必须变量互异）。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

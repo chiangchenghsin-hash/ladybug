@@ -546,8 +546,13 @@ def convert_scenario(sc: Scenario) -> tuple[str | None, list[Emitted], list[str]
         for s in when_stmts[:-1]:
             emitted.append(Emitted(s, Expectation.OK))
         rows = when_rows
+        drift = header_drift_note(sc)
+        if drift:
+            # values-only: corpus header row drifted from its own query, so
+            # drop it (it cannot match any implementation's column names).
+            rows = rows[1:]
         emitted.append(Emitted(when_stmts[-1], Expectation.ROWS, rows,
-                               ordered=when_result[2], headers=True))
+                               ordered=when_result[2], headers=drift is None))
     else:
         return ("scenario has no Then result assertion", [], notes)
 
@@ -671,6 +676,27 @@ CAPABILITY_SKIP_TAGS = {
     "MaxNodeTypeKeyLabelsGTOne": "LadybugDB nodes have a single label",
 }
 
+# Scenarios whose corpus example-table header row has drifted away from the
+# corpus's own query (Q7 corpus noise): the header names columns the query
+# never projects, so NO implementation can pass -CHECK_COLUMN_NAMES on such a
+# scenario. For these the result table is emitted values-only (header row
+# dropped, no -CHECK_COLUMN_NAMES); values are still verified and a values
+# pass counts toward `passed` (disclosed in the REPORT methodology note).
+# The vendored .feature files are NOT edited. Key: (feature stem,
+# leading scenario-number token of the scenario name, e.g. "[1]").
+HEADER_DRIFT_SCENARIOS = {
+    ("Aggregation3", "[1]"): "values-only: corpus expected headers drifted "
+    "(n.name|sum(n.num) vs query p.name, sum(p.age))",
+}
+
+
+def header_drift_note(sc: Scenario) -> str | None:
+    """Reason string if this scenario's result table must be values-only."""
+    m = re.match(r"\[\d+\]", sc.name)
+    if not m:
+        return None
+    return HEADER_DRIFT_SCENARIOS.get((sc.feature, m.group(0)))
+
 
 def collect_scenarios(filter_: str | None):
     features = sorted((TCK_ROOT / "features").rglob("*.feature"))
@@ -703,6 +729,7 @@ def main() -> int:
 
     index: dict[str, tuple[str, str, list[str]]] = {}  # case -> (feature, scenario, notes)
     skipped: list[tuple[str, str, str]] = []
+    values_only_cases: list[tuple[str, str, str]] = []  # (feature, scenario, reason)
     by_file: dict[str, list[str]] = {}
 
     file_cases: dict[pathlib.Path, list[str]] = {}
@@ -727,6 +754,10 @@ def main() -> int:
         case_counter[base] = k + 1
         case = base if k == 0 else f"{base}_{k}"
         comment = f"{fpath.relative_to(TCK_ROOT)} :: {sc.name} [tags: {', '.join(sc.tags) or '-'}]"
+        drift = header_drift_note(sc)
+        if drift:
+            comment += f" -- {drift}"
+            values_only_cases.append((fk, sc.name, drift))
         out_path = GEN_DIR / f"{fk}.test"
         file_cases.setdefault(out_path, []).append(render_case(case, emitted, comment))
         index[case] = (fk, sc.name, notes)
@@ -788,6 +819,16 @@ def main() -> int:
                  "side effects are checked only for empty-start working graphs "
                  "and observable metrics (+nodes/+edges).")
     lines.append("")
+    if values_only_cases:
+        lines.append("Values-only scenarios (result values verified, column names "
+                     "NOT checked): the vendored corpus's own expected header row "
+                     "disagrees with its own query, so no implementation can pass "
+                     "-CHECK_COLUMN_NAMES on them; values are checked as-is, the "
+                     ".feature files are left unmodified, and a values match counts "
+                     "the scenario as passed:")
+        for feat, name, reason in values_only_cases:
+            lines.append(f"- `{feat}` :: {name} — {reason}")
+        lines.append("")
 
     lines.append("## Per feature")
     lines.append("")

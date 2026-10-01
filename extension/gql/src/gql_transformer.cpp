@@ -2798,8 +2798,9 @@ bool GqlToCypherTransformer::containsAggregate(antlr4::tree::ParseTree *node) {
 
 // GQL spellings that differ from LadybugDB's function catalog. Adapted from
 // Neo4j's GQLAliasFunctionNameRewriter (Apache-2.0) and re-targeted: most GQL
-// names (UPPER/LOWER/CEILING/LN/COUNT/SUM/...) already match LadybugDB, so
-// only the divergent ones are listed here.
+// names (UPPER/LOWER/CEILING/LN/COUNT/...) already match LadybugDB, so only
+// the divergent ones are listed here. (Set aggregates SUM/AVG/MAX/MIN never
+// reach this map: rewriteGqlAggCalls reroutes their call positions first.)
 // Mapping table informed by:
 //   https://github.com/neo4j/neo4j — Apache License 2.0
 static const std::pair<const char *, const char *> GQL_FUNCTION_MAP[] = {
@@ -2814,22 +2815,29 @@ static const std::pair<const char *, const char *> GQL_FUNCTION_MAP[] = {
     {"ELEMENT_ID", "internal_id"},
 };
 
-// GQL's MAX/MIN aggregates must run through the extension's GQL-total-order
-// aggregates _gql_max/_gql_min (LadybugDB's native max/min order values
-// differently across types). GQL.g4 admits MAX/MIN only as
-// generalSetFunctionType inside aggregateFunction, so in emitted text the
-// spelling max/min directly before a `(` is structurally an aggregate call.
-// Detection of what IS an aggregate stays parse-tree based
-// (collectAggregates / containsAggregate / registerAgg), so GROUP BY alias
-// keys and the source-text column aliases keep the original GQL spelling;
-// this rewrites only the call text about to be emitted. Guards that keep it
-// inside aggregate-call positions: string / quoted-identifier literals
-// (including the backtick-quoted `AS \`max(x)\`` auto-alias) are copied
-// verbatim, the word must be a whole word not preceded by `.` (property
-// reference `n.max`), and only max/min immediately followed by optional
+// GQL's MAX/MIN/SUM/AVG set aggregates must run through the extension's
+// GQL aggregates rather than LadybugDB's natives: _gql_max/_gql_min order
+// values under GQL's total order (LadybugDB's native max/min order values
+// differently across types), and _gql_sum/_gql_avg take ANY arguments with
+// JSON-preserving results for JSON inputs (typed inputs stay native-shaped).
+// GQL.g4 admits MAX/MIN/SUM/AVG only as generalSetFunctionType inside
+// aggregateFunction (valueExpressionPrimary routes those tokens straight to
+// aggregateFunction), so in emitted text the spelling max/min/sum/avg
+// directly before a `(` is structurally an aggregate call. Detection of what
+// IS an aggregate stays parse-tree based (collectAggregates /
+// containsAggregate / registerAgg), so GROUP BY alias keys and the
+// source-text column aliases keep the original GQL spelling; this rewrites
+// only the call text about to be emitted — a GQL-aggregate →
+// extension-aggregate call-position splice. Guards that keep it inside
+// aggregate-call positions: string / quoted-identifier literals (including
+// the backtick-quoted `AS \`max(x)\`` auto-alias) are copied verbatim, the
+// word must be a whole word not preceded by `.` (property reference
+// `n.max`), and only max/min/sum/avg immediately followed by optional
 // whitespace and `(` rewrites — result aliases (`AS max`) and identifiers
-// never have that shape.
-static std::string rewriteMaxMinAggCalls(const std::string &text) {
+// never have that shape. COLLECT_LIST and the percentile aggregates are not
+// spliced: COLLECT_LIST maps through GQL_FUNCTION_MAP and LadybugDB's
+// PERCENTILE* names already match.
+static std::string rewriteGqlAggCalls(const std::string &text) {
     std::string out;
     out.reserve(text.size());
     size_t i = 0;
@@ -2870,8 +2878,13 @@ static std::string rewriteMaxMinAggCalls(const std::string &text) {
                 ++j;
             }
             bool isCall = j < text.size() && text[j] == '(';
-            if (wordStart && isCall && (iequals(word, "max") || iequals(word, "min"))) {
-                out += iequals(word, "max") ? "_gql_max" : "_gql_min";
+            if (wordStart && isCall &&
+                (iequals(word, "max") || iequals(word, "min") || iequals(word, "sum") ||
+                 iequals(word, "avg"))) {
+                out += "_gql_";
+                for (char ch : word) {
+                    out += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
             } else {
                 out += word;
             }
@@ -3067,10 +3080,11 @@ std::string GqlToCypherTransformer::mapOperators(const std::string &text) {
 }
 
 std::string GqlToCypherTransformer::finishExpr(const std::string &text) const {
-    // Every expression fragment leaves through here, so the aggregate-call
-    // rewrite of max/min → _gql_max/_gql_min is applied exactly once to
-    // emitted call text (aliases and literals are protected inside).
-    return mapOperators(mapIdentifiers(rewriteMaxMinAggCalls(text)));
+    // Every expression fragment leaves through here, so the GQL-aggregate
+    // call-position splice of max/min/sum/avg → _gql_max/_gql_min/_gql_sum/
+    // _gql_avg is applied exactly once to emitted call text (aliases and
+    // literals are protected inside).
+    return mapOperators(mapIdentifiers(rewriteGqlAggCalls(text)));
 }
 
 // =============================================================================

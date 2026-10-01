@@ -21,6 +21,10 @@ void GqlExtension::load(main::ClientContext* context) {
         catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
     addFunc<GqlMinFunction>(db, GqlMinFunction::name,
         catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
+    addFunc<GqlSumFunction>(db, GqlSumFunction::name,
+        catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
+    addFunc<GqlAvgFunction>(db, GqlAvgFunction::name,
+        catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
 }
 
 } // namespace gql_extension
