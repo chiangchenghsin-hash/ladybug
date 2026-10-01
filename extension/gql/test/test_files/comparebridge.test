@@ -3,11 +3,12 @@
 
 --
 
-# Q2-A comparison-bridge parity (B1: <, <=, >, >= plus the ORDER BY sortkey).
-# Dual-run: every GQL statement via CALL GQL("...") is paired with an
-# equivalent Cypher twin calling _gql_lt/_gql_le/_gql_gt/_gql_ge (or ordering
-# by _gql_sortkey) directly; both must return the same rows. '=' and '<>'
-# stay untouched in this phase (see EqualityUntouchedPin).
+# Q2-A comparison-bridge parity (B1+B2: all six comparators plus the ORDER BY
+# sortkey). Dual-run: every GQL statement via CALL GQL("...") is paired with
+# an equivalent Cypher twin calling _gql_lt/_gql_le/_gql_gt/_gql_ge/_gql_eq/
+# _gql_ne (or ordering by _gql_sortkey) directly; both must return the same
+# rows. Equality (B2) splices too, since the corpus divergence list was clean
+# (see EqualityBridgeParity).
 #
 # Pinned semantics (TCK-pinned global rank: null < bool < array < string <
 # number < object): 'x' < 30 is TRUE and every number > 'x'; false < true;
@@ -322,7 +323,7 @@ k|true
 m|x
 n|5
 
--CASE EqualityUntouchedPin
+-CASE EqualityBridgeParity
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 ---- ok
@@ -334,20 +335,48 @@ n|5
 -STATEMENT CALL GQL("INSERT (a:Person {name: 'a', age: 9}), (b:Person {name: 'b', age: 30}), (c:Person {name: 'c', age: 33}), (d:Person {name: 'd', age: 100}), (e:Person {name: 'e', age: 'x'}), (f:Person {name: 'f', age: 33.5}), (g:Person {name: 'g'})")
 ---- ok
 
-# B1 pin: '=' is NOT routed through the bridge yet, so JSON text equality
-# still applies: '33' = '33' hits, 33 = 33.0 misses. When B2 lands, the
-# 33.0 queries below must flip to c|33 and the zero-row pins be updated.
+# B2: '='/'<>' now route through the bridge. 33 = 33.0 is semantically
+# TRUE (exact decimal equality across int/real), which the B1 pin asserted
+# as the known silent-wrong gap; the twin _gql_eq/_gql_ne call the same core.
 -STATEMENT CALL GQL("MATCH (p) WHERE p.age = 33 RETURN p.name, p.age")
 ---- 1
 c|33
--STATEMENT MATCH (p) WHERE p.age = 33 RETURN p.name, p.age
+-STATEMENT MATCH (p) WHERE _gql_eq(p.age, 33) RETURN p.name, p.age
 ---- 1
 c|33
 
 -STATEMENT CALL GQL("MATCH (p) WHERE p.age = 33.0 RETURN p.name, p.age")
----- 0
--STATEMENT MATCH (p) WHERE p.age = 33.0 RETURN p.name, p.age
----- 0
+---- 1
+c|33
+-STATEMENT MATCH (p) WHERE _gql_eq(p.age, 33.0) RETURN p.name, p.age
+---- 1
+c|33
+
+# 'x' (bare string) equals the string literal 'x' — parse-failure fallback
+# and the literal classify as the same string, not string-vs-bool or similar.
+-STATEMENT CALL GQL("MATCH (p) WHERE p.age = 'x' RETURN p.name, p.age")
+---- 1
+e|x
+-STATEMENT MATCH (p) WHERE _gql_eq(p.age, 'x') RETURN p.name, p.age
+---- 1
+e|x
+
+# <> flips: every non-null row except c is unequal to 33 (string vs number
+# is unequal too); g's NULL drops.
+-STATEMENT CALL GQL("MATCH (p) WHERE p.age <> 33 RETURN p.name, p.age")
+---- 5
+a|9
+b|30
+d|100
+e|x
+f|33.5
+-STATEMENT MATCH (p) WHERE _gql_ne(p.age, 33) RETURN p.name, p.age
+---- 5
+a|9
+b|30
+d|100
+e|x
+f|33.5
 
 -CASE ArrayLexOrderParity
 

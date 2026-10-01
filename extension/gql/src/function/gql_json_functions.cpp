@@ -1472,7 +1472,7 @@ void appendSortKey(const GqlOrderedOperand& operand, bool asElement, const char*
 // Execution
 // -----------------------------------------------------------------------------
 
-enum class OrderComparison : uint8_t { LT, LE, GT, GE };
+enum class OrderComparison : uint8_t { LT, LE, GT, GE, EQ, NE };
 
 // SQL NULL on either side yields NULL — engine three-valued logic consumes it
 // (WHERE drops the row, NOT(NULL) stays NULL), so nothing is classified and no
@@ -1516,6 +1516,12 @@ void orderPredicateExecFunc(const std::vector<std::shared_ptr<ValueVector>>& par
             break;
         case OrderComparison::GE:
             value = cmp >= 0;
+            break;
+        case OrderComparison::EQ:
+            value = cmp == 0;
+            break;
+        case OrderComparison::NE:
+            value = cmp != 0;
             break;
         }
         result.setNull(resultPos, false);
@@ -1585,6 +1591,14 @@ function_set GqlGtFunction::getFunctionSet() {
 
 function_set GqlGeFunction::getFunctionSet() {
     return buildOrderPredicateFunctionSet<OrderComparison::GE>(name);
+}
+
+function_set GqlEqFunction::getFunctionSet() {
+    return buildOrderPredicateFunctionSet<OrderComparison::EQ>(name);
+}
+
+function_set GqlNeFunction::getFunctionSet() {
+    return buildOrderPredicateFunctionSet<OrderComparison::NE>(name);
 }
 
 function_set GqlSortKeyFunction::getFunctionSet() {

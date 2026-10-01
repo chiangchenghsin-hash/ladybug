@@ -2829,12 +2829,14 @@ bool GqlToCypherTransformer::containsAggregate(antlr4::tree::ParseTree *node) {
 // kinds take the source-text fast path unchanged.
 // =============================================================================
 
-// Equality is NOT bridged yet: on ANY graphs the engine's `=`/`<>` is text
-// equality, which diverges from GQL's semantic equality for JSON values
-// (33 = 33.0 is false). _gql_eq/_gql_ne are the B2 stage; the flip gate is the
-// text-equal vs semantic-equal divergence list. Flipping this to true enables
-// the splice in emitComparison.
-static constexpr bool kSpliceEquality = false;
+// Equality splice (B2): _gql_eq/_gql_ne replace the engine's text equality on
+// ANY graphs, where 33 = 33.0 is textually false but semantically true. The
+// flip gate was the text-equal vs semantic-equal divergence list over the
+// vendored TCK corpus: every `=`/`<>` there is bool-vs-bool (Boolean1-5 truth
+// laws, same result under the bridge) or bare-string-vs-string-literal
+// (Boolean4 [1], both classify as the same string) — no scenario depends on
+// text equality, so the gate passed and the splice is on.
+static constexpr bool kSpliceEquality = true;
 
 namespace {
 

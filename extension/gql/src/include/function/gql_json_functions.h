@@ -81,6 +81,18 @@ struct GqlGeFunction {
     static function::function_set getFunctionSet();
 };
 
+struct GqlEqFunction {
+    static constexpr const char* name = "_GQL_EQ";
+
+    static function::function_set getFunctionSet();
+};
+
+struct GqlNeFunction {
+    static constexpr const char* name = "_GQL_NE";
+
+    static function::function_set getFunctionSet();
+};
+
 struct GqlSortKeyFunction {
     static constexpr const char* name = "_GQL_SORTKEY";
 
