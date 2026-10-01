@@ -4,7 +4,10 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <type_traits>
 
 #include "common/assert.h"
@@ -975,6 +978,617 @@ function_set GqlSumFunction::getFunctionSet() {
 
 function_set GqlAvgFunction::getFunctionSet() {
     return buildSumAvgFunctionSet<true>(name);
+}
+
+// =============================================================================
+// _GQL_LT / _GQL_LE / _GQL_GT / _GQL_GE(ANY, ANY) -> BOOL
+// _GQL_SORTKEY(ANY) -> STRING
+// =============================================================================
+// The Q2-A comparison bridge. Native comparisons on JSON-typed columns order
+// the stored text byte-wise, which is silently wrong for ANY-graph properties:
+// one column mixes numbers, strings, arrays and nulls, and text order is not
+// the GQL total order. These functions replace it with the Phase 8 order:
+//
+//   null(0) < bool(1) < array(2) < string(3) < number(4) < object(5)
+//
+// Operands are classified from their logical type, never from their text
+// alone: a STRING column is a string, a JSON column is parsed (and — when
+// parsing fails — is the bare text the property writer stores, `x` and not
+// `"x"`), LIST/ARRAY columns are serialized through jsonify, and typed
+// integers/floats keep an exact decimal spelling. Numbers compare through
+// exact decimal normalization (arbitrary length, never double) — the upgrade
+// over compareJsonNumbers, whose >int64 path silently folds through double.
+//
+// _GQL_SORTKEY encodes the same order into one byte-comparable STRING so
+// ORDER BY can use it directly (the engine compares STRING values byte-wise).
+
+namespace {
+
+constexpr const char* ORDER_PREDICATE_PREFIX = "_GQL_LT/_GQL_LE/_GQL_GT/_GQL_GE";
+constexpr const char* SORTKEY_PREFIX = "_GQL_SORTKEY";
+
+// -----------------------------------------------------------------------------
+// Exact decimal normalization (shared by the predicates and the sort key)
+// -----------------------------------------------------------------------------
+
+// `value = sign * 0.<digits> * 10^exponent`, with `digits` stripped of both
+// leading and trailing zeros (zero is sign 0 with empty digits). Parses JSON
+// number spellings (fraction, `e`/`E` exponent, exponent sign) as well as the
+// plain integer text TypeUtils::toString produces. All digits are kept: no
+// step routes the value through double, which is why this bridge cannot reuse
+// compareJsonNumbers.
+struct DecimalParts {
+    int32_t sign = 0;
+    std::string digits;
+    int64_t exponent = 0;
+};
+
+bool allDigits(std::string_view text) {
+    if (text.empty()) {
+        return false;
+    }
+    for (auto c : text) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+int64_t checkedAddInt64(int64_t lhs, int64_t rhs, const char* errorPrefix) {
+    if ((rhs > 0 && lhs > std::numeric_limits<int64_t>::max() - rhs) ||
+        (rhs < 0 && lhs < std::numeric_limits<int64_t>::min() - rhs)) {
+        throw RuntimeException(std::format("{}: number exponent out of range", errorPrefix));
+    }
+    return lhs + rhs;
+}
+
+int64_t parseExponent(std::string_view text, const char* errorPrefix) {
+    bool negative = false;
+    if (!text.empty() && (text.front() == '+' || text.front() == '-')) {
+        negative = text.front() == '-';
+        text.remove_prefix(1);
+    }
+    if (!allDigits(text)) {
+        throw RuntimeException(std::format("{}: invalid number text", errorPrefix));
+    }
+    int64_t value = 0;
+    for (auto c : text) {
+        int64_t digit = c - '0';
+        if (value > (std::numeric_limits<int64_t>::max() - digit) / 10) {
+            throw RuntimeException(std::format("{}: number exponent out of range", errorPrefix));
+        }
+        value = value * 10 + digit;
+    }
+    return negative ? -value : value;
+}
+
+DecimalParts normalizeDecimalText(std::string_view text, const char* errorPrefix) {
+    DecimalParts result;
+    result.sign = 1;
+    if (!text.empty() && (text.front() == '+' || text.front() == '-')) {
+        result.sign = text.front() == '-' ? -1 : 1;
+        text.remove_prefix(1);
+    }
+    auto exponentPos = text.find_first_of("eE");
+    auto mantissa = exponentPos == std::string_view::npos ? text : text.substr(0, exponentPos);
+    auto exponent = exponentPos == std::string_view::npos ?
+                        int64_t{0} :
+                        parseExponent(text.substr(exponentPos + 1), errorPrefix);
+    auto dotPos = mantissa.find('.');
+    auto intPart = dotPos == std::string_view::npos ? mantissa : mantissa.substr(0, dotPos);
+    auto fracPart = dotPos == std::string_view::npos ? std::string_view{} :
+                                                       mantissa.substr(dotPos + 1);
+    if (!allDigits(intPart) || (dotPos != std::string_view::npos && !allDigits(fracPart))) {
+        throw RuntimeException(std::format("{}: invalid number text", errorPrefix));
+    }
+    std::string digits(intPart);
+    digits.append(fracPart.data(), fracPart.size());
+    auto firstSignificant = digits.find_first_not_of('0');
+    if (firstSignificant == std::string::npos) {
+        // Zero (including -0 and 0.00e9): one canonical zero.
+        return DecimalParts{};
+    }
+    auto lastSignificant = digits.find_last_not_of('0');
+    result.digits = digits.substr(firstSignificant, lastSignificant + 1 - firstSignificant);
+    // digits * 10^(exponent - fracLen) == 0.<digits> * 10^(digitCount + exponent -
+    // fracLen); digitCount is counted from the first significant digit to the
+    // end (trailing zeros included), so stripping them above keeps the value.
+    auto digitCount = static_cast<int64_t>(digits.size() - firstSignificant);
+    result.exponent = checkedAddInt64(checkedAddInt64(digitCount, exponent, errorPrefix),
+        -static_cast<int64_t>(fracPart.size()), errorPrefix);
+    return result;
+}
+
+// -1 / 0 / +1 over two decimal payload texts, exact for arbitrary lengths.
+// Sign decides first; within one sign the magnitude (exponent, then canonical
+// digit string — the shorter prefix is smaller) decides, and negative
+// operands reverse it. Replaces compareJsonNumbers for the bridge.
+int compareDecimalTexts(std::string_view lhs, std::string_view rhs, const char* errorPrefix) {
+    auto lhsParts = normalizeDecimalText(lhs, errorPrefix);
+    auto rhsParts = normalizeDecimalText(rhs, errorPrefix);
+    if (lhsParts.sign != rhsParts.sign) {
+        return lhsParts.sign < rhsParts.sign ? -1 : 1;
+    }
+    if (lhsParts.sign == 0) {
+        return 0;
+    }
+    int cmp = 0;
+    if (lhsParts.exponent != rhsParts.exponent) {
+        cmp = lhsParts.exponent < rhsParts.exponent ? -1 : 1;
+    } else {
+        auto commonSize = std::min(lhsParts.digits.size(), rhsParts.digits.size());
+        cmp = memcmp(lhsParts.digits.data(), rhsParts.digits.data(), commonSize);
+        if (cmp == 0) {
+            cmp = lhsParts.digits.size() < rhsParts.digits.size() ?
+                      -1 :
+                      (lhsParts.digits.size() > rhsParts.digits.size() ? 1 : 0);
+        }
+        cmp = cmp < 0 ? -1 : (cmp > 0 ? 1 : 0);
+    }
+    return lhsParts.sign < 0 ? -cmp : cmp;
+}
+
+// Byte-wise string order (TCK Aggregation2 [7]/[8]), shorter prefix smaller.
+int compareOperandTexts(const std::string& lhs, const std::string& rhs) {
+    auto commonSize = std::min(lhs.size(), rhs.size());
+    auto cmp = memcmp(lhs.data(), rhs.data(), commonSize);
+    if (cmp != 0) {
+        return cmp < 0 ? -1 : 1;
+    }
+    return lhs.size() < rhs.size() ? -1 : (lhs.size() > rhs.size() ? 1 : 0);
+}
+
+// -----------------------------------------------------------------------------
+// Operand classification
+// -----------------------------------------------------------------------------
+
+// One vector value classified into the GQL total order. `text` carries the
+// STRING contents or the NUMBER exact decimal text; `jsonValue` (and the
+// `jsonDoc` keeping it alive) carries a parsed ARRAY — recursed into — or
+// OBJECT, whose only total-order content is deep equality.
+struct GqlOrderedOperand {
+    int32_t rank = 0;
+    bool boolValue = false;
+    std::string text;
+    yyjson_val* jsonValue = nullptr;
+    std::optional<JsonWrapper> jsonDoc;
+};
+
+GqlOrderedOperand makeNumberOperand(std::string text) {
+    GqlOrderedOperand result;
+    result.rank = 4;
+    result.text = std::move(text);
+    return result;
+}
+
+// Typed FLOAT/DOUBLE payloads reuse formatJsonReal's shortest round-trip
+// spelling (exact for ordering: the shortest form uniquely identifies the
+// double). The finiteness rejection is repeated here so the error carries
+// this bridge's own prefix instead of formatJsonReal's _GQL_SUM/_GQL_AVG one.
+std::string realToNumberText(double value, const char* errorPrefix) {
+    if (!std::isfinite(value)) {
+        throw RuntimeException(
+            std::format("{}: non-finite value cannot be ordered: {}", errorPrefix, value));
+    }
+    return formatJsonReal(value);
+}
+
+// Nested numbers inside an already-parsed document have no source text left;
+// render the parsed value losslessly instead (integers stay exact, a real
+// keeps its double's shortest round-trip form).
+std::string parsedNumberText(yyjson_val* root, const char* errorPrefix) {
+    if (yyjson_is_uint(root)) {
+        return TypeUtils::toString(yyjson_get_uint(root));
+    }
+    if (yyjson_is_sint(root)) {
+        return TypeUtils::toString(yyjson_get_sint(root));
+    }
+    return realToNumberText(yyjson_get_real(root), errorPrefix);
+}
+
+// Classifies one node of a parsed document. `numberToken` is the untouched
+// source text when the root spans the whole input (top-level numbers), so the
+// exact spelling survives yyjson's double folding; empty for nested values.
+GqlOrderedOperand classifyParsedJson(yyjson_val* root, std::string_view numberToken,
+    const char* errorPrefix) {
+    GqlOrderedOperand result;
+    result.rank = jsonRank(root);
+    switch (result.rank) {
+    case 0:
+        // JSON null is a value below everything (never SQL NULL).
+        break;
+    case 1:
+        result.boolValue = yyjson_get_bool(root);
+        break;
+    case 2:
+    case 5:
+        result.jsonValue = root;
+        break;
+    case 3:
+        result.text.assign(yyjson_get_str(root), yyjson_get_len(root));
+        break;
+    case 4:
+        if (!numberToken.empty()) {
+            // The root spans the whole input, so trimming JSON whitespace
+            // leaves exactly the source number token; normalizeDecimalText
+            // validates it loudly.
+            auto begin = numberToken.find_first_not_of(" \t\n\r");
+            auto end = numberToken.find_last_not_of(" \t\n\r");
+            auto token = numberToken.substr(begin, end - begin + 1);
+            static_cast<void>(normalizeDecimalText(token, errorPrefix));
+            result.text = std::string(token);
+        } else {
+            result.text = parsedNumberText(root, errorPrefix);
+        }
+        break;
+    default:
+        throw RuntimeException(
+            std::format("{}: unsupported JSON value in comparison", errorPrefix));
+    }
+    return result;
+}
+
+// JSON input: parse, and fall back to the raw bare string on failure. The
+// property writer stores string values without quotes (`x`), while
+// _gql_to_json emits `"x"` — both forms share one column, so unparsable text
+// is a string value, never an error. One exception: the engine's own
+// BOOL->JSON cast spells booleans `True`/`False` (TypeUtils::toString(bool)),
+// which is not JSON text — those spellings are booleans, not strings, so
+// `p.flag = 'True'` stays bool-vs-string (unequal) instead of silently
+// comparing as two strings. (JSON `true`/`false` from _gql_to_json already
+// parse; a bare lowercase `true` is inherently ambiguous with the string
+// "true" and follows the parse-first rule.)
+GqlOrderedOperand classifyJsonText(std::string_view raw, const char* errorPrefix) {
+    auto doc = stringToJsonNoError(std::string(raw));
+    if (doc.ptr == nullptr) {
+        GqlOrderedOperand result;
+        result.rank = 3;
+        result.text = std::string(raw);
+        if (raw == "True" || raw == "False") {
+            result.rank = 1;
+            result.boolValue = raw == "True";
+        }
+        return result;
+    }
+    auto result = classifyParsedJson(yyjson_doc_get_root(doc.ptr), raw, errorPrefix);
+    if (result.jsonValue != nullptr) {
+        // emplace (not assignment): JsonWrapper is move-constructible but has
+        // no move assignment operator.
+        result.jsonDoc.emplace(std::move(doc));
+    }
+    return result;
+}
+
+// Values reached from an array: they live inside the enclosing operand's
+// document, so no ownership is taken here.
+GqlOrderedOperand classifyJsonValue(yyjson_val* root, const char* errorPrefix) {
+    return classifyParsedJson(root, std::string_view{}, errorPrefix);
+}
+
+// Classifies one non-null vector value by its logical type. Everything the
+// bridge has no faithful order for (DATE, UUID, INTERVAL, SERIAL, DECIMAL,
+// STRUCT, MAP, ...) fails loudly — a loud reject beats a silent wrong answer.
+GqlOrderedOperand classifyOperand(const ValueVector& vector, uint32_t pos,
+    const char* errorPrefix) {
+    switch (vector.dataType.getLogicalTypeID()) {
+    case LogicalTypeID::JSON:
+        return classifyJsonText(vector.getValue<string_t>(pos).getAsStringView(), errorPrefix);
+    case LogicalTypeID::STRING: {
+        GqlOrderedOperand result;
+        result.rank = 3;
+        result.text = vector.getValue<string_t>(pos).getAsString();
+        return result;
+    }
+    case LogicalTypeID::BOOL: {
+        GqlOrderedOperand result;
+        result.rank = 1;
+        result.boolValue = vector.getValue<bool>(pos);
+        return result;
+    }
+    case LogicalTypeID::INT8:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<int8_t>(pos)));
+    case LogicalTypeID::INT16:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<int16_t>(pos)));
+    case LogicalTypeID::INT32:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<int32_t>(pos)));
+    case LogicalTypeID::INT64:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<int64_t>(pos)));
+    case LogicalTypeID::INT128:
+        // Int128_t::toString — exact decimal text, never through double.
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<int128_t>(pos)));
+    case LogicalTypeID::UINT8:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<uint8_t>(pos)));
+    case LogicalTypeID::UINT16:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<uint16_t>(pos)));
+    case LogicalTypeID::UINT32:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<uint32_t>(pos)));
+    case LogicalTypeID::UINT64:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<uint64_t>(pos)));
+    case LogicalTypeID::UINT128:
+        return makeNumberOperand(TypeUtils::toString(vector.getValue<uint128_t>(pos)));
+    case LogicalTypeID::FLOAT:
+        return makeNumberOperand(
+            realToNumberText(static_cast<double>(vector.getValue<float>(pos)), errorPrefix));
+    case LogicalTypeID::DOUBLE:
+        return makeNumberOperand(realToNumberText(vector.getValue<double>(pos), errorPrefix));
+    case LogicalTypeID::LIST:
+    case LogicalTypeID::ARRAY: {
+        // jsonify serializes a typed list losslessly into compact JSON text;
+        // re-entering the JSON path keeps one array classification for both.
+        auto serialized = jsonToString(jsonify(vector, pos));
+        if (serialized.empty()) {
+            // jsonToString only yields "" when serialization failed; never
+            // let that silently become an empty string operand.
+            throw RuntimeException(
+                std::format("{}: failed to serialize LIST operand", errorPrefix));
+        }
+        return classifyJsonText(serialized, errorPrefix);
+    }
+    default:
+        throw RuntimeException(std::format("{}: unsupported operand type {}", errorPrefix,
+            LogicalTypeUtils::toString(vector.dataType.getLogicalTypeID())));
+    }
+}
+
+int compareOrderedOperands(const GqlOrderedOperand& lhs, const GqlOrderedOperand& rhs,
+    const char* errorPrefix) {
+    if (lhs.rank != rhs.rank) {
+        return lhs.rank < rhs.rank ? -1 : 1;
+    }
+    switch (lhs.rank) {
+    case 0:
+        return 0;
+    case 1:
+        return lhs.boolValue == rhs.boolValue ? 0 : (lhs.boolValue ? 1 : -1);
+    case 2:
+        try {
+            return compareJsonValues(lhs.jsonValue, rhs.jsonValue);
+        } catch (const RuntimeException&) {
+            // compareJsonValues only rejects distinct objects nested in
+            // arrays; re-issue under this bridge's prefix.
+            throw RuntimeException(std::format(
+                "{}: JSON objects do not have a well-defined total order", errorPrefix));
+        }
+    case 3:
+        return compareOperandTexts(lhs.text, rhs.text);
+    case 4:
+        return compareDecimalTexts(lhs.text, rhs.text, errorPrefix);
+    default:
+        if (jsonDeepEquals(lhs.jsonValue, rhs.jsonValue)) {
+            return 0;
+        }
+        throw RuntimeException(
+            std::format("{}: JSON objects do not have a well-defined total order", errorPrefix));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// _GQL_SORTKEY encoding
+// -----------------------------------------------------------------------------
+// Byte-comparable key per class (engine STRING order is memcmp):
+//   null   `a`
+//   bool   `b` + `0`/`1`
+//   array  `c` + elements + 0x00
+//   string `d` + text (0x00-terminated and 0x00-escaped inside arrays)
+//   number `e` + sign(`0` neg / `1` zero / `2` pos) + 8-digit biased exponent
+//          + 40-digit right-zero-padded mantissa
+// Objects have no total order and fail loudly.
+//
+// Array framing note: the task brief specified an 8-hex-digit element length
+// prefix, but a length field decides byte comparison *before* the element's
+// rank/contents, so it silently mis-orders exactly the values this key exists
+// to order — e.g. ["b"] (len 2) would sort below ["abc"] (len 4) although
+// "abc" < "b". Elements are therefore self-delimiting instead (FoundationDB
+// tuple style): variable-length payloads end with 0x00 and string payloads
+// escape 0x00 as 0x00 0xFF, which keeps byte order equal to element order and
+// makes a shorter element sequence a byte prefix (so it sorts first).
+
+void appendEscapedText(const std::string& text, std::string& out) {
+    for (auto c : text) {
+        out += c;
+        if (c == '\0') {
+            out += static_cast<char>(0xFF);
+        }
+    }
+}
+
+void appendNumberSortKey(std::string_view text, const char* errorPrefix, std::string& out) {
+    constexpr int64_t EXPONENT_LIMIT = 999999;
+    constexpr size_t MANTISSA_WIDTH = 40;
+    auto parts = normalizeDecimalText(text, errorPrefix);
+    out += 'e';
+    if (parts.sign == 0) {
+        // -0.0 and 0 collapse into one canonical zero key.
+        out += '1';
+        out.append(8, '0');
+        return;
+    }
+    if (parts.exponent < -EXPONENT_LIMIT || parts.exponent > EXPONENT_LIMIT ||
+        parts.digits.size() > MANTISSA_WIDTH) {
+        throw RuntimeException(std::format("{}: number exceeds sortkey precision", errorPrefix));
+    }
+    // Bias into [1, 1_999_999]; a fixed 8-digit field keeps byte order equal
+    // to exponent order (no length prefix to interfere).
+    std::string exponentText = std::format("{:08d}", parts.exponent + 1000000);
+    std::string mantissa = parts.digits;
+    mantissa.append(MANTISSA_WIDTH - mantissa.size(), '0');
+    if (parts.sign > 0) {
+        out += '2';
+    } else {
+        out += '0';
+        // Negative numbers reverse both fields digit-wise (9's complement), so
+        // a larger magnitude byte-sorts smaller within the negative class.
+        for (auto& c : exponentText) {
+            c = static_cast<char>('9' - (c - '0'));
+        }
+        for (auto& c : mantissa) {
+            c = static_cast<char>('9' - (c - '0'));
+        }
+    }
+    out += exponentText;
+    out += mantissa;
+}
+
+void appendSortKey(const GqlOrderedOperand& operand, bool asElement, const char* errorPrefix,
+    std::string& out) {
+    switch (operand.rank) {
+    case 0:
+        out += 'a';
+        return;
+    case 1:
+        out += 'b';
+        out += operand.boolValue ? '1' : '0';
+        return;
+    case 2: {
+        out += 'c';
+        auto size = yyjson_arr_size(operand.jsonValue);
+        for (size_t i = 0; i < size; ++i) {
+            auto element = classifyJsonValue(yyjson_arr_get(operand.jsonValue, i), errorPrefix);
+            appendSortKey(element, true /* asElement */, errorPrefix, out);
+        }
+        out += '\0';
+        return;
+    }
+    case 3:
+        out += 'd';
+        if (asElement) {
+            appendEscapedText(operand.text, out);
+            out += '\0';
+        } else {
+            out += operand.text;
+        }
+        return;
+    case 4:
+        appendNumberSortKey(operand.text, errorPrefix, out);
+        return;
+    default:
+        throw RuntimeException(
+            std::format("{}: JSON objects do not have a well-defined total order", errorPrefix));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Execution
+// -----------------------------------------------------------------------------
+
+enum class OrderComparison : uint8_t { LT, LE, GT, GE };
+
+// SQL NULL on either side yields NULL — engine three-valued logic consumes it
+// (WHERE drops the row, NOT(NULL) stays NULL), so nothing is classified and no
+// value decides the result.
+template<OrderComparison OP>
+void orderPredicateExecFunc(const std::vector<std::shared_ptr<ValueVector>>& parameters,
+    const std::vector<SelectionVector*>& parameterSelVectors, ValueVector& result,
+    SelectionVector* resultSelVector, void* /*dataPtr*/) {
+    DASSERT(parameters.size() == 2);
+    const auto& lhs = *parameters[0];
+    const auto& rhs = *parameters[1];
+    const bool lhsFlat = lhs.state->isFlat();
+    const bool rhsFlat = rhs.state->isFlat();
+    // Same position convention as BinaryFunctionExecutor: flat operands are
+    // read at their single selected position and a flat result is one value.
+    sel_t numSelectedValues = parameterSelVectors[0]->getSelSize();
+    if (lhsFlat) {
+        numSelectedValues = rhsFlat ? 1 : parameterSelVectors[1]->getSelSize();
+    }
+    for (sel_t i = 0; i < numSelectedValues; ++i) {
+        auto lhsPos = (*parameterSelVectors[0])[lhsFlat ? 0 : i];
+        auto rhsPos = (*parameterSelVectors[1])[rhsFlat ? 0 : i];
+        auto resultPos = (*resultSelVector)[lhsFlat && rhsFlat ? 0 : i];
+        if (lhs.isNull(lhsPos) || rhs.isNull(rhsPos)) {
+            result.setNull(resultPos, true);
+            continue;
+        }
+        auto lhsOperand = classifyOperand(lhs, lhsPos, ORDER_PREDICATE_PREFIX);
+        auto rhsOperand = classifyOperand(rhs, rhsPos, ORDER_PREDICATE_PREFIX);
+        auto cmp = compareOrderedOperands(lhsOperand, rhsOperand, ORDER_PREDICATE_PREFIX);
+        bool value = false;
+        switch (OP) {
+        case OrderComparison::LT:
+            value = cmp < 0;
+            break;
+        case OrderComparison::LE:
+            value = cmp <= 0;
+            break;
+        case OrderComparison::GT:
+            value = cmp > 0;
+            break;
+        case OrderComparison::GE:
+            value = cmp >= 0;
+            break;
+        }
+        result.setNull(resultPos, false);
+        result.setValue<bool>(resultPos, value);
+    }
+}
+
+void sortKeyExecFunc(const std::vector<std::shared_ptr<ValueVector>>& parameters,
+    const std::vector<SelectionVector*>& parameterSelVectors, ValueVector& result,
+    SelectionVector* resultSelVector, void* /*dataPtr*/) {
+    DASSERT(parameters.size() == 1);
+    result.resetAuxiliaryBuffer();
+    const auto& input = *parameters[0];
+    const bool inputFlat = input.state->isFlat();
+    for (sel_t i = 0; i < resultSelVector->getSelSize(); ++i) {
+        auto inputPos = (*parameterSelVectors[0])[inputFlat ? 0 : i];
+        auto resultPos = (*resultSelVector)[i];
+        // SQL NULL stays NULL; the engine sorts NULL keys last, unchanged.
+        if (input.isNull(inputPos)) {
+            result.setNull(resultPos, true);
+            continue;
+        }
+        std::string key;
+        auto operand = classifyOperand(input, inputPos, SORTKEY_PREFIX);
+        appendSortKey(operand, false /* asElement */, SORTKEY_PREFIX, key);
+        result.setNull(resultPos, false);
+        StringVector::addString(&result, resultPos, key);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Registration helpers
+// -----------------------------------------------------------------------------
+
+// ANY parameters match every argument without inserting a cast (the binder
+// leaves ANY targets alone), so the exec sees each argument's own logical
+// type — the same pattern as the _GQL_MAX/_GQL_MIN ANY overloads.
+template<OrderComparison OP>
+function_set buildOrderPredicateFunctionSet(const std::string& funcName) {
+    function_set result;
+    result.push_back(std::make_unique<ScalarFunction>(funcName,
+        std::vector<LogicalTypeID>{LogicalTypeID::ANY, LogicalTypeID::ANY}, LogicalTypeID::BOOL,
+        orderPredicateExecFunc<OP>));
+    return result;
+}
+
+function_set buildSortKeyFunctionSet(const std::string& funcName) {
+    function_set result;
+    result.push_back(std::make_unique<ScalarFunction>(funcName,
+        std::vector<LogicalTypeID>{LogicalTypeID::ANY}, LogicalTypeID::STRING, sortKeyExecFunc));
+    return result;
+}
+
+} // namespace
+
+function_set GqlLtFunction::getFunctionSet() {
+    return buildOrderPredicateFunctionSet<OrderComparison::LT>(name);
+}
+
+function_set GqlLeFunction::getFunctionSet() {
+    return buildOrderPredicateFunctionSet<OrderComparison::LE>(name);
+}
+
+function_set GqlGtFunction::getFunctionSet() {
+    return buildOrderPredicateFunctionSet<OrderComparison::GT>(name);
+}
+
+function_set GqlGeFunction::getFunctionSet() {
+    return buildOrderPredicateFunctionSet<OrderComparison::GE>(name);
+}
+
+function_set GqlSortKeyFunction::getFunctionSet() {
+    return buildSortKeyFunctionSet(name);
 }
 
 } // namespace gql_extension

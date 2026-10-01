@@ -25,6 +25,16 @@ void GqlExtension::load(main::ClientContext* context) {
         catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
     addFunc<GqlAvgFunction>(db, GqlAvgFunction::name,
         catalog::CatalogEntryType::AGGREGATE_FUNCTION_ENTRY);
+    addFunc<GqlLtFunction>(db, GqlLtFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
+    addFunc<GqlLeFunction>(db, GqlLeFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
+    addFunc<GqlGtFunction>(db, GqlGtFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
+    addFunc<GqlGeFunction>(db, GqlGeFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
+    addFunc<GqlSortKeyFunction>(db, GqlSortKeyFunction::name,
+        catalog::CatalogEntryType::SCALAR_FUNCTION_ENTRY);
 }
 
 } // namespace gql_extension

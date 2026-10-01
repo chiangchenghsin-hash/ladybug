@@ -772,7 +772,7 @@ std::string GqlToCypherTransformer::translateFilterStatement(
     // GQL FILTER == Cypher post-filter: "WITH * WHERE ..." keeps every binding
     // (a bare WHERE only parses as part of MATCH/WITH and broke FILTER after
     // FOR/UNWIND).
-    return "WITH * WHERE " + finishExpr(sourceText(cond));
+    return "WITH * WHERE " + finishExpr(emitExpr(cond));
 }
 
 std::string GqlToCypherTransformer::translateForStatement(
@@ -832,6 +832,20 @@ std::string GqlToCypherTransformer::translateForStatement(
 
 std::string GqlToCypherTransformer::translateOrderByAndPage(
     GQLParser::OrderByAndPageStatementContext *ctx) {
+    if (labelGraphIsAny.value_or(false)) {
+        // ANY graph: structural rendering so every sort key is wrapped in
+        // _gql_sortkey; page bounds emit as SKIP/LIMIT directly.
+        std::string text = ctx->orderByClause() ? renderOrderBy(ctx->orderByClause(), {}) : "";
+        if (auto *off = ctx->offsetClause()) {
+            if (!text.empty()) text += " ";
+            text += "SKIP " + finishExpr(sourceText(off->nonNegativeIntegerSpecification()));
+        }
+        if (auto *lim = ctx->limitClause()) {
+            if (!text.empty()) text += " ";
+            text += "LIMIT " + finishExpr(sourceText(lim->nonNegativeIntegerSpecification()));
+        }
+        return text;
+    }
     std::string text = finishExpr(sourceText(ctx));
     // LadybugDB Cypher spells paging SKIP/LIMIT; GQL allows OFFSET as a synonym.
     text = replaceWord(text, "OFFSET", "SKIP");
@@ -994,7 +1008,7 @@ void GqlToCypherTransformer::translateFiller(
             props += sourceText(p);
         } else if (auto *w = pred->elementPatternWhereClause()) {
             checkPatternSupported(w->searchCondition());
-            wheres.push_back(finishExpr(sourceText(w->searchCondition())));
+            wheres.push_back(finishExpr(emitExpr(w->searchCondition())));
         }
     }
 }
@@ -1296,7 +1310,7 @@ std::string GqlToCypherTransformer::translateGraphPattern(
     std::string out = joinCommas(parts);
     if (auto *w = ctx->graphPatternWhereClause()) {
         checkPatternSupported(w->searchCondition());
-        wheres.push_back(finishExpr(sourceText(w->searchCondition())));
+        wheres.push_back(finishExpr(emitExpr(w->searchCondition())));
     }
     return out;
 }
@@ -1362,7 +1376,7 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     // ---- WHERE (match-level predicates, hoisted fillers and SELECT WHERE
     //      merge into one clause) ----
     if (auto *w = ctx->whereClause()) {
-        wheres.push_back(finishExpr(sourceText(w->searchCondition())));
+        wheres.push_back(finishExpr(emitExpr(w->searchCondition())));
     }
     std::string whereText;
     for (size_t i = 0; i < wheres.size(); ++i) {
@@ -1395,7 +1409,7 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     auto buildOrderPage = [&](const std::vector<std::pair<std::string, std::string>> &pairs) {
         std::ostringstream page;
         if (auto *ob = ctx->orderByClause()) {
-            page << ' ' << finishExpr(replaceExprs(sourceText(ob), pairs));
+            page << ' ' << renderOrderBy(ob, pairs);
         }
         if (auto *off = ctx->offsetClause()) {
             page << " SKIP " << finishExpr(sourceText(off->nonNegativeIntegerSpecification()));
@@ -1492,7 +1506,7 @@ std::string GqlToCypherTransformer::translateSelectStatement(
             if (item.hasAggregate) continue;
             std::string alias =
                 item.alias.empty() ? "__gql_key" + std::to_string(keyCounter++) : item.alias;
-            withParts.push_back(finishExpr(item.exprText) + " AS " + alias);
+            withParts.push_back(finishExpr(emitExpr(item.exprCtx)) + " AS " + alias);
             keyPairs.emplace_back(item.exprText, alias);
         }
     }
@@ -1505,13 +1519,18 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     // HAVING -> WHERE on the WITH output (keys/aggs replaced by aliases).
     std::string havingText;
     if (!havingRaw.empty()) {
-        havingText = " WHERE " + finishExpr(replaceExprs(havingRaw, allPairs));
+        // Emitted through the comparison bridge before the textual alias map:
+        // aggregate calls stay verbatim (collectTopComparisons stops at them),
+        // so replaceExprs still matches their raw spans.
+        havingText = " WHERE " +
+                     finishExpr(replaceExprs(emitExpr(ctx->havingClause()->searchCondition()),
+                                             allPairs));
     }
 
     // RETURN items: key/agg expressions replaced by their WITH aliases.
     std::vector<std::string> returnItems;
     for (auto &item : items) {
-        std::string out = finishExpr(replaceExprs(item.exprText, allPairs));
+        std::string out = finishExpr(replaceExprs(emitExpr(item.exprCtx), allPairs));
         if (!item.alias.empty() && out != item.alias) {
             out += " AS " + item.alias;
         }
@@ -1542,7 +1561,9 @@ std::string GqlToCypherTransformer::renderSelectItems(
     std::vector<std::string> parts;
     for (auto &item : items) {
         std::string original = item.exprText;
-        std::string text = item.exprText;
+        // Projection expressions go through the Q2 comparison bridge; the
+        // source text is kept for the GQL column alias.
+        std::string text = emitExpr(item.exprCtx);
         std::vector<Span> reps = replacements;
         std::sort(reps.begin(), reps.end(),
                   [](const Span &a, const Span &b) { return a.start > b.start; });
@@ -1639,7 +1660,7 @@ std::string GqlToCypherTransformer::translateReturnStatement(
         }
         std::vector<std::string> returnItems;
         for (auto &item : items) {
-            std::string out = finishExpr(replaceExprs(item.exprText, aggPairs));
+            std::string out = finishExpr(replaceExprs(emitExpr(item.exprCtx), aggPairs));
             if (!item.alias.empty() && out != item.alias) {
                 out += " AS " + item.alias;
             } else if (item.alias.empty()) {
@@ -1650,8 +1671,7 @@ std::string GqlToCypherTransformer::translateReturnStatement(
         }
         // ORDER BY after a grouped RETURN can only reference key/agg aliases.
         if (page && page->orderByClause()) {
-            std::string orderText = replaceExprs(sourceText(page->orderByClause()), aggPairs);
-            pageText = " " + finishExpr(orderText);
+            pageText = " " + renderOrderBy(page->orderByClause(), aggPairs);
             if (page->offsetClause()) {
                 pageText += " SKIP " +
                             finishExpr(sourceText(page->offsetClause()->nonNegativeIntegerSpecification()));
@@ -1671,7 +1691,9 @@ std::string GqlToCypherTransformer::translateReturnStatement(
         std::vector<std::string> parts;
         for (auto *item : body->returnItemList()->returnItem()) {
             std::string original = sourceText(item->aggregatingValueExpression());
-            std::string text = original;
+            // The projected expression goes through the Q2 comparison bridge;
+            // the source text is kept for the GQL column alias.
+            std::string text = emitExpr(item->aggregatingValueExpression());
             if (item->returnItemAlias()) {
                 text += " AS " + sourceText(item->returnItemAlias()->identifier());
             } else {
@@ -2790,6 +2812,167 @@ bool GqlToCypherTransformer::containsAggregate(antlr4::tree::ParseTree *node) {
         }
     }
     return false;
+}
+
+// =============================================================================
+// Q2 comparison bridge (ANY graphs)
+//
+// On an open ANY graph the dynamic property column is JSON and the engine's
+// native `<`/`<=`/`>`/`>=` order JSON values as text (`"9" > "33.5"`), a silent
+// wrong answer. GQL's total order is implemented by the extension predicates
+// _gql_lt/_gql_le/_gql_gt/_gql_ge (ANY x ANY -> BOOL, SQL NULL -> NULL); this
+// section rewrites comparisons in every expression position to those calls and
+// wraps ORDER BY keys in _gql_sortkey (ANY -> STRING order-preserving encoding).
+// Comparison detection is parse-tree based (ComparisonExprAltContext only —
+// GQL.g4 moved the comparison predicate productions there), so operators inside
+// string literals can never be touched. Typed graphs and unresolvable graph
+// kinds take the source-text fast path unchanged.
+// =============================================================================
+
+// Equality is NOT bridged yet: on ANY graphs the engine's `=`/`<>` is text
+// equality, which diverges from GQL's semantic equality for JSON values
+// (33 = 33.0 is false). _gql_eq/_gql_ne are the B2 stage; the flip gate is the
+// text-equal vs semantic-equal divergence list. Flipping this to true enables
+// the splice in emitComparison.
+static constexpr bool kSpliceEquality = false;
+
+namespace {
+
+// Collects the top-most comparison nodes under (not including) `node`: descent
+// stops at a comparison (emitComparison recurses into its operands, so nested
+// comparisons compose without overlapping source spans) and at aggregates
+// (their arguments must stay verbatim for span-based alias rewrites). Only the
+// AST decides what is a comparison; literal text is never scanned.
+void collectTopComparisons(antlr4::tree::ParseTree *node,
+                           std::vector<GQLParser::ComparisonExprAltContext *> &out) {
+    if (!node) {
+        return;
+    }
+    for (auto *child : node->children) {
+        if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(child)) {
+            out.push_back(cmp);
+            continue;
+        }
+        if (dynamic_cast<GQLParser::AggregateFunctionContext *>(child)) {
+            continue;
+        }
+        collectTopComparisons(child, out);
+    }
+}
+
+} // namespace
+
+std::string GqlToCypherTransformer::emitComparison(
+    GQLParser::ComparisonExprAltContext *ctx) const {
+    if (!ctx || ctx->valueExpression().size() < 2 || !ctx->compOp()) {
+        return sourceText(ctx);
+    }
+    std::string left = emitValueExpression(ctx->valueExpression(0));
+    std::string right = emitValueExpression(ctx->valueExpression(1));
+    auto *op = ctx->compOp();
+    if (op->LEFT_ANGLE_BRACKET()) return "_gql_lt(" + left + ", " + right + ")";
+    if (op->LESS_THAN_OR_EQUALS_OPERATOR()) return "_gql_le(" + left + ", " + right + ")";
+    if (op->RIGHT_ANGLE_BRACKET()) return "_gql_gt(" + left + ", " + right + ")";
+    if (op->GREATER_THAN_OR_EQUALS_OPERATOR()) return "_gql_ge(" + left + ", " + right + ")";
+    // `=`/`<>` stay textual for now (see kSpliceEquality); operands were still
+    // emitted recursively, so comparisons nested inside them are spliced.
+    if (op->EQUALS_OPERATOR()) {
+        return kSpliceEquality ? "_gql_eq(" + left + ", " + right + ")"
+                               : left + " = " + right;
+    }
+    if (op->NOT_EQUALS_OPERATOR()) {
+        return kSpliceEquality ? "_gql_ne(" + left + ", " + right + ")"
+                               : left + " <> " + right;
+    }
+    return sourceText(ctx);
+}
+
+std::string GqlToCypherTransformer::spliceComparisons(antlr4::tree::ParseTree *node) const {
+    auto *rule = dynamic_cast<antlr4::ParserRuleContext *>(node);
+    if (!rule) {
+        return node ? node->getText() : std::string();
+    }
+    std::vector<GQLParser::ComparisonExprAltContext *> comps;
+    collectTopComparisons(rule, comps);
+    if (comps.empty()) {
+        return sourceText(rule);
+    }
+    std::string out = sourceText(rule);
+    if (out.empty()) {
+        return out;
+    }
+    const size_t base = rule->getStart()->getStartIndex();
+    std::sort(comps.begin(), comps.end(),
+              [](GQLParser::ComparisonExprAltContext *a, GQLParser::ComparisonExprAltContext *b) {
+                  return a->getStart()->getStartIndex() > b->getStart()->getStartIndex();
+              });
+    for (auto *cmp : comps) {
+        const size_t start = cmp->getStart()->getStartIndex();
+        const size_t stop = cmp->getStop()->getStopIndex();
+        if (start < base || stop < start || stop - base >= out.size()) {
+            continue;
+        }
+        out.replace(start - base, stop - start + 1, emitComparison(cmp));
+    }
+    return out;
+}
+
+std::string GqlToCypherTransformer::emitValueExpression(
+    GQLParser::ValueExpressionContext *ctx) const {
+    if (!ctx) {
+        return "";
+    }
+    // Fast path: only ANY graphs need the bridge; typed graphs and unresolvable
+    // kinds keep the source spelling byte-for-byte.
+    if (!labelGraphIsAny.value_or(false)) {
+        return sourceText(ctx);
+    }
+    if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(ctx)) {
+        return emitComparison(cmp);
+    }
+    return spliceComparisons(ctx);
+}
+
+std::string GqlToCypherTransformer::emitExpr(antlr4::tree::ParseTree *node) const {
+    if (!node) {
+        return "";
+    }
+    auto *rule = dynamic_cast<antlr4::ParserRuleContext *>(node);
+    if (!labelGraphIsAny.value_or(false)) {
+        return rule ? sourceText(rule) : node->getText();
+    }
+    if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(node)) {
+        return emitComparison(cmp);
+    }
+    return spliceComparisons(node);
+}
+
+std::string GqlToCypherTransformer::renderOrderBy(
+    GQLParser::OrderByClauseContext *ctx,
+    const std::vector<std::pair<std::string, std::string>> &pairs) const {
+    if (!ctx) {
+        return "";
+    }
+    // Typed graphs and unresolvable kinds: unchanged text, byte-for-byte.
+    if (!labelGraphIsAny.value_or(false)) {
+        return finishExpr(replaceExprs(sourceText(ctx), pairs));
+    }
+    // ANY graph: map projected expressions to their output aliases FIRST (the
+    // engine only accepts projected names after grouping), then wrap each key
+    // in _gql_sortkey. ASC/DESC and NULLS FIRST/LAST spellings are preserved.
+    std::vector<std::string> keys;
+    for (auto *spec : ctx->sortSpecificationList()->sortSpecification()) {
+        std::string out =
+            "_gql_sortkey(" + finishExpr(replaceExprs(sourceText(spec->sortKey()), pairs)) + ")";
+        if (auto *ord = spec->orderingSpecification()) {
+            out += " " + sourceText(ord);
+        }
+        if (auto *nulls = spec->nullOrdering()) {
+            out += " " + sourceText(nulls);
+        }
+        keys.push_back(out);
+    }
+    return "ORDER BY " + joinCommas(keys);
 }
 
 // =============================================================================

@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lbug {
@@ -208,6 +209,32 @@ private:
     std::string sourceText(antlr4::ParserRuleContext *ctx) const;
     std::string renderSelectItems(const std::vector<SelectItemInfo> &items,
                                   const std::vector<Span> &replacements) const;
+
+    // ---------- Q2 comparison bridge (ANY graphs) ----------
+    // On an open ANY graph a property comparison is a text-order comparison at
+    // the engine — a silent wrong answer for JSON values. `emitValueExpression`
+    // rewrites GQL `<` `<=` `>` `>=` to the extension's total-order predicates
+    // _gql_lt/_gql_le/_gql_gt/_gql_ge (ANY x ANY -> BOOL), recursing through
+    // every nested expression position. Typed graphs and unresolvable graph
+    // kinds return the source text byte-for-byte (no behavior change).
+    std::string emitValueExpression(GQLParser::ValueExpressionContext *ctx) const;
+    // A single <comparisonExprAlt>: emit both operands recursively, then the
+    // total-order call for the operator (equality stays textual until B2).
+    std::string emitComparison(GQLParser::ComparisonExprAltContext *ctx) const;
+    // Source text of `node` with every top-level comparison replaced by its
+    // emitted form (right-to-left splices over absolute source offsets).
+    std::string spliceComparisons(antlr4::tree::ParseTree *node) const;
+    // The same bridge for any expression-bearing subtree (search conditions,
+    // projection items, HAVING): every top-level comparison inside `node` is
+    // spliced. Descending stops at aggregate boundaries so span-based aggregate
+    // alias rewrites (replaceExprs over raw source text) keep matching.
+    std::string emitExpr(antlr4::tree::ParseTree *node) const;
+    // Renders an ORDER BY clause with `pairs` (projected expression -> output
+    // alias) applied. On ANY graphs each mapped sort key is wrapped in
+    // _gql_sortkey so JSON values sort under GQL's total order, not text order.
+    std::string renderOrderBy(
+        GQLParser::OrderByClauseContext *ctx,
+        const std::vector<std::pair<std::string, std::string>> &pairs) const;
 
     // Reject GQL-only pattern features (quantified paths, path modes/search
     // prefixes, exotic label expressions) with a named error.

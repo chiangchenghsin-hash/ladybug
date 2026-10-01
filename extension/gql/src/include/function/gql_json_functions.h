@@ -13,6 +13,12 @@ namespace gql_extension {
 //   _GQL_SUM(ANY) -> INT128/UINT128/DOUBLE/JSON   sum over numeric or JSON
 //   _GQL_AVG(ANY) -> DOUBLE/JSON                  values (bindFunc pins the
 //                                                  result type likewise)
+//   _GQL_LT/_GQL_LE/_GQL_GT/_GQL_GE(ANY, ANY) -> BOOL
+//                                      GQL total-order comparisons; operands
+//                                      are classified per value from their own
+//                                      logical type (no bindFunc pins them)
+//   _GQL_SORTKEY(ANY) -> STRING        byte-comparable encoding of the same
+//                                      total order for ORDER BY
 // The `_GQL_` prefix keeps them clear of the JSON extension's `to_json` (the
 // catalog is case-insensitive; `extension::addFunc` is idempotent).
 
@@ -47,6 +53,36 @@ struct GqlSumFunction {
 
 struct GqlAvgFunction {
     static constexpr const char* name = "_GQL_AVG";
+
+    static function::function_set getFunctionSet();
+};
+
+struct GqlLtFunction {
+    static constexpr const char* name = "_GQL_LT";
+
+    static function::function_set getFunctionSet();
+};
+
+struct GqlLeFunction {
+    static constexpr const char* name = "_GQL_LE";
+
+    static function::function_set getFunctionSet();
+};
+
+struct GqlGtFunction {
+    static constexpr const char* name = "_GQL_GT";
+
+    static function::function_set getFunctionSet();
+};
+
+struct GqlGeFunction {
+    static constexpr const char* name = "_GQL_GE";
+
+    static function::function_set getFunctionSet();
+};
+
+struct GqlSortKeyFunction {
+    static constexpr const char* name = "_GQL_SORTKEY";
 
     static function::function_set getFunctionSet();
 };
