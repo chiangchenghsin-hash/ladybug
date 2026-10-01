@@ -298,3 +298,44 @@ Runtime exception: Failed to parse GQL query: MERGE .+
 -STATEMENT CALL GQL("START TRANSACTION MATCH (n:T) RETURN n COMMIT")
 ---- error
 Runtime exception: GQL feature not supported: transaction-wrapped program in a single CALL GQL (issue BEGIN/COMMIT as separate CALL GQL statements)
+
+
+-CASE UnsupportedMapValue
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+# GQL record/map values have no LadybugDB expression counterpart.
+-STATEMENT CALL GQL("RETURN {} AND true")
+---- error
+Runtime exception: GQL feature not supported: map value
+
+-STATEMENT CALL GQL("RETURN {x: 1}")
+---- error
+Runtime exception: GQL feature not supported: map value
+
+
+-CASE UnsupportedHeterogeneousListLiteral
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+# LadybugDB homogenizes mixed list literals (types erased, STRING sink) which
+# silently changes max()/min() results; GQL preserves element types.
+-STATEMENT CALL GQL("RETURN [1, 'a']")
+---- error
+Runtime exception: GQL feature not supported: heterogeneous list literal
+
+# INT and DOUBLE count as different classes: LadybugDB would promote 1 to 1.0.
+-STATEMENT CALL GQL("RETURN [1, 2.0]")
+---- error
+Runtime exception: GQL feature not supported: heterogeneous list literal
+
+-STATEMENT CALL GQL("RETURN [1, [2]]")
+---- error
+Runtime exception: GQL feature not supported: heterogeneous list literal
+
+# Homogeneous lists still work.
+-STATEMENT CALL GQL("RETURN [1, 2] AS xs")
+---- 1
+[1,2]

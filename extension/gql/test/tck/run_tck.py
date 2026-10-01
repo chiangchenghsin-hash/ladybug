@@ -644,7 +644,9 @@ def render_case(case_name: str, emitted: list[Emitted], comment: str) -> str:
             out.append("---- 0")
         elif e.kind == Expectation.ERROR:
             out.append("---- error(regex)")
-            out.append(".+")
+            # [\s\S]+ matches multi-line errors too (ANTLR caret messages);
+            # plain ".+" does not cross newlines under std::regex_match.
+            out.append(r"[\s\S]+")
         elif e.kind == Expectation.ROWS:
             rows = e.rows
             out.append(f"---- {len(rows)}")
@@ -815,6 +817,9 @@ def main() -> int:
         if "failed to parse gql" in low or "parser exception" in low:
             return "parse-error"
         if "regex_match" in low:
+            if "actual error:" in low:
+                # an error WAS raised; the regex just failed to match it
+                return "error-regex-mismatch"
             return "expected-exception-not-raised"
         if "did not match" in low or "expected equality" in low or "which is" in low:
             return "result-mismatch"

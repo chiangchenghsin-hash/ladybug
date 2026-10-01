@@ -61,11 +61,11 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 79/79 全绿**（2026-10-01 Phase 4 收工）：
+**✅ 81/81 全绿**（2026-10-01 Phase 6 收工）：
 basic 11（回归）/ select 6 / groupby 4 / write 7 / routing 4 / path 16 /
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
-unsupported 25。
-**TCK 合规：206 场景 = 151 过 / 44 挂 / 11 跳**（Phase 5，明细 `extension/gql/test/tck/REPORT.md`）。
+**unsupported 27**（+map 值/异构列表字面量拒绝）。
+**TCK 合规：206 场景 = 165 过 / 30 挂 / 11 跳**（Phase 6 口径，明细 `extension/gql/test/tck/REPORT.md`）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
 - **opengql/tck 落地**：整套 14 个 feature + sample data vendored 进
@@ -81,11 +81,30 @@ unsupported 25。
 - **图类型注册表改每库**：原进程级静态表会跨场景泄漏（TCK 场景独立性直接被打破——
   `CREATE GRAPH TYPE mygraphtype` 第二次报 already exists）。新增引擎
   `ExtensionManager::setData/getData`（每库 k/v 槽），注册表挂库生命周期，序列化存储。
-- **TCK 失败分类**（44）：rejected-by-layer 19（CREATE/DROP SCHEMA 命名空间、LIKE/AS COPY OF、
-  多标签节点——设计内不支持）、expected-exception-not-raised 15（**Ladybug 布尔运算不校验操作数类型**，
-  `123 AND true` 不报错——语义差已记 README）、parse-error 4（TCK 填充脚本用了 openCypher
-  `CREATE (...)`，GQL 只有 INSERT——TCK 语料自身问题）、result-mismatch 3（异构列表 max/min 类型语义）。
+- **TCK 失败分类**（Phase 5 口径 44，Phase 6 复核更正见下）：rejected-by-layer 19（CREATE/DROP SCHEMA
+  命名空间、LIKE/AS COPY OF、多标签节点——设计内不支持）、expected-exception-not-raised 15（**归因错误！**见
+  Phase 6 记录）、parse-error 4（TCK 填充脚本用了 openCypher `CREATE (...)`，GQL 只有 INSERT——TCK 语料
+  自身问题）、result-mismatch 3（异构列表 max/min 类型语义）。
 - 跳过 11：能力标签（MinNodeLabelsZero/MaxNodeLabelsGTOne 等）+ TCK 未随包的 catalog-1 样例数据。
+
+### Phase 6（测量修正 + 静默错响亮化）交付记录（2026-10-01）
+- **推翻 Phase 5 的"布尔不校验"归因**：`123 AND true` 实际正确抛 BinderException（binder 对
+  AND/OR/XOR/NOT 操作数强制 cast 到 BOOL，`bind_boolean_expression.cpp:26`）。15 个
+  expected-exception-not-raised 全是 **harness bug**：`run_tck.py` 生成的 `error(regex)` 是
+  `.+`，`std::regex_match` 全文匹配下 `.` 不跨行，ANTLR 多行 caret 消息匹配失败被误记"未抛异常"。
+  失败的真实输入全是 GQL map 字面量（`RETURN {} AND true`）——错误抛了，只是消息多行。
+- **修复**：`run_tck.py` error 正则改 `[\s\S]+`；分类器把"有错但正则不中"改记
+  error-regex-mismatch（不再冒充未抛异常）。
+- **静默错答案清零**：翻译层新增 parse-tree 扫描（`scanValueShapes`，Transform 入口）：
+  map 值（`{}`/`{k: v}`）→ `unsupported("map value")`；未标注类型且元素类型类不一致的列表字面量
+  （忽略 null，INT/DOUBLE 异类）→ `unsupported("heterogeneous list literal")`。此前
+  `[1,'a',null,[1,2],...]` 会被 Ladybug 列表归一静默改写后 max/min 出错误结果。
+  非字面量元素无法静态判别，残余差异记 README #17。pattern 属性表 `(n {k: v})` 不受影响
+  （elementPropertySpecification 是另一条语法规则）。
+- **TCK 新口径：206 场景 = 165 过 / 30 挂 / 11 跳**。失败全为响亮报错：
+  rejected-by-layer 23（19 设计拒绝 + 4 异构列表）、parse-error 4（TCK 语料/文法）、
+  other 3（MIN/MAX/SUM 无列表重载，binder 响亮拒绝）。比计划 166 少 1：Agg2 [6] 旧口径
+  "过"是巧合（min 的提升后结果恰与期望同字面），现被异构检查拦下——正是 0 静默错的本意。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

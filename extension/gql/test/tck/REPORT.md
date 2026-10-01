@@ -2,7 +2,7 @@
 
 - TCK vendored at `extension/gql/test/tck/` (opengql/tck, Apache-2.0 — see NOTICE.md; openCypher-derived features retain their Neo4j attribution headers).
 - Mode: untyped graphs (`CREATE GRAPH ... ANY` + populator).
-- Scenarios run: **195** executed, **151 passed**, **44 failed**, **11 skipped**.
+- Scenarios run: **195** executed, **165 passed**, **30 failed**, **11 skipped**.
 
 Methodology: expected results are compared in the engine's Value::toString form; exception scenarios assert that *an* error is raised (GQLSTATUS codes are not emitted by the layer yet); side effects are checked only for empty-start working graphs and observable metrics (+nodes/+edges).
 
@@ -12,12 +12,12 @@ Methodology: expected results are compared in the engine's Value::toString form;
 |---|---|---|---|---|
 | Debug | 1 | 0 | 1 | 0 |
 | expressions_aggregation_Aggregation1 | 2 | 0 | 2 | 0 |
-| expressions_aggregation_Aggregation2 | 12 | 7 | 5 | 0 |
+| expressions_aggregation_Aggregation2 | 12 | 6 | 6 | 0 |
 | expressions_aggregation_Aggregation3 | 2 | 0 | 2 | 0 |
-| expressions_boolean_Boolean1 | 30 | 28 | 2 | 0 |
-| expressions_boolean_Boolean2 | 30 | 28 | 2 | 0 |
-| expressions_boolean_Boolean3 | 30 | 28 | 2 | 0 |
-| expressions_boolean_Boolean4 | 51 | 42 | 9 | 1 |
+| expressions_boolean_Boolean1 | 30 | 30 | 0 | 0 |
+| expressions_boolean_Boolean2 | 30 | 30 | 0 | 0 |
+| expressions_boolean_Boolean3 | 30 | 30 | 0 | 0 |
+| expressions_boolean_Boolean4 | 51 | 51 | 0 | 1 |
 | expressions_boolean_Boolean5 | 8 | 8 | 0 | 0 |
 | statements_catalog_modifying_create_graph_types_Create1 | 6 | 4 | 2 | 2 |
 | statements_catalog_modifying_create_graph_types_Create2 | 1 | 1 | 0 | 6 |
@@ -45,27 +45,13 @@ Methodology: expected results are compared in the engine's Value::toString form;
 - `expressions_aggregation_Aggregation1` :: [1] Count only non-null values — [parse-error] EXPECT OK BUT GOT ERROR: Runtime exception: Failed to parse GQL query: CREATE ({name: 'a', age: 33}) (line 1:7 no viable alternative at input 'CREATE (')
 - `expressions_aggregation_Aggregation1` :: [2] Counting loop relationships — [parse-error] EXPECT OK BUT GOT ERROR: Runtime exception: Failed to parse GQL query: CREATE (a), (a)-[:KNOWS]->(a) (line 1:7 no viable alternative at input 'CREATE (')
 - `expressions_aggregation_Aggregation2` :: [10] `min()` over list values — [other] Unexpected error for query: Binder exception: Function MIN did not receive correct arguments:
-- `expressions_aggregation_Aggregation2` :: [11] `max()` over mixed values — [result-mismatch] error: Expected equality of these values:
-- `expressions_aggregation_Aggregation2` :: [12] `min()` over mixed values — [result-mismatch] error: Expected equality of these values:
-- `expressions_aggregation_Aggregation2` :: [5] `max()` over mixed numeric values — [result-mismatch] error: Expected equality of these values:
+- `expressions_aggregation_Aggregation2` :: [11] `max()` over mixed values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
+- `expressions_aggregation_Aggregation2` :: [12] `min()` over mixed values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
+- `expressions_aggregation_Aggregation2` :: [5] `max()` over mixed numeric values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
+- `expressions_aggregation_Aggregation2` :: [6] `min()` over mixed numeric values — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: heterogeneous list literal
 - `expressions_aggregation_Aggregation2` :: [9] `max()` over list values — [other] Unexpected error for query: Binder exception: Function MAX did not receive correct arguments:
 - `expressions_aggregation_Aggregation3` :: [1] Sum only non-null values — [other] Unexpected error for query: Binder exception: Function SUM did not receive correct arguments:
 - `expressions_aggregation_Aggregation3` :: [2] No overflow during summation — [parse-error] EXPECT OK BUT GOT ERROR: Runtime exception: Failed to parse GQL query: UNWIND range(1000000, 2000000) AS i (line 1:0 mismatched input 'UNWIND' expecting {'AT',
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — [expected-exception-not-raised] error: Value of: std::regex_match(actualError, std::regex(testAnswer.expectedResult[0]))
 - `statements_catalog_modifying_create_graph_types_Create1` :: [4] Create a single node type with three labels, and three properties — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
 - `statements_catalog_modifying_create_graph_types_Create1` :: [5] Create a single node type with three labels, and three properties — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
 - `statements_catalog_modifying_create_graphs_Create2` :: [4] Create an closed graph like another graph — [rejected-by-layer] EXPECT OK BUT GOT ERROR: Runtime exception: GQL feature not supported: qualified graph name (schemas are not mapped)
@@ -86,7 +72,7 @@ Methodology: expected results are compared in the engine's Value::toString form;
 - `statements_catalog_modifying_drop_drop1` :: [6] Raise error condition dropping a non-empty schema — [rejected-by-layer] EXPECT OK BUT GOT ERROR: Runtime exception: GQL feature not supported: CREATE SCHEMA
 - `statements_catalog_modifying_drop_drop1` :: [7] Drop a schema, if exists — [rejected-by-layer] Unexpected error for query: Runtime exception: GQL feature not supported: DROP SCHEMA
 
-Failure classes: expected-exception-not-raised=15, other=3, parse-error=4, rejected-by-layer=19, result-mismatch=3
+Failure classes: other=3, parse-error=4, rejected-by-layer=23
 
 ## Unchecked assertions (best-effort)
 

@@ -136,12 +136,94 @@ GraphTypeRegistry GqlToCypherTransformer::deserializeGraphTypes(const std::strin
 }
 
 // =============================================================================
+// Value-shape guard
+// =============================================================================
+// GQL record values (`{}`, `{k: v}`) have no LadybugDB expression counterpart,
+// and GQL list literals preserve per-element types while LadybugDB homogenizes
+// mixed literals to one element type at bind time (STRING is the universal
+// sink) — silently erasing types and making max()/min() compare the wrong
+// values. Reject both shapes at translation time instead of returning wrong
+// answers. Pattern property maps (`(n {k: v})`) parse as
+// elementPropertySpecification and are intentionally untouched.
+
+namespace {
+
+std::string guardText(const std::string &query, antlr4::ParserRuleContext *ctx) {
+    if (!ctx) return "";
+    auto *startToken = ctx->getStart();
+    auto *stopToken = ctx->getStop();
+    if (!startToken || !stopToken) return "";
+    size_t startIdx = startToken->getStartIndex();
+    size_t stopIdx = stopToken->getStopIndex();
+    if (startIdx > query.size() || stopIdx + 1 > query.size() || stopIdx < startIdx) {
+        return "";
+    }
+    return query.substr(startIdx, stopIdx - startIdx + 1);
+}
+
+std::string trimCopy(const std::string &s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+// Type class of a list-element expression when it is a simple literal.
+// "null" and "unknown" (non-literals) are ignored by the homogeneity check.
+std::string literalTypeClass(const std::string &raw) {
+    std::string s = trimCopy(raw);
+    if (s.empty()) return "unknown";
+    if (iequals(s, "null")) return "null";
+    if (iequals(s, "true") || iequals(s, "false")) return "bool";
+    if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') return "string";
+    if (s.front() == '[') return "list";
+    if (s.front() == '{') return "map";
+    static const std::regex intRe(R"([+-]?[0-9]+)");
+    static const std::regex numRe(R"([+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?)");
+    if (std::regex_match(s, intRe)) return "int";
+    if (std::regex_match(s, numRe)) return "double";
+    return "unknown";
+}
+
+void scanValueShapes(antlr4::tree::ParseTree *node, const std::string &query) {
+    if (dynamic_cast<GQLParser::RecordConstructorContext *>(node)) {
+        GqlToCypherTransformer::unsupported("map value");
+    }
+    if (auto *list = dynamic_cast<GQLParser::ListValueConstructorByEnumerationContext *>(node)) {
+        // Explicitly typed enumerations (`INT64[] [...]`) state the element
+        // type; only untyped literals rely on LadybugDB's homogenization.
+        if (!list->listValueTypeName()) {
+            if (auto *elList = list->listElementList()) {
+                std::string seen;
+                for (auto *el : elList->listElement()) {
+                    std::string cls =
+                        literalTypeClass(guardText(query, el->valueExpression()));
+                    if (cls == "null" || cls == "unknown") continue;
+                    if (cls == "map") continue; // nested record constructor raises on the way down
+                    if (seen.empty()) {
+                        seen = cls;
+                    } else if (seen != cls) {
+                        GqlToCypherTransformer::unsupported("heterogeneous list literal");
+                    }
+                }
+            }
+        }
+    }
+    for (auto *child : node->children) {
+        scanValueShapes(child, query);
+    }
+}
+
+} // namespace
+
+// =============================================================================
 // Public entry point
 // =============================================================================
 
 std::string GqlToCypherTransformer::Transform(GQLParser::GqlProgramContext &root) {
     sawIfNotExistsCreateGraph = false;
     createGraphName.clear();
+    scanValueShapes(&root, query);
 
     if (root.sessionCloseCommand()) {
         unsupported("SESSION CLOSE");

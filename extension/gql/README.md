@@ -148,12 +148,22 @@ see `THIRD_PARTY_NOTICES.md`):
 16. **Unnamed result columns** are named after their GQL source text
     (`RETURN max(x)` → column `max(x)`), which is the GQL convention;
     LadybugDB's engine alone would uppercase function names.
-17. **Boolean operators on non-boolean operands**: GQL requires an error
-    (e.g. `123 AND true`); LadybugDB coerces truthy values and returns a
-    result. Related three-valued-logic edges (`null` propagation) follow
-    LadybugDB's boolean semantics.
+17. **Heterogeneous list literals are rejected**: GQL list literals preserve
+    per-element types (`[1, 2.0]` holds an INT64 and a DOUBLE); LadybugDB
+    homogenizes mixed literals to one element type at bind time (STRING is the
+    universal sink), which silently erases types and would make `max()`/`min()`
+    compare the wrong values. Unyped literals whose element classes disagree
+    (INT vs DOUBLE count as different classes; `null` ignored) are rejected with
+    `GQL feature not supported: heterogeneous list literal`. Non-literal
+    elements cannot be judged statically and may still homogenize at runtime.
+    **Map/record values** (`{}`, `{k: v}`) in expressions are rejected too
+    (`... map value`) — LadybugDB expressions have no map type.
 18. **`FILTER` maps to `WITH * WHERE`** so it composes after `FOR`/`MATCH`;
     result semantics are unchanged.
+19. **Boolean operators do type-check their operands**: `123 AND true` raises
+    a BinderException in LadybugDB as GQL requires (earlier TCK reports claimed
+    otherwise — that was a test-harness regex bug matching multi-line errors,
+    now fixed).
 
 ### Graph type → schema mapping
 
@@ -195,22 +205,24 @@ Measured on 2026-10-01 (untyped-graph mode; `python extension/gql/test/tck/run_t
 
 | Feature area | run | passed | failed | skipped |
 |---|---|---|---|---|
-| expressions / boolean | 149 | 126 | 23 | 1 |
-| expressions / aggregation | 16 | 7 | 9 | 0 |
+| expressions / boolean | 149 | 149 | 0 | 1 |
+| expressions / aggregation | 16 | 6 | 10 | 0 |
 | catalog / create graph types | 7 | 5 | 2 | 8 |
 | catalog / create graphs | 8 | 4 | 4 | 0 |
-| catalog / create+drop schemas | 15 | 1 | 14 | 2 |
+| catalog / create+drop schemas | 14 | 1 | 13 | 2 |
 | debug | 1 | 0 | 1 | 0 |
-| **total** | **195** | **151** | **44** | **11** of 206 |
+| **total** | **195** | **165** | **30** | **11** of 206 |
 
-Failure classes: rejected-by-layer 19 (schema namespaces, `LIKE`/`AS COPY OF`,
-multi-label node types — unsupported by design), expected-exception-not-raised
-15 (LadybugDB coerces non-boolean operands of AND/OR/XOR/NOT instead of
-raising), parse-error 4 (TCK setup uses openCypher `CREATE (...)`, which is not
-GQL — GQL writes `INSERT`), result-mismatch 3 (mixed-type `max`/`min` over
-heterogeneous lists). See `test/tck/REPORT.md` for the per-scenario listing and
-methodology (exception scenarios assert that *an* error is raised — GQLSTATUS
-codes are not emitted yet; side effects are checked only where observable).
+Failure classes: rejected-by-layer 23 (schema namespaces, `LIKE`/`AS COPY OF`,
+multi-label node types — unsupported by design — plus 4 heterogeneous list
+literals, see difference 17), parse-error 4 (TCK setup uses openCypher
+`CREATE (...)`/`UNWIND`, which is not GQL — GQL writes `INSERT`/`FOR`; plus one
+`CREATE GRAPH ANY AS COPY OF` grammar ambiguity), other 3 (`MIN`/`MAX`/`SUM`
+over list values — the engine has no list-typed aggregates; the binder rejects
+them loudly). All failures are loud: the layer has **no silent wrong-answer
+class**. See `test/tck/REPORT.md` for the per-scenario listing and methodology
+(exception scenarios assert that *an* error is raised — GQLSTATUS codes are not
+emitted yet; side effects are checked only where observable).
 
 Skipped scenarios are either capability-tagged for features LadybugDB does not
 have (`@MinNodeLabelsZero`, `@MaxNodeLabelsGTOne`, ...) or reference sample data
