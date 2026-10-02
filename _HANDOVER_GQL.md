@@ -63,17 +63,17 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 122/122 全绿**（2026-10-02 Phase 11 SCHEMA 命名空间收工）：
+**✅ 124/124 全绿**（2026-10-02 Phase 11 + Q4 收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
 **orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
 **jsonagg 9**（Q2 双跑：ANY 图 sum/avg/max/min、混合保型、空组 NULL、DISTINCT、乘数、native SUM 对拍、非数值响亮拒）/
 **comparebridge 11**（Q2-A 双跑：哨兵序算子、跨类序、三值 NULL/NOT、typed 操作数、sortkey ASC/DESC/多键、>2^53 精度、bool rank、等值桥、数组字典序、object 响亮拒）/
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
-**schemapath 10**（Phase 11：CREATE/DROP SCHEMA+IF EXISTS、目录语义、九错条件 [42000]、限定名 roundtrip、
-组合拒、READ ONLY [25G03] vs 无码、`_gqlsch__` 保留前缀拒、`_gql_schemas()` 形态）/
+**schemapath 12**（Phase 11+Q4：CREATE/DROP SCHEMA+IF EXISTS、目录语义、九错条件 [42000]、限定名 roundtrip、
+组合拒、READ ONLY [25G03] vs 无码、`_gqlsch__` 保留前缀拒、`_gql_schemas()` 形态、USE 前缀从句双跑、层外图冲突）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
-**TCK 合规：206 场景 = 188 绿（68 过 + 120 pass-with-note）/ 9 挂 / 9 跳**（明细 `extension/gql/test/tck/REPORT.md`；
+**TCK 合规：206 场景 = 190 绿（70 过 + 120 pass-with-note）/ 9 挂 / 7 跳**（明细 `extension/gql/test/tck/REPORT.md`；
 三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
 
 ### Phase 5（合规收尾）交付记录（2026-10-01）
@@ -303,8 +303,26 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
 - **战果**：自测 **112→122**（schemapath 10）、TCK **172→188 绿**（68 过 + 120 note）/
   9 挂 / 9 跳，wrong-GQLSTATUS=0；9 挂=语料 parse 4 + 多标签 2 + LIKE 1 + AS COPY OF 2（全部响亮，
   含预期账：Create2 [4] 改名通后死在 LIKE、仍红）。
-- **残余（README #22）**：注册表不落 WAL；层外建图对冲突检查盲（引擎物理名冲突仍响亮）；
-  相对限定名（dir.name）不支持；USE GRAPH 裸路径=文法天花板。
+- **残余（README #22）**：注册表不落 WAL；相对限定名（dir.name）不支持。
+
+### Q4 轮（Q-F/Q-G/Q-E3 落地）交付记录（2026-10-02，外部回帖 + 验证 + 1 subagent + 主会话集成）
+
+- **Q-F 三层反转（头条）**：回帖文法读对（`useGraphClause : USE graphExpression`，USE 后无 GRAPH
+  关键字；GRAPH 在 nonReservedWords 会被当图名吃掉），但「USE /path 今天就能跑（独立语句）」被探机
+  **证伪**——useGraphClause 是查询/数据修改语句的**前缀从句**（GQL.g4:382-386/:539-551），独立 USE
+  构不成 statement；我方原「名位不收 /path」机制归因也错（名位经 graphReference→…→absoluteDirectoryPath
+  收 /path）。**真形态已通**：`USE /foo/g MATCH …`（+双跑用例）；`SESSION SET GRAPH /path` 为会话拼写；
+  `USE GRAPH x` 勿写（GRAPH 被当图名）；不做 USE GRAPH x→USE x 宽容（会吃掉名叫 graph 的合法图）。
+- **Q-G**：CREATE/DROP SCHEMA 的「名字是图」冲突检查并查引擎 catalog（`getGraphEntries` 点查物理名
+  +根路径裸名），层外建图盲区闭合（schemapath EngineGraphConflict 用例钉）。
+- **Q-E3**：run_tck 模板替换 `$(randomLabelSet(minNodeLabels-1|+1))`→空串/`:L0&L1`（cardinality 1/1
+  脚注），Given「randomly generated label set」no-op；graph-types [7][8] 2 跳→2 跑。
+- **贴码延伸**：匿名节点类型→`[22G0N]`、多标签→`[22G0P]`（语义与 [7][8] 钉码相符），[7][8] 升真契约。
+- **新问题语料第 3 例（三档机制在线上抓到）**：graph-types [6] 题名「重复属性名」但 body 多标签+属性
+  无一重复（[4] body copy-paste），钉 42000 与实际拒因 22G0P 冲突→wrong-gqlstatus 挂；按先例软化档
+  （该场景码检查降 note）+ 脚注保绿。**wrong-GQLSTATUS 首次线上生效=抓真 bug 的证据**。
+- **战果**：自测 **122→124**（USE 前缀从句、层外图冲突）；TCK **188→190 绿（70 过+120 note）/ 9 挂 / 7 跳**，
+  wrong-GQLSTATUS=0。
 
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为

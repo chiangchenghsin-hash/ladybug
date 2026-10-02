@@ -280,11 +280,19 @@ engine's native operators byte-for-byte.
     fails a scenario whose expected code differs from an emitted one.
     Known edges: the registry is not WAL-persisted (like the graph-type
     registry, difference 10 — restart loses schemas, DDL is re-runnable);
-    graphs created outside `CALL GQL` are invisible to the conflict checks
-    (the engine still rejects physical-name collisions loudly); relative
-    qualified names (`dir.name`) stay unsupported; bare `USE GRAPH /path`
-    does not parse in GQL.g4's use-graph clause (grammar ceiling — use
-    `SESSION SET GRAPH /path`, which does parse and is rewritten).
+    relative qualified names (`dir.name`) stay unsupported. Selecting a
+    qualified graph: GQL's `USE` is a **prefix clause of query/data-modifying
+    statements** and takes no `GRAPH` keyword — `USE /foo/g MATCH (n) RETURN
+    n` works (rewritten through the same path as `SESSION SET GRAPH`, which
+    is the session-level spelling). Standalone `USE <graph>` is not a GQL
+    statement, and `USE GRAPH x` misparses: `GRAPH` is a nonReserved word, so
+    it is read as a graph *named* "GRAPH" (do not type it; a `USE GRAPH x →
+    USE x` leniency would eat legal graph names and is deliberately not
+    added). Conflict checks ("identifies a graph") consult both the registry
+    and the engine catalog (`getGraphEntries`), so graphs created outside
+    `CALL GQL` are caught; label-set cardinality rejections carry the corpus
+    GQLSTATUS pins (`[22G0N]` anonymous = 0 labels < min 1, `[22G0P]`
+    multi-label > max 1).
 
 ### Graph type → schema mapping
 
@@ -328,15 +336,15 @@ Measured on 2026-10-02 (untyped-graph mode; `python extension/gql/test/tck/run_t
 |---|---|---|---|---|---|
 | expressions / boolean | 149 | 31 | 118 | 0 | 1 |
 | expressions / aggregation | 16 | 13 | 0 | 3 | 0 |
-| catalog / create graph types | 7 | 4 | 1 | 2 | 8 |
+| catalog / create graph types | 9 | 6 | 1 | 2 | 6 |
 | catalog / create graphs | 8 | 3 | 1 | 4 | 0 |
 | catalog / create+drop schemas | 16 | 16 | 0 | 0 | 0 |
 | debug | 1 | 1 | 0 | 0 | 0 |
-| **total** | **197** | **68** | **120** | **9** | **9** of 206 |
+| **total** | **199** | **70** | **120** | **9** | **7** of 206 |
 
 Exception scenarios assert the corpus's GQLSTATUS code in three tiers
 (regex match = pass; error without any bracketed code = pass-with-note;
-different code = fail). 68 scenarios pass with codes or without error
+different code = fail). 70 scenarios pass with codes or without error
 assertions; 120 pass-with-note are error scenarios whose error is loud but
 carries no GQLSTATUS code yet (engine passthrough errors — Binder,
 Conversion, … — are intentionally untagged; see difference 22).
@@ -351,11 +359,16 @@ loud: the layer has **no silent wrong-answer class**. One passing scenario
 header row contradicts its own query (`n.name|sum(n.num)` vs `p.name,
 sum(p.age)`), so no implementation could pass a column-name check on it; the
 feature files are left unmodified and REPORT.md discloses the exception.
-Two corpus-side exceptions are likewise disclosed in REPORT.md: `Create1`
-schemas [7] re-reads its When as `CREATE SCHEMA IF NOT EXISTS` (the shipped
-text omits the keyword while its title and `+schemas | 0` require it), and
-`data/catalogs/catalog-1.gql` (referenced by `drop1` [1][2]) is restored as
-input data the vendored copy omitted.
+Corpus-side exceptions are likewise disclosed in REPORT.md, each with the
+feature files left unmodified: `Create1` schemas [7] re-reads its When as
+`CREATE SCHEMA IF NOT EXISTS` (the shipped text omits the keyword while its
+title and `+schemas | 0` require it); `graph-types Create1` [6] is titled
+"duplicate property names" but its body lists distinct properties under a
+multi-label set (a copy-paste of the [4] body) — its pinned 42000 is demoted
+to the note tier for that scenario only; `$(randomLabelSet(...))` templates
+(graph-types [7][8], the only two in the corpus) are substituted semantically
+(engine label cardinality 1/1); and `data/catalogs/catalog-1.gql` (referenced
+by `drop1` [1][2]) is restored as input data the vendored copy omitted.
 See `test/tck/REPORT.md` for the per-scenario listing and methodology
 (exception scenarios assert that *an* error is raised — GQLSTATUS codes are not
 emitted yet; side effects are checked only where observable).
