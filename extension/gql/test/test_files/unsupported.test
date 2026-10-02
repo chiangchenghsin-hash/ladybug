@@ -151,19 +151,13 @@ Runtime exception: GQL feature not supported: SESSION SET SCHEMA
 -STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
 ---- ok
 
-# Compound label expressions on nodes are translated (see labels.test); the
-# remaining label constructs stay explicitly unsupported.
--STATEMENT CALL GQL("MATCH (n:%) RETURN n.v")
----- error
-Runtime exception: GQL feature not supported: % label wildcard
-
+# Compound label expressions and IS [NOT] LABELED predicates on nodes are
+# translated (see labels.test / smallmodes.test); what remains explicitly
+# unsupported is a label expression on an *edge* pattern and multi-label
+# INSERT sets on typed graphs.
 -STATEMENT CALL GQL("MATCH (a)-[e:X&Y]->(b) RETURN a.v")
 ---- error
 Runtime exception: GQL feature not supported: label expression operator (&, !, |, parentheses)
-
--STATEMENT CALL GQL("MATCH (n:T) WHERE n IS LABELED T RETURN n.v")
----- error
-Runtime exception: GQL feature not supported: label predicate (IS [NOT] LABELED ...)
 
 -STATEMENT CALL GQL("INSERT (n:T&S {v:1})")
 ---- error
@@ -209,19 +203,6 @@ Runtime exception: GQL feature not supported: quantified path pattern with multi
 Runtime exception: GQL feature not supported: quantified path pattern .+
 
 
--CASE UnsupportedSimplePathMode
-
--STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
----- ok
-
--STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
----- ok
-
--STATEMENT CALL GQL("MATCH SIMPLE (n:T)-[r]->(m:T) RETURN n.v")
----- error
-Runtime exception: GQL feature not supported: SIMPLE path mode (LadybugDB has WALK/TRAIL/ACYCLIC only)
-
-
 -CASE UnsupportedCountedShortestSearch
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
@@ -261,7 +242,7 @@ Runtime exception: GQL feature not supported: ANY <k> PATHS search prefix
 Runtime exception: GQL feature not supported: path mode/search prefix on multi-hop pattern
 
 
--CASE UnsupportedDifferentEdgesMatchMode
+-CASE UnsupportedDifferentEdgesMultiplePatterns
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 ---- ok
@@ -269,9 +250,11 @@ Runtime exception: GQL feature not supported: path mode/search prefix on multi-h
 -STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
 ---- ok
 
--STATEMENT CALL GQL("MATCH DIFFERENT EDGES (a:T)-[r]->(b:T) RETURN a.v")
+# Single-pattern DIFFERENT EDGES is TRAIL (pinned in smallmodes.test); across
+# a comma-separated path pattern list edge distinctness is unexpressible.
+-STATEMENT CALL GQL("MATCH DIFFERENT EDGES (a:T)-[r]->(b:T), (c:T)-[s]->(d:T) RETURN a.v")
 ---- error
-Runtime exception: GQL feature not supported: DIFFERENT EDGES match mode
+Runtime exception: GQL feature not supported: DIFFERENT EDGES over multiple path patterns
 
 
 -CASE UnsupportedSelectDistinctWithAggregation

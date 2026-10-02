@@ -9,8 +9,11 @@
 #include <optional>
 #include <string_view>
 #include <type_traits>
+#include <unordered_set>
 
+#include "binder/expression/expression_util.h"
 #include "common/assert.h"
+#include "common/constants.h"
 #include "common/exception/binder.h"
 #include "common/exception/runtime.h"
 #include "common/json_utils.h"
@@ -21,6 +24,7 @@
 #include "function/aggregate_function.h"
 #include "function/arithmetic/add.h"
 #include "function/comparison/comparison_functions.h"
+#include "function/hash/hash_functions.h"
 #include "function/scalar_function.h"
 #include "yyjson.h"
 
@@ -1603,6 +1607,247 @@ function_set GqlNeFunction::getFunctionSet() {
 
 function_set GqlSortKeyFunction::getFunctionSet() {
     return buildSortKeyFunctionSet(name);
+}
+
+// =============================================================================
+// _GQL_IS_SIMPLE(ANY) -> BOOL
+// =============================================================================
+// ISO GQL SIMPLE path predicate over a RECURSIVE_REL path value: true iff
+// every node of the path is distinct, with the single exemption that the
+// first and last node may be the same (closed cycle). This is strictly
+// weaker than IS_ACYCLIC (which forbids first=last) and strictly stronger
+// than the engine's `*ACYCLIC` slot prefilter (which only distincts
+// intermediate nodes and lets endpoints collide with them) — hence the
+// dedicated predicate the GQL SIMPLE path mode wraps its path variable in.
+// Node identities are read with the same layout as UnaryPathExecutor's
+// IS_TRAIL/IS_ACYCLIC (src/include/function/path/path_function_executor.h):
+// NODES = LIST of NODE structs, internalID at field 0.
+
+namespace {
+
+// Pairwise-distinct check over the first `count` node IDs of one path's node
+// list. `count` already excludes a duplicated last element when first==last
+// (see execFunc), so every node of the path is checked exactly once.
+bool isDistinctPrefix(common::ValueVector* idsVector, common::offset_t base, uint32_t count,
+    std::unordered_set<common::internalID_t, InternalIDHasher>& seen) {
+    seen.clear();
+    for (uint32_t i = 0; i < count; ++i) {
+        auto& id = idsVector->getValue<common::internalID_t>(base + i);
+        if (!seen.insert(id).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+void GqlIsSimpleFunction::execFunc(const std::vector<std::shared_ptr<ValueVector>>& parameters,
+    const std::vector<SelectionVector*>& parameterSelVectors, ValueVector& result,
+    SelectionVector* resultSelVector, void* /*dataPtr*/) {
+    DASSERT(parameters.size() == 1);
+    auto& input = *parameters[0];
+    // Path struct: field 0 = NODES (LIST of NODE); internalID at field 0 of
+    // each NODE — the exact layout UnaryPathExecutor::executeNodeIDs reads.
+    DASSERT(0 == StructType::getFieldIdx(input.dataType, InternalKeyword::NODES));
+    auto nodesVector = StructVector::getFieldVector(&input, 0).get();
+    auto listDataVector = ListVector::getDataVector(nodesVector);
+    DASSERT(0 == StructType::getFieldIdx(listDataVector->dataType, InternalKeyword::ID));
+    auto idsVector = StructVector::getFieldVector(listDataVector, 0).get();
+    std::unordered_set<common::internalID_t, InternalIDHasher> seen;
+    for (auto i = 0u; i < resultSelVector->getSelSize(); ++i) {
+        auto inputPos = (*parameterSelVectors[0])[i];
+        auto resultPos = (*resultSelVector)[i];
+        if (input.isNull(inputPos)) {
+            result.setNull(resultPos, true);
+            continue;
+        }
+        result.setNull(resultPos, false);
+        auto& listEntry = nodesVector->getValue<common::list_entry_t>(inputPos);
+        const uint32_t n = static_cast<uint32_t>(listEntry.size);
+        bool simple;
+        if (n <= 1) {
+            simple = true; // empty / single-node path: nothing can repeat
+        } else {
+            auto& first = idsVector->getValue<common::internalID_t>(listEntry.offset);
+            auto& last = idsVector->getValue<common::internalID_t>(listEntry.offset + n - 1);
+            // Closed cycle: the only allowed repeat is first==last, so checking
+            // the leading n-1 IDs (first included, duplicate last excluded)
+            // pairwise-distinct covers every node exactly once.
+            uint32_t count = (first == last) ? n - 1 : n;
+            simple = isDistinctPrefix(idsVector, listEntry.offset, count, seen);
+        }
+        result.setValue<bool>(resultPos, simple);
+    }
+}
+
+function_set GqlIsSimpleFunction::getFunctionSet() {
+    function_set result;
+    result.push_back(std::make_unique<ScalarFunction>(name,
+        std::vector<LogicalTypeID>{LogicalTypeID::ANY}, LogicalTypeID::BOOL, execFunc));
+    return result;
+}
+
+// =============================================================================
+// _GQL_LIST_CHECKED(ANY...) -> LIST
+// =============================================================================
+// Q5-3 bind-time heterogeneous-list guard for typed graphs. LadybugDB's
+// list_creation bindFunc silently homogenizes mixed element types (STRING is
+// the universal sink), erasing INT/DOUBLE distinctions and stringifying
+// losers — a silent wrong answer for GQL, which preserves per-element types.
+// The translation layer wraps every typed-graph list literal that contains a
+// non-literal element in this call (pure literals stay on the engine's own
+// list binding: scanValueShapes already rejected heterogeneous pure literals
+// at translation time; ANY graphs and unresolvable kinds are never wrapped —
+// their JSON property columns are dynamically typed and a static class
+// comparison there would reject legal dynamic queries).
+//
+// bindFunc sees the engine-derived argument types BEFORE the post-bind cast
+// (bind_function_expression.cpp runs bindFunc first, then casts to
+// bindData->paramTypes), so the class comparison runs at exactly the point
+// where the engine would otherwise commit to a homogenized element type.
+// Null literals and untyped placeholders (ANY) are unjudgeable and skipped;
+// every other pair must land in the same class as scanValueShapes'
+// partition: one int family, one double family, and string/bool/list/map
+// each their own (INT vs DOUBLE is heterogeneous — same rule the static
+// guard enforces for literals). A mismatch throws loudly; agreement falls
+// through to list_creation's own combination so the pinned LIST(<T>) element
+// type and the per-argument casts match native list binding byte-for-byte.
+
+// Type class for one judgeable argument type (matches literalTypeClass's
+// partition in gql_transformer.cpp; exotic types keep their own identity so
+// identical exotic lists pass while cross-type mixes throw).
+static std::string listCheckedTypeClass(const common::LogicalType& type) {
+    switch (type.getLogicalTypeID()) {
+    case common::LogicalTypeID::INT8:
+    case common::LogicalTypeID::INT16:
+    case common::LogicalTypeID::INT32:
+    case common::LogicalTypeID::INT64:
+    case common::LogicalTypeID::INT128:
+    case common::LogicalTypeID::UINT8:
+    case common::LogicalTypeID::UINT16:
+    case common::LogicalTypeID::UINT32:
+    case common::LogicalTypeID::UINT64:
+    case common::LogicalTypeID::UINT128:
+    case common::LogicalTypeID::SERIAL:
+        return "int";
+    case common::LogicalTypeID::FLOAT:
+    case common::LogicalTypeID::DOUBLE:
+    case common::LogicalTypeID::DECIMAL:
+        return "double";
+    case common::LogicalTypeID::STRING:
+        return "string";
+    case common::LogicalTypeID::BOOL:
+        return "bool";
+    case common::LogicalTypeID::LIST:
+    case common::LogicalTypeID::ARRAY:
+        return "list";
+    case common::LogicalTypeID::MAP:
+        return "map";
+    default:
+        return "type:" +
+               common::LogicalTypeUtils::toString(type.getLogicalTypeID());
+    }
+}
+
+static std::unique_ptr<FunctionBindData> bindListChecked(
+    const ScalarBindFuncInput& input) {
+    // Class gate: judgeable arguments must agree; unjudgeable ones (null
+    // literal, ANY placeholder) never veto. The loud throw is the whole
+    // point of this function — never fall through to silent homogenization.
+    std::string seenClass;
+    for (auto& arg : input.arguments) {
+        const auto& type = arg->getDataType();
+        if (type.getLogicalTypeID() == common::LogicalTypeID::ANY ||
+            binder::ExpressionUtil::isNullLiteral(*arg)) {
+            continue;
+        }
+        std::string cls = listCheckedTypeClass(type);
+        if (seenClass.empty()) {
+            seenClass = std::move(cls);
+        } else if (cls != seenClass) {
+            throw common::RuntimeException{
+                "GQL feature not supported: heterogeneous list element types"};
+        }
+    }
+    // Same combination as ListCreationFunction::bindFunc: within one class
+    // this widens (INT32 + INT64 -> INT64) or keeps the type as-is; the
+    // cross-class STRING sink is unreachable because the gate above already
+    // threw. Result: LIST(pinned) with one pinned cast per argument, so
+    // exec sees uniform physical element data.
+    LogicalType combinedType(LogicalTypeID::ANY);
+    std::unordered_set<LogicalTypeID> distinctTypes;
+    for (auto& arg : input.arguments) {
+        auto typeID = arg->getDataType().getLogicalTypeID();
+        if (typeID != LogicalTypeID::ANY) {
+            distinctTypes.insert(typeID);
+        }
+    }
+    const bool mixedConcreteTypes = distinctTypes.size() > 1;
+    if (mixedConcreteTypes) {
+        binder::ExpressionUtil::tryCombineDataType(input.arguments, combinedType);
+        if (combinedType.getLogicalTypeID() == LogicalTypeID::ANY) {
+            if (distinctTypes.contains(LogicalTypeID::STRING)) {
+                combinedType = LogicalType::STRING();
+            } else {
+                for (auto& arg : input.arguments) {
+                    if (arg->getDataType().getLogicalTypeID() != LogicalTypeID::ANY) {
+                        combinedType = arg->getDataType().copy();
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        binder::ExpressionUtil::tryCombineDataType(input.arguments, combinedType);
+        if (combinedType.getLogicalTypeID() == LogicalTypeID::ANY) {
+            combinedType = LogicalType::INT64();
+        }
+    }
+    if (combinedType.containsAny()) {
+        combinedType = LogicalType::JSON();
+    }
+    auto resultType = LogicalType::LIST(combinedType.copy());
+    auto bindData = std::make_unique<FunctionBindData>(std::move(resultType));
+    for (auto& _ : input.arguments) {
+        (void)_;
+        bindData->paramTypes.push_back(combinedType.copy());
+    }
+    return bindData;
+}
+
+// Assembles the N argument vectors into one list row — the exact construction
+// of ListCreationFunction::execFunc (resetAuxiliaryBuffer, addList, per-slot
+// copyFromVectorData with flat/unflat position handling).
+void GqlListCheckedFunction::execFunc(
+    const std::vector<std::shared_ptr<ValueVector>>& parameters,
+    const std::vector<SelectionVector*>& parameterSelVectors, ValueVector& result,
+    SelectionVector* resultSelVector, void* /*dataPtr*/) {
+    result.resetAuxiliaryBuffer();
+    for (auto selectedPos = 0u; selectedPos < resultSelVector->getSelSize();
+         ++selectedPos) {
+        auto pos = (*resultSelVector)[selectedPos];
+        auto resultEntry = ListVector::addList(&result, parameters.size());
+        result.setValue(pos, resultEntry);
+        auto resultDataVector = ListVector::getDataVector(&result);
+        auto resultPos = resultEntry.offset;
+        for (auto i = 0u; i < parameters.size(); i++) {
+            const auto& parameter = parameters[i];
+            const auto& parameterSelVector = *parameterSelVectors[i];
+            auto paramPos = parameter->state->isFlat() ? parameterSelVector[0] : pos;
+            resultDataVector->copyFromVectorData(resultPos++, parameter.get(), paramPos);
+        }
+    }
+}
+
+function_set GqlListCheckedFunction::getFunctionSet() {
+    function_set result;
+    auto function = std::make_unique<ScalarFunction>(name,
+        std::vector<LogicalTypeID>{LogicalTypeID::ANY}, LogicalTypeID::LIST, execFunc);
+    function->bindFunc = bindListChecked;
+    function->isVarLength = true;
+    result.push_back(std::move(function));
+    return result;
 }
 
 } // namespace gql_extension

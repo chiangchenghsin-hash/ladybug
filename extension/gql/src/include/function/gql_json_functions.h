@@ -99,5 +99,41 @@ struct GqlSortKeyFunction {
     static function::function_set getFunctionSet();
 };
 
+// _GQL_IS_SIMPLE(ANY) -> BOOL — ISO GQL SIMPLE path predicate: every node of
+// the path distinct except that the first and last may be the same (closed
+// cycle). The engine has no such mode (`*ACYCLIC` only distincts intermediate
+// nodes and IS_ACYCLIC forbids first=last), so the GQL SIMPLE path mode wraps
+// its path variable in this predicate.
+struct GqlIsSimpleFunction {
+    static constexpr const char* name = "_GQL_IS_SIMPLE";
+
+    static function::function_set getFunctionSet();
+
+    static void execFunc(const std::vector<std::shared_ptr<common::ValueVector>>& parameters,
+        const std::vector<common::SelectionVector*>& parameterSelVectors,
+        common::ValueVector& result, common::SelectionVector* resultSelVector,
+        void* /*dataPtr*/);
+};
+
+// _GQL_LIST_CHECKED(ANY...) -> LIST — Q5-3 bind-time guard against the
+// engine's list-binding homogenization on typed graphs. The translation layer
+// wraps every list literal that contains at least one non-literal element in
+// this call; bindFunc compares the engine-derived argument type classes (the
+// scanValueShapes int/double/string/bool/list/map partition) and throws
+// "GQL feature not supported: heterogeneous list element types" on a
+// mismatch, where the engine's own list_creation would silently sink the
+// losers to STRING. Execution assembles the N argument vectors into one list
+// exactly like ListCreationFunction.
+struct GqlListCheckedFunction {
+    static constexpr const char* name = "_GQL_LIST_CHECKED";
+
+    static function::function_set getFunctionSet();
+
+    static void execFunc(const std::vector<std::shared_ptr<common::ValueVector>>& parameters,
+        const std::vector<common::SelectionVector*>& parameterSelVectors,
+        common::ValueVector& result, common::SelectionVector* resultSelVector,
+        void* /*dataPtr*/);
+};
+
 } // namespace gql_extension
 } // namespace lbug

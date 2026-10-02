@@ -219,8 +219,12 @@ private:
     // any pattern-level WHERE; the caller merges them into the clause's WHERE.
     std::string translateGraphPattern(GQLParser::GraphPatternContext *ctx,
                                       std::vector<std::string> &wheres);
+    // `forcedRecType` supplies a whole-pattern mode when the statement has no
+    // path-mode prefix of its own (DIFFERENT EDGES -> "TRAIL"); an explicit
+    // prefix in the pattern wins over it.
     std::string translatePathPattern(GQLParser::PathPatternContext *ctx,
-                                     std::vector<std::string> &wheres);
+                                     std::vector<std::string> &wheres,
+                                     const std::string &forcedRecType = "");
     // `recType` is injected into each var-length slot ("", "TRAIL", "ACYCLIC",
     // "SHORTEST", "ALL SHORTEST"). Whole-pattern mode semantics are applied by
     // translatePathPattern via a path-variable wrap (IS_TRAIL / IS_ACYCLIC).
@@ -242,9 +246,11 @@ private:
     // GQL label expression (ISO GQL feature G074) → Cypher boolean over the
     // bound variable's labels. Simple names stay as pattern labels; compound
     // expressions become WHERE predicates whose form depends on the graph
-    // kind (ANY: list_contains(labels(v), ...); typed: labels(v) = ...).
+    // kind (ANY: list_contains(labels(v), ...); typed: labels(v) = ...);
+    // `%` is TRUE on typed graphs (a node always has its one table label)
+    // and size(labels(v)) > 0 on ANY graphs.
     std::string translateLabelExpression(GQLParser::LabelExpressionContext *ctx,
-                                         const std::string &var);
+                                         const std::string &var) const;
     // Resolve `labelGraphIsAny` from the statement's graph references
     // (FROM GRAPH / USE GRAPH / SESSION SET GRAPH; empty name = current).
     void resolveLabelGraphKind(GQLParser::GqlProgramContext *root);
@@ -283,6 +289,17 @@ private:
     // Rewrites a graphExpression (USE GRAPH /foo/g, SESSION SET GRAPH, FROM ...)
     // to the physical graph name; plain names unchanged.
     std::string rewriteGraphExpression(GQLParser::GraphExpressionContext *ctx);
+    // Absolute logical path for a qualified catalog object reference. The
+    // root-anchored form keeps its spelling byte-for-byte; the dotted form
+    // `(objectName PERIOD)+ graphName` is rebuilt segment-by-segment from
+    // the parse tree ("/dir/g" for `dir.g`, delimited segments stripped
+    // after the tree split, so a backticked name may contain periods).
+    // Relative/predefined/parameter schema references reject loudly.
+    // `whole` is the enclosing parent+name context (raw-text source for the
+    // root-anchored branch), `parent` the (non-null) parent reference.
+    std::string qualifiedCatalogPath(antlr4::ParserRuleContext *whole,
+                                     GQLParser::CatalogObjectParentReferenceContext *parent,
+                                     antlr4::ParserRuleContext *finalName);
     // Graph type reference -> physical type name ("$param" rejected; qualified
     // references resolved through the schema catalog).
     std::string graphTypeRefName(GQLParser::GraphTypeReferenceContext *ref);
@@ -306,13 +323,24 @@ private:
     // A single <comparisonExprAlt>: emit both operands recursively, then the
     // total-order call for the operator (equality stays textual until B2).
     std::string emitComparison(GQLParser::ComparisonExprAltContext *ctx) const;
-    // Source text of `node` with every top-level comparison replaced by its
-    // emitted form (right-to-left splices over absolute source offsets).
-    std::string spliceComparisons(antlr4::tree::ParseTree *node) const;
-    // The same bridge for any expression-bearing subtree (search conditions,
-    // projection items, HAVING): every top-level comparison inside `node` is
-    // spliced. Descending stops at aggregate boundaries so span-based aggregate
-    // alias rewrites (replaceExprs over raw source text) keep matching.
+    // One `v IS [NOT] LABELED <labelExpr>` / `v:<labelExpr>` predicate → the
+    // Cypher label predicate from translateLabelExpression (negated as a
+    // whole for IS NOT), on both graph kinds.
+    std::string emitLabeledPredicate(GQLParser::LabeledPredicateContext *ctx) const;
+    // Q5-3: a typed-graph list literal holding a non-literal element →
+    // `_gql_list_checked(e1, ..., en)`; each element is emitted recursively
+    // so nested rewrite targets compose inside the call.
+    std::string emitCheckedList(
+        GQLParser::ListValueConstructorByEnumerationContext *list) const;
+    // Source text of `node` with every top-level rewrite target replaced by
+    // its emitted form (right-to-left splices over absolute source offsets):
+    // comparisons on ANY graphs, IS [NOT] LABELED predicates everywhere,
+    // guarded list literals on typed graphs.
+    // Descending stops at aggregate boundaries so span-based aggregate alias
+    // rewrites (replaceExprs over raw source text) keep matching.
+    std::string emitRewrittenExpr(antlr4::tree::ParseTree *node) const;
+    // Any expression-bearing subtree (search conditions, projection items,
+    // HAVING) → emitRewrittenExpr.
     std::string emitExpr(antlr4::tree::ParseTree *node) const;
     // Renders an ORDER BY clause with `pairs` (projected expression -> output
     // alias) applied. On ANY graphs each mapped sort key is wrapped in

@@ -267,6 +267,55 @@ std::string GqlToCypherTransformer::schemaPathText(
     return path;
 }
 
+std::string GqlToCypherTransformer::qualifiedCatalogPath(
+    antlr4::ParserRuleContext *whole, GQLParser::CatalogObjectParentReferenceContext *parent,
+    antlr4::ParserRuleContext *finalName) {
+    if (!parent || !finalName) {
+        unsupported("qualified catalog object without a name");
+    }
+    // ObjectName segments of the parent reference (`(objectName PERIOD)+`
+    // and any dotted tail after a schema reference).
+    std::vector<GQLParser::ObjectNameContext *> segs;
+    for (auto *child : parent->children) {
+        if (auto *obj = dynamic_cast<GQLParser::ObjectNameContext *>(child)) {
+            segs.push_back(obj);
+        }
+    }
+    if (segs.empty()) {
+        // Root-anchored parent with no dotted tail: keep the spelling
+        // byte-for-byte (this is the pre-existing absolute-path branch).
+        std::string logical = normalizePathWhitespace(
+            whole ? sourceText(whole) : sourceText(parent) + sourceText(finalName));
+        if (logical.empty() || logical.front() != '/') {
+            // Relative (`../x/y`), predefined (`.` / HOME / CURRENT) and
+            // parameter schema references have no root-anchored form to map.
+            unsupported("relative schema reference not supported");
+        }
+        return logical;
+    }
+    // Dotted form (pure `(objectName PERIOD)+`, or an absolute schema
+    // reference with a dotted tail): rebuild the absolute path segment by
+    // segment FROM THE PARSE TREE — raw-text splitting would over-split
+    // backtick/dquote delimited names that may contain periods themselves.
+    std::string path;
+    if (auto *schemaRef = parent->schemaReference()) {
+        path = normalizePathWhitespace(sourceText(schemaRef));
+        if (!path.empty() && path.front() == '$') {
+            unsupported("schema reference parameter");
+        }
+        if (path.empty() || path.front() != '/') {
+            unsupported("relative schema reference not supported");
+        }
+    }
+    for (auto *obj : segs) {
+        if (path.empty() || path.back() != '/') path += '/';
+        path += stripDelims(normalizePathWhitespace(sourceText(obj)));
+    }
+    if (path.empty() || path.back() != '/') path += '/';
+    path += stripDelims(normalizePathWhitespace(sourceText(finalName)));
+    return path;
+}
+
 std::string GqlToCypherTransformer::rewriteGraphExpression(
     GQLParser::GraphExpressionContext *ctx) {
     std::string raw = sourceText(ctx);
@@ -277,11 +326,11 @@ std::string GqlToCypherTransformer::rewriteGraphExpression(
         checkReservedPrefix(stripDelims(normalizePathWhitespace(raw)));
         return raw;
     }
-    std::string logical = normalizePathWhitespace(raw);
-    if (logical.empty() || logical.front() != '/') {
-        // Relative/dotted parent references stay loudly unsupported.
-        unsupported("qualified graph name (schemas are not mapped)");
-    }
+    // Absolute and dotted qualified names both resolve to one absolute
+    // logical path here, so `dir.g` and `/dir/g` mangle to the same
+    // physical graph (`_gqlsch__dir__g`).
+    std::string logical = qualifiedCatalogPath(
+        ctx, ref->catalogObjectParentReference(), ref->graphName());
     checkReservedInPath(logical);
     // Lookups resolve through the registry first; an unknown logical path
     // still mangles deterministically (no member registration — USE/DROP must
@@ -528,6 +577,50 @@ bool allElementsAreLists(GQLParser::ListValueConstructorByEnumerationContext *li
         if (literalTypeClass(guardText(query, el->valueExpression())) != "list") return false;
     }
     return true;
+}
+
+// True when the element expression is a compile-time literal — the same
+// classifier the static heterogeneous-literal rule uses (literalTypeClass),
+// plus parse-tree recursion for nested lists: an element list counts as
+// literal only when all of ITS elements are literal too, so `[[1, n.age], ...]`
+// is non-literal at the outer level and earns the bind-time guard.
+bool isLiteralElement(antlr4::tree::ParseTree *node, const std::string &query) {
+    if (!node) return false;
+    auto *ctx = dynamic_cast<antlr4::ParserRuleContext *>(node);
+    if (!ctx) return false;
+    std::string cls = literalTypeClass(guardText(query, ctx));
+    if (cls == "int" || cls == "double" || cls == "string" || cls == "bool" ||
+        cls == "null") {
+        return true;
+    }
+    if (cls != "list") {
+        return false; // unknown (property ref / call / parameter) or map
+    }
+    auto *nested = plainListLiteral(ctx);
+    if (!nested || nested->listValueTypeName()) return false;
+    auto *els = nested->listElementList();
+    if (!els) return true; // `[]`
+    for (auto *el : els->listElement()) {
+        if (!isLiteralElement(el->valueExpression(), query)) return false;
+    }
+    return true;
+}
+
+// True when `list` must be emitted through _gql_list_checked: an untyped
+// enumeration that is not a FOR source (Phase 8's _gql_to_json wrap owns
+// those) and holds at least one non-literal element. Pure literals stay
+// verbatim — scanValueShapes already rejected heterogeneous ones, and the
+// homogeneous remainder binds safely on the engine's own list creation.
+bool listNeedsCheckedGuard(GQLParser::ListValueConstructorByEnumerationContext *list,
+                           const std::string &query) {
+    if (list->listValueTypeName()) return false;
+    if (underForItemSource(list)) return false;
+    auto *elList = list->listElementList();
+    if (!elList) return false;
+    for (auto *el : elList->listElement()) {
+        if (!isLiteralElement(el->valueExpression(), query)) return true;
+    }
+    return false;
 }
 
 void scanValueShapes(antlr4::tree::ParseTree *node, const std::string &query) {
@@ -1230,9 +1323,13 @@ std::string GqlToCypherTransformer::translatePathPatternPrefix(
     GQLParser::PathPatternPrefixContext *ctx) {
     if (auto *mode = ctx->pathModePrefix()) {
         auto *m = mode->pathMode();
-        if (m->SIMPLE()) {
-            unsupported("SIMPLE path mode (LadybugDB has WALK/TRAIL/ACYCLIC only)");
-        }
+        // SIMPLE: nodes distinct with first=last exempt (ISO 20.5). The engine
+        // has no *SIMPLE recursive type and its *ACYCLIC prefilter is weaker
+        // (intermediate nodes only), so translatePathTerm preflights with
+        // *ACYCLIC (a superset filter: every SIMPLE path survives it) and
+        // translatePathPattern wraps the path variable in _gql_is_simple for
+        // the exact predicate.
+        if (m->SIMPLE()) return "SIMPLE";
         // WALK is LadybugDB's default recursive semantic: emit no type.
         if (m->TRAIL()) return "TRAIL";
         if (m->ACYCLIC()) return "ACYCLIC";
@@ -1360,10 +1457,14 @@ std::string GqlToCypherTransformer::translateEdgePattern(
 }
 
 std::string GqlToCypherTransformer::translatePathPattern(
-    GQLParser::PathPatternContext *ctx, std::vector<std::string> &wheres) {
+    GQLParser::PathPatternContext *ctx, std::vector<std::string> &wheres,
+    const std::string &forcedRecType) {
     std::string recType;
     if (auto *pre = ctx->pathPatternPrefix()) {
         recType = translatePathPatternPrefix(pre);
+    }
+    if (recType.empty()) {
+        recType = forcedRecType; // DIFFERENT EDGES acts as a whole-pattern TRAIL
     }
     auto *expr = ctx->pathPatternExpression();
     auto *term = dynamic_cast<GQLParser::PpePathTermContext *>(expr);
@@ -1374,28 +1475,40 @@ std::string GqlToCypherTransformer::translatePathPattern(
     std::string body = translatePathTerm(term->pathTerm(), wheres, recType, &edgeCount);
 
     // GQL path modes constrain the whole path pattern (ISO 20.5): TRAIL = every
-    // edge of the matched path distinct, ACYCLIC = every node distinct. The
+    // edge of the matched path distinct, ACYCLIC = every node distinct,
+    // SIMPLE = every node distinct except that first may equal last. The
     // engine's recursive types only constrain one var-length slot, so where
     // they cannot express the whole-pattern constraint we bind the pattern to a
-    // path variable and filter with IS_TRAIL / IS_ACYCLIC (all-rel-distinct /
-    // all-node-distinct over the path value; verified exact for fixed and
-    // var-length segments alike, boundaries included once each):
+    // path variable and filter with IS_TRAIL / IS_ACYCLIC / _gql_is_simple
+    // (all-rel-distinct / all-node-distinct / node-distinct-except-closure over
+    // the path value; verified exact for fixed and var-length segments alike,
+    // boundaries included once each):
     //   TRAIL — a single var-length slot is exact via `*TRAIL`; multi-hop needs
     //   the whole-pattern filter (cross-slot edge distinctness).
     //   ACYCLIC — `*ACYCLIC` only distincts intermediate nodes (start/end are
     //   free), so the filter is always required for exact GQL semantics.
+    //   SIMPLE — the slot is preflighted with `*ACYCLIC` (sound: every SIMPLE
+    //   path has distinct intermediates) and _gql_is_simple supplies the exact
+    //   first=last-exempt node distinctness; IS_ACYCLIC cannot stand in here
+    //   because it rejects closed cycles that SIMPLE allows.
     std::string varName;
     if (ctx->pathVariableDeclaration()) {
         varName = sourceText(ctx->pathVariableDeclaration()->pathVariable());
     }
     const bool needTrailFilter = recType == "TRAIL" && edgeCount > 1;
     const bool needAcyclicFilter = recType == "ACYCLIC";
-    if (needTrailFilter || needAcyclicFilter) {
+    // edgeCount == 0 (a node-only pattern) binds no path value worth testing:
+    // a zero-edge path is trivially SIMPLE, and the predicate only understands
+    // RECURSIVE_REL values anyway.
+    const bool needSimpleFilter = recType == "SIMPLE" && edgeCount > 0;
+    if (needTrailFilter || needAcyclicFilter || needSimpleFilter) {
         if (varName.empty()) {
             varName = "_gql_pp" + std::to_string(autoPathIdx++);
         }
-        wheres.push_back(std::string(needTrailFilter ? "IS_TRAIL(" : "IS_ACYCLIC(") + varName +
-                         ")");
+        const char *pred = needSimpleFilter ? "_gql_is_simple(" :
+                           needTrailFilter   ? "IS_TRAIL("
+                                             : "IS_ACYCLIC(";
+        wheres.push_back(std::string(pred) + varName + ")");
         return varName + " = " + body;
     }
     if (!varName.empty()) {
@@ -1550,8 +1663,15 @@ std::string GqlToCypherTransformer::translatePathTerm(
         if (!ev.range.empty()) {
             // Per-slot recursive type: exact for whole-pattern TRAIL on a
             // single slot, a valid prefilter otherwise (the whole-pattern
-            // constraint is added by translatePathPattern).
-            recDetail = "*" + (recType.empty() ? std::string() : recType + " ") + ev.range;
+            // constraint is added by translatePathPattern). SIMPLE has no
+            // engine spelling — *ACYCLIC is the closest sound prefilter: it
+            // distincts intermediate nodes, which every SIMPLE path satisfies
+            // (first=last is the only allowed repeat and both are endpoints).
+            std::string slotType = recType;
+            if (slotType == "SIMPLE") {
+                slotType = "ACYCLIC";
+            }
+            recDetail = "*" + (slotType.empty() ? std::string() : slotType + " ") + ev.range;
         }
         out += pendingNode + translateEdgePattern(ev.edge, recDetail);
         haveNode = false;
@@ -1584,11 +1704,21 @@ std::string GqlToCypherTransformer::translatePathTerm(
 
 std::string GqlToCypherTransformer::translateGraphPattern(
     GQLParser::GraphPatternContext *ctx, std::vector<std::string> &wheres) {
+    // LadybugDB MATCH already allows edge repetition (≈ GQL's REPEATABLE
+    // ELEMENTS), so that match mode stays a no-op. DIFFERENT EDGES demands
+    // edge-distinct paths — exactly GQL's TRAIL semantics — and is expressed
+    // with the existing TRAIL machinery (`*TRAIL` on a single var-length slot,
+    // IS_TRAIL over the whole path otherwise), which is whole-pattern for one
+    // path pattern. Across a comma-separated list the edges of *different*
+    // patterns would also have to be pairwise distinct, which no per-pattern
+    // wrap expresses — reject that loudly instead of approximating.
+    std::string forcedRecType;
     if (auto *mm = ctx->matchMode()) {
-        // LadybugDB MATCH already allows edge repetition (≈ GQL's REPEATABLE
-        // ELEMENTS); DIFFERENT EDGES has no engine enforcement.
         if (mm->differentEdgesMatchMode()) {
-            unsupported("DIFFERENT EDGES match mode");
+            if (ctx->pathPatternList()->pathPattern().size() > 1) {
+                unsupported("DIFFERENT EDGES over multiple path patterns");
+            }
+            forcedRecType = "TRAIL";
         }
     }
     if (ctx->keepClause()) {
@@ -1596,7 +1726,7 @@ std::string GqlToCypherTransformer::translateGraphPattern(
     }
     std::vector<std::string> parts;
     for (auto *p : ctx->pathPatternList()->pathPattern()) {
-        parts.push_back(translatePathPattern(p, wheres));
+        parts.push_back(translatePathPattern(p, wheres, forcedRecType));
     }
     std::string out = joinCommas(parts);
     if (auto *w = ctx->graphPatternWhereClause()) {
@@ -1810,8 +1940,8 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     // HAVING -> WHERE on the WITH output (keys/aggs replaced by aliases).
     std::string havingText;
     if (!havingRaw.empty()) {
-        // Emitted through the comparison bridge before the textual alias map:
-        // aggregate calls stay verbatim (collectTopComparisons stops at them),
+        // Emitted through the rewrite bridge before the textual alias map:
+        // aggregate calls stay verbatim (collectTopRewrites stops at them),
         // so replaceExprs still matches their raw spans.
         havingText = " WHERE " +
                      finishExpr(replaceExprs(emitExpr(ctx->havingClause()->searchCondition()),
@@ -2690,11 +2820,9 @@ std::string GqlToCypherTransformer::graphTypeRefName(GQLParser::GraphTypeReferen
         unsupported("graph type reference parameter");
     }
     auto *parentAndName = ref->catalogGraphTypeParentAndName();
-    if (parentAndName->catalogObjectParentReference()) {
-        std::string logical = normalizePathWhitespace(sourceText(parentAndName));
-        if (logical.empty() || logical.front() != '/') {
-            unsupported("qualified graph type name");
-        }
+    if (auto *parent = parentAndName->catalogObjectParentReference()) {
+        std::string logical =
+            qualifiedCatalogPath(parentAndName, parent, parentAndName->graphTypeName());
         return resolvePhysical(logical, /*createMapping=*/false,
                                SchemaCatalog::MemberKind::GRAPH_TYPE);
     }
@@ -2805,9 +2933,10 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
         unsupported("CREATE GRAPH without a graph name");
     }
     bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
-    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
-    if (qualified && (logical.empty() || logical.front() != '/')) {
-        unsupported("qualified graph name (schemas are not mapped)");
+    std::string logical;
+    if (qualified) {
+        logical = qualifiedCatalogPath(parentAndName,
+            parentAndName->catalogObjectParentReference(), parentAndName->graphName());
     }
     std::string name = sourceText(parentAndName->graphName());
 
@@ -2822,17 +2951,20 @@ std::string GqlToCypherTransformer::translateCreateGraphStatement(
         }
         std::string typeName = graphTypeRefName(of->graphTypeReference());
         // Logical path of the type being created (qualified refs already
-        // resolved to physical by graphTypeRefName; recover the logical text).
+        // resolved to physical by graphTypeRefName; recover the logical path
+        // through the same root-resolution helper so dotted and absolute
+        // spellings register under one entry).
         auto *typeParent = of->graphTypeReference()->catalogGraphTypeParentAndName();
         std::string typeLogical =
             (typeParent && typeParent->catalogObjectParentReference())
-                ? normalizePathWhitespace(sourceText(typeParent))
+                ? qualifiedCatalogPath(typeParent,
+                      typeParent->catalogObjectParentReference(),
+                      typeParent->graphTypeName())
                 : "/" + typeName;
-        std::string other = sourceText(ctx->graphSource()->graphExpression());
-        if (!other.empty() && other.front() == '/') {
-            other = resolvePhysical(normalizePathWhitespace(other), /*createMapping=*/false,
-                                    SchemaCatalog::MemberKind::GRAPH_TYPE);
-        }
+        // Source graph expression resolves through the shared rewrite (bare
+        // names pass through unchanged; absolute and dotted qualified names
+        // both mangle to the same physical graph).
+        std::string other = rewriteGraphExpression(ctx->graphSource()->graphExpression());
         const GraphTypeSpec *srcSpec = findGraphType(*registry, other);
         if (!srcSpec) {
             throw common::RuntimeException{"Graph type " + other + " is not defined"};
@@ -2908,12 +3040,11 @@ std::string GqlToCypherTransformer::translateCreateGraphTypeStatement(
         unsupported("CREATE GRAPH TYPE without a type name");
     }
     bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
-    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    std::string logical;
     std::string name;
     if (qualified) {
-        if (logical.empty() || logical.front() != '/') {
-            unsupported("qualified graph type name");
-        }
+        logical = qualifiedCatalogPath(parentAndName,
+            parentAndName->catalogObjectParentReference(), parentAndName->graphTypeName());
         name = resolvePhysical(logical, /*createMapping=*/true,
                                SchemaCatalog::MemberKind::GRAPH_TYPE);
     } else {
@@ -2961,12 +3092,11 @@ std::string GqlToCypherTransformer::translateDropGraphTypeStatement(
         unsupported("DROP GRAPH TYPE without a type name");
     }
     bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
-    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    std::string logical;
     std::string name;
     if (qualified) {
-        if (logical.empty() || logical.front() != '/') {
-            unsupported("qualified graph type name");
-        }
+        logical = qualifiedCatalogPath(parentAndName,
+            parentAndName->catalogObjectParentReference(), parentAndName->graphTypeName());
         name = resolvePhysical(logical, /*createMapping=*/false,
                                SchemaCatalog::MemberKind::GRAPH_TYPE);
         if (schemaCatalog) {
@@ -2996,12 +3126,11 @@ std::string GqlToCypherTransformer::translateDropGraphStatement(
         unsupported("DROP GRAPH without a graph name");
     }
     bool qualified = parentAndName->catalogObjectParentReference() != nullptr;
-    std::string logical = normalizePathWhitespace(sourceText(parentAndName));
+    std::string logical;
     std::string name;
     if (qualified) {
-        if (logical.empty() || logical.front() != '/') {
-            unsupported("qualified graph name (schemas are not mapped)");
-        }
+        logical = qualifiedCatalogPath(parentAndName,
+            parentAndName->catalogObjectParentReference(), parentAndName->graphName());
         name = resolvePhysical(logical, /*createMapping=*/false,
                                SchemaCatalog::MemberKind::GRAPH);
         if (schemaCatalog) {
@@ -3170,7 +3299,7 @@ void GqlToCypherTransformer::resolveLabelGraphKind(GQLParser::GqlProgramContext 
 }
 
 std::string GqlToCypherTransformer::translateLabelExpression(
-    GQLParser::LabelExpressionContext *ctx, const std::string &var) {
+    GQLParser::LabelExpressionContext *ctx, const std::string &var) const {
     if (!labelGraphIsAny.has_value()) {
         unsupported("label expression (graph kind not resolvable)");
     }
@@ -3199,6 +3328,14 @@ std::string GqlToCypherTransformer::translateLabelExpression(
     if (auto *paren = dynamic_cast<GQLParser::LabelExpressionParenthesizedContext *>(ctx)) {
         return translateLabelExpression(paren->labelExpression(), var);
     }
+    if (dynamic_cast<GQLParser::LabelExpressionWildcardContext *>(ctx)) {
+        // `%` = "has some label". Typed graph: every node carries exactly its
+        // one table label, so the predicate is unconditionally true. ANY graph:
+        // labels() is a (nullable) STRING[] column — non-empty means labeled.
+        // A NULL labels() cell propagates NULL through size(), which drops the
+        // row in WHERE exactly like FALSE; that matches "no labels recorded".
+        return anyGraph ? ("size(labels(" + var + ")) > 0") : std::string("true");
+    }
     unsupported("% label wildcard");
 }
 
@@ -3222,10 +3359,6 @@ bool walkForUnsupportedPatterns(antlr4::tree::ParseTree *node, std::string &feat
         feature = "path search prefix (ALL/ANY/SHORTEST ...)";
         return true;
     }
-    if (dynamic_cast<GQLParser::LabelExpressionWildcardContext *>(node)) {
-        feature = "% label wildcard";
-        return true;
-    }
     if (!allowLabelExpr &&
         (dynamic_cast<GQLParser::LabelExpressionNegationContext *>(node) ||
          dynamic_cast<GQLParser::LabelExpressionConjunctionContext *>(node) ||
@@ -3234,9 +3367,11 @@ bool walkForUnsupportedPatterns(antlr4::tree::ParseTree *node, std::string &feat
         feature = "label expression operator (&, !, |, parentheses)";
         return true;
     }
+    // `v IS [NOT] LABELED <labelExpr>` (and its `v:<labelExpr>` spelling) is
+    // translated by emitLabeledPredicate through translateLabelExpression, so
+    // its label expression — operators, parens, `%` included — is legal here.
     if (dynamic_cast<GQLParser::LabeledPredicateContext *>(node)) {
-        feature = "label predicate (IS [NOT] LABELED ...)";
-        return true;
+        allowLabelExpr = true;
     }
     for (auto *child : node->children) {
         if (walkForUnsupportedPatterns(child, feature, allowLabelExpr)) {
@@ -3320,25 +3455,49 @@ static constexpr bool kSpliceEquality = true;
 
 namespace {
 
-// Collects the top-most comparison nodes under (not including) `node`: descent
-// stops at a comparison (emitComparison recurses into its operands, so nested
-// comparisons compose without overlapping source spans) and at aggregates
-// (their arguments must stay verbatim for span-based alias rewrites). Only the
-// AST decides what is a comparison; literal text is never scanned.
-void collectTopComparisons(antlr4::tree::ParseTree *node,
-                           std::vector<GQLParser::ComparisonExprAltContext *> &out) {
+// Collects the top-most rewrite targets under (not including) `node`:
+// comparisons (only on ANY graphs — typed graphs keep source order text),
+// labeled predicates (`IS [NOT] LABELED` / `:` — every graph kind, they never
+// parse as Cypher), and — on typed graphs only — list literals that need the
+// Q5-3 bind-time heterogeneity guard (see listNeedsCheckedGuard). Descent
+// stops at a collected node (its own emission recurses into its operands, so
+// nested nodes compose without overlapping source spans) and at aggregates
+// (their arguments must stay verbatim for span-based alias rewrites). Only
+// the AST decides what is a rewrite target; literal text is never scanned.
+void collectTopRewrites(antlr4::tree::ParseTree *node,
+                        std::vector<GQLParser::ComparisonExprAltContext *> &comps,
+                        std::vector<GQLParser::LabeledPredicateContext *> &labels,
+                        std::vector<GQLParser::ListValueConstructorByEnumerationContext *> &lists,
+                        bool collectComps, bool collectLists, const std::string &query) {
     if (!node) {
         return;
     }
     for (auto *child : node->children) {
-        if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(child)) {
-            out.push_back(cmp);
+        if (auto *lp = dynamic_cast<GQLParser::LabeledPredicateContext *>(child)) {
+            labels.push_back(lp);
             continue;
+        }
+        if (collectComps) {
+            if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(child)) {
+                comps.push_back(cmp);
+                continue;
+            }
+        }
+        if (collectLists) {
+            if (auto *list =
+                    dynamic_cast<GQLParser::ListValueConstructorByEnumerationContext *>(child)) {
+                if (listNeedsCheckedGuard(list, query)) {
+                    lists.push_back(list);
+                    continue;
+                }
+                // Pure/typed/FOR-source lists stay verbatim but their interior
+                // is still walked (nested guarded lists compose from here).
+            }
         }
         if (dynamic_cast<GQLParser::AggregateFunctionContext *>(child)) {
             continue;
         }
-        collectTopComparisons(child, out);
+        collectTopRewrites(child, comps, labels, lists, collectComps, collectLists, query);
     }
 }
 
@@ -3369,32 +3528,122 @@ std::string GqlToCypherTransformer::emitComparison(
     return sourceText(ctx);
 }
 
-std::string GqlToCypherTransformer::spliceComparisons(antlr4::tree::ParseTree *node) const {
+std::string GqlToCypherTransformer::emitLabeledPredicate(
+    GQLParser::LabeledPredicateContext *ctx) const {
+    auto *ref = ctx->elementVariableReference();
+    auto *part2 = ctx->labeledPredicatePart2();
+    if (!ref || !part2 || !part2->labelExpression()) {
+        // Unreachable for a parsed predicate; fail loudly rather than emit
+        // raw GQL that would only confuse the Cypher parser later.
+        unsupported("label predicate (IS [NOT] LABELED ...)");
+    }
+    std::string pred = translateLabelExpression(part2->labelExpression(), sourceText(ref));
+    if (auto *iso = part2->isLabeledOrColon(); iso && iso->NOT()) {
+        // IS NOT LABELED negates the whole predicate; any negation inside the
+        // label expression stays translated by translateLabelExpression.
+        return "(NOT " + pred + ")";
+    }
+    return pred;
+}
+
+std::string GqlToCypherTransformer::emitCheckedList(
+    GQLParser::ListValueConstructorByEnumerationContext *list) const {
+    std::string out = "_gql_list_checked(";
+    bool first = true;
+    if (auto *elList = list->listElementList()) {
+        for (auto *el : elList->listElement()) {
+            if (!first) out += ", ";
+            first = false;
+            // Recursive emission: nested guarded lists, comparisons (ANY
+            // graphs never reach here) and label predicates compose inside
+            // the call's argument list.
+            out += emitExpr(el->valueExpression());
+        }
+    }
+    out += ")";
+    return out;
+}
+
+std::string GqlToCypherTransformer::emitRewrittenExpr(antlr4::tree::ParseTree *node) const {
+    if (!node) {
+        return "";
+    }
     auto *rule = dynamic_cast<antlr4::ParserRuleContext *>(node);
     if (!rule) {
-        return node ? node->getText() : std::string();
+        return node->getText();
+    }
+    const bool anyGraph = labelGraphIsAny.value_or(false);
+    // Q5-3 gate: the list guard binds engine-derived types, which are only
+    // meaningful on a resolved TYPED graph. ANY graphs are never wrapped
+    // (JSON property columns are dynamically typed — a class check would
+    // reject legal dynamic queries), and an unresolvable kind (nullopt) is
+    // likewise left alone: unknown means no static claim, never a guess.
+    const bool collectLists = labelGraphIsAny.has_value() && !*labelGraphIsAny;
+    // Node-level fast paths: the collectors below look at children only.
+    if (anyGraph) {
+        if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(rule)) {
+            return emitComparison(cmp);
+        }
+    }
+    if (auto *lp = dynamic_cast<GQLParser::LabeledPredicateContext *>(rule)) {
+        return emitLabeledPredicate(lp);
+    }
+    if (collectLists) {
+        if (auto *list = dynamic_cast<GQLParser::ListValueConstructorByEnumerationContext *>(rule);
+            list && listNeedsCheckedGuard(list, query)) {
+            return emitCheckedList(list);
+        }
     }
     std::vector<GQLParser::ComparisonExprAltContext *> comps;
-    collectTopComparisons(rule, comps);
-    if (comps.empty()) {
+    std::vector<GQLParser::LabeledPredicateContext *> labels;
+    std::vector<GQLParser::ListValueConstructorByEnumerationContext *> lists;
+    collectTopRewrites(rule, comps, labels, lists, anyGraph, collectLists, query);
+    if (comps.empty() && labels.empty() && lists.empty()) {
         return sourceText(rule);
     }
     std::string out = sourceText(rule);
     if (out.empty()) {
         return out;
     }
-    const size_t base = rule->getStart()->getStartIndex();
-    std::sort(comps.begin(), comps.end(),
-              [](GQLParser::ComparisonExprAltContext *a, GQLParser::ComparisonExprAltContext *b) {
-                  return a->getStart()->getStartIndex() > b->getStart()->getStartIndex();
-              });
+    struct Entry {
+        size_t start, stop;
+        bool isCmp;
+        bool isList;
+        antlr4::tree::ParseTree *ptr;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(comps.size() + labels.size() + lists.size());
     for (auto *cmp : comps) {
-        const size_t start = cmp->getStart()->getStartIndex();
-        const size_t stop = cmp->getStop()->getStopIndex();
-        if (start < base || stop < start || stop - base >= out.size()) {
+        entries.push_back({cmp->getStart()->getStartIndex(), cmp->getStop()->getStopIndex(), true,
+                           false, cmp});
+    }
+    for (auto *lp : labels) {
+        entries.push_back(
+            {lp->getStart()->getStartIndex(), lp->getStop()->getStopIndex(), false, false, lp});
+    }
+    for (auto *list : lists) {
+        entries.push_back({list->getStart()->getStartIndex(), list->getStop()->getStopIndex(),
+                           false, true, list});
+    }
+    // Right-to-left splices over absolute source offsets: an earlier (larger
+    // index) replacement never shifts a later one. Collected subtrees are
+    // disjoint (descent stops at each collected node), so no span overlaps.
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry &a, const Entry &b) { return a.start > b.start; });
+    const size_t base = rule->getStart()->getStartIndex();
+    for (auto &e : entries) {
+        if (e.start < base || e.stop < e.start || e.stop - base >= out.size()) {
             continue;
         }
-        out.replace(start - base, stop - start + 1, emitComparison(cmp));
+        std::string repl =
+            e.isList
+                ? emitCheckedList(
+                      static_cast<GQLParser::ListValueConstructorByEnumerationContext *>(e.ptr))
+                : (e.isCmp ? emitComparison(static_cast<GQLParser::ComparisonExprAltContext *>(
+                                 e.ptr))
+                           : emitLabeledPredicate(
+                                 static_cast<GQLParser::LabeledPredicateContext *>(e.ptr)));
+        out.replace(e.start - base, e.stop - e.start + 1, repl);
     }
     return out;
 }
@@ -3404,29 +3653,11 @@ std::string GqlToCypherTransformer::emitValueExpression(
     if (!ctx) {
         return "";
     }
-    // Fast path: only ANY graphs need the bridge; typed graphs and unresolvable
-    // kinds keep the source spelling byte-for-byte.
-    if (!labelGraphIsAny.value_or(false)) {
-        return sourceText(ctx);
-    }
-    if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(ctx)) {
-        return emitComparison(cmp);
-    }
-    return spliceComparisons(ctx);
+    return emitRewrittenExpr(ctx);
 }
 
 std::string GqlToCypherTransformer::emitExpr(antlr4::tree::ParseTree *node) const {
-    if (!node) {
-        return "";
-    }
-    auto *rule = dynamic_cast<antlr4::ParserRuleContext *>(node);
-    if (!labelGraphIsAny.value_or(false)) {
-        return rule ? sourceText(rule) : node->getText();
-    }
-    if (auto *cmp = dynamic_cast<GQLParser::ComparisonExprAltContext *>(node)) {
-        return emitComparison(cmp);
-    }
-    return spliceComparisons(node);
+    return emitRewrittenExpr(node);
 }
 
 std::string GqlToCypherTransformer::renderOrderBy(
