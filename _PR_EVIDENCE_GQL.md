@@ -77,6 +77,9 @@ GQL 使能 4 组合计 ≲54 行。全部以门禁 4(全量回归)护航。
   建议 WSL/docker 过一遍 Linux 构建 + 自测;做不到则 PR description 如实写明测试平台。
 - **CI sanity「generated grammar files up to date」**:对 vendored ANTLR 生成物
   (锁 4.13.1)是否放行未实测。
+- **run_tck.py 输出非确定性(已知坑)**:REPORT.md 的 passed-with-note 清单顺序随
+  并行执行序洗牌,每次重跑都脏工作区——已核实排序后多重集逐行一致、数字全同,
+  本次把重排还原不入历史。要根治可在 REPORT 写出前对清单排序(harness 一行级小改,未做)。
 
 ## 五、英文可粘贴段(PR description「Testing」节)
 
