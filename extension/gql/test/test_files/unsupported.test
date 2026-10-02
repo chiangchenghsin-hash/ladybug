@@ -44,7 +44,7 @@ Runtime exception: GQL feature not supported: undirected edge type (LadybugDB re
 
 -STATEMENT CALL GQL("CREATE GRAPH TYPE mlGt1 { (:A&B) }")
 ---- error
-Runtime exception: GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
+Runtime exception: [22G0P] GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
 
 
 -CASE UnsupportedTimePropertyType
@@ -64,7 +64,7 @@ Runtime exception: GQL feature not supported: TIME type (LadybugDB has no TIME t
 
 -STATEMENT CALL GQL("CREATE GRAPH TYPE anGt1 { ({x INT64}) }")
 ---- error
-Runtime exception: GQL feature not supported: anonymous node type in a graph type
+Runtime exception: [22G0N] GQL feature not supported: anonymous node type in a graph type
 
 
 -CASE UnsupportedCreateGraphLike

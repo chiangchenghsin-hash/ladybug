@@ -196,3 +196,54 @@ Runtime exception: GQL feature not supported: transaction-wrapped program in a s
 -STATEMENT CALL GQL("CREATE GRAPH _gqlsch__evil ANY")
 ---- error
 Runtime exception: GQL feature not supported: identifier with reserved _gqlsch__ prefix (_gqlsch__evil)
+
+-CASE UsePrefixClauseParity
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CALL GQL("CREATE SCHEMA /foo")
+---- 0
+
+-STATEMENT CALL GQL("CREATE GRAPH /foo/g ANY")
+---- 0
+
+-STATEMENT CALL GQL("SESSION SET GRAPH /foo/g")
+---- ok
+
+-STATEMENT CALL GQL("INSERT (n:Person {name: 'A'})")
+---- 0
+
+-STATEMENT CALL GQL("USE /foo/g MATCH (n:Person) RETURN n.name")
+---- 1
+A
+
+-STATEMENT CALL GQL("USE /foo/g MATCH (n) RETURN count(n)")
+---- 1
+1
+
+-STATEMENT CALL GQL("CREATE GRAPH mygraph ANY")
+---- 0
+
+-STATEMENT CALL GQL("USE mygraph MATCH (n) RETURN count(n)")
+---- 1
+0
+
+-CASE EngineGraphConflict
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE GRAPH outsider ANY
+---- ok
+
+-STATEMENT CALL GQL("CREATE SCHEMA /outsider")
+---- error
+Runtime exception: [42000] Schema name /outsider identifies a graph
+
+-STATEMENT CALL GQL("CREATE SCHEMA /insider")
+---- 0
+
+-STATEMENT RETURN _gql_schemas()
+---- 1
+{"schemas":["/insider"],"directories":[]}

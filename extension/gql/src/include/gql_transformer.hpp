@@ -165,6 +165,12 @@ public:
     // Loud rejection of user identifiers inside the reserved prefix.
     static void checkReservedPrefix(const std::string &identifier);
 
+    // True when the engine catalog already holds a graph at this logical
+    // path — the mangled physical name, or (root paths) the flat out-of-layer
+    // name ("CREATE GRAPH x ANY" issued outside CALL GQL is invisible to the
+    // registry; the conflict check consults the catalog too).
+    bool engineGraphAtLogicalPath(const std::string &logicalPath) const;
+
     // GQL catalog statements produce empty results; LadybugDB DDL returns a
     // message row, so catalog translations end with this zero-row tail (TCK:
     // "Then the result should be empty").

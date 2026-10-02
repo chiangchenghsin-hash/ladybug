@@ -25,6 +25,31 @@ void GqlToCypherTransformer::schemaError(const std::string &message) {
     throw common::RuntimeException{"[42000] " + message};
 }
 
+// Narrow GQLSTATUS stamping: only where the vendored corpus pins the code AND
+// the pin's semantics match the rejection reason (three-tier harness fails a
+// wrong code harder than no code). 22G0N = label-set cardinality below the
+// minimum (anonymous node type = 0 labels, min 1 on LadybugDB); 22G0P = above
+// the maximum (multi-label, max 1). Everything else stays untagged.
+[[noreturn]] static void unsupportedWithStatus(const std::string &code,
+                                               const std::string &feature) {
+    throw common::RuntimeException{"[" + code + "] GQL feature not supported: " + feature};
+}
+
+bool GqlToCypherTransformer::engineGraphAtLogicalPath(const std::string &logicalPath) const {
+    if (!anyGraphResolver) {
+        return false;
+    }
+    if (anyGraphResolver(manglePhysical(logicalPath)).has_value()) {
+        return true;
+    }
+    // Root-path schemas also collide with flat out-of-layer graph names.
+    if (logicalPath.size() > 1 && logicalPath[0] == '/' &&
+        logicalPath.find('/', 1) == std::string::npos) {
+        return anyGraphResolver(logicalPath.substr(1)).has_value();
+    }
+    return false;
+}
+
 // =============================================================================
 // Schema catalog (Phase 11)
 // =============================================================================
@@ -2322,8 +2347,11 @@ std::vector<std::string> labelSetLabels(GQLParser::LabelSetPhraseContext *ctx,
 std::string singleLabel(const std::vector<std::string> &labels, const std::string &what) {
     if (labels.empty()) return "";
     if (labels.size() > 1) {
-        GqlToCypherTransformer::unsupported(
-            "multi-label " + what + " (LadybugDB nodes have a single label)");
+        // Graph-type label-set cardinality > max=1 -> corpus-pinned 22G0P
+        // (graph-types Create1 [8]); INSERT-side multi-label paths keep the
+        // untagged message (different rejection reason).
+        unsupportedWithStatus("22G0P",
+                              "multi-label " + what + " (LadybugDB nodes have a single label)");
     }
     return labels[0];
 }
@@ -2464,7 +2492,8 @@ void parseNodeTypeSpecification(GQLParser::NodeTypeSpecificationContext *ctx,
     }
     if (name.empty()) name = filler.labelName;
     if (name.empty()) {
-        GqlToCypherTransformer::unsupported("anonymous node type in a graph type");
+        // Zero labels < min=1 -> corpus-pinned 22G0N (graph-types Create1 [7]).
+        unsupportedWithStatus("22G0N", "anonymous node type in a graph type");
     }
     for (const auto &n : spec.nodes) {
         if (iequals(n.name, name)) {
@@ -2727,6 +2756,9 @@ std::string GqlToCypherTransformer::translateCreateSchemaStatement(
         }
         schemaError("Schema name " + path + " identifies a graph type");
     }
+    if (engineGraphAtLogicalPath(path)) {
+        schemaError("Schema name " + path + " identifies a graph");
+    }
     schemaCatalog->schemas.insert(path);
     return EMPTY_RESULT_CYPHER;
 }
@@ -2745,6 +2777,9 @@ std::string GqlToCypherTransformer::translateDropSchemaStatement(
             schemaError("Schema name " + path + " identifies a graph");
         }
         schemaError("Schema name " + path + " identifies a graph type");
+    }
+    if (engineGraphAtLogicalPath(path)) {
+        schemaError("Schema name " + path + " identifies a graph");
     }
     if (schemaCatalog->schemas.count(path) == 0) {
         if (ctx->IF()) {
