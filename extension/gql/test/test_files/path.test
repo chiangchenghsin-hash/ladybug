@@ -577,14 +577,14 @@
 
 # Diamond 1 -> {2,3} -> 4: ANY SHORTEST keeps one path per end node.
 -CHECK_ORDER
--STATEMENT CALL GQL("MATCH ANY SHORTEST (a:Person {v:1})-[e:KNOWS]->{1,3}(b:Person) RETURN b.v AS b, PATH_LENGTH(e) AS len ORDER BY b.v, len")
+-STATEMENT CALL GQL("MATCH ANY SHORTEST (a:Person {v:1})-[e:KNOWS]->{1,3}(b:Person) RETURN b.v AS b, size(e) AS len ORDER BY b.v, len")
 ---- 3
 2|1
 3|1
 4|2
 
 -CHECK_ORDER
--STATEMENT MATCH (a:Person {v:1})-[e:KNOWS*SHORTEST 1..3]->(b:Person) RETURN b.v AS b, length(e) AS len ORDER BY b.v, len
+-STATEMENT MATCH (a:Person {v:1})-[e:KNOWS*SHORTEST 1..3]->(b:Person) RETURN b.v AS b, size(relationships(e)) AS len ORDER BY b.v, len
 ---- 3
 2|1
 3|1
@@ -610,7 +610,7 @@
 
 # ALL SHORTEST keeps both 2-hop paths to node 4.
 -CHECK_ORDER
--STATEMENT CALL GQL("MATCH ALL SHORTEST (a:Person {v:1})-[e:KNOWS]->{1,3}(b:Person) RETURN b.v AS b, PATH_LENGTH(e) AS len ORDER BY b.v, len")
+-STATEMENT CALL GQL("MATCH ALL SHORTEST (a:Person {v:1})-[e:KNOWS]->{1,3}(b:Person) RETURN b.v AS b, size(e) AS len ORDER BY b.v, len")
 ---- 4
 2|1
 3|1
@@ -618,7 +618,7 @@
 4|2
 
 -CHECK_ORDER
--STATEMENT MATCH (a:Person {v:1})-[e:KNOWS*ALL SHORTEST 1..3]->(b:Person) RETURN b.v AS b, length(e) AS len ORDER BY b.v, len
+-STATEMENT MATCH (a:Person {v:1})-[e:KNOWS*ALL SHORTEST 1..3]->(b:Person) RETURN b.v AS b, size(relationships(e)) AS len ORDER BY b.v, len
 ---- 4
 2|1
 3|1

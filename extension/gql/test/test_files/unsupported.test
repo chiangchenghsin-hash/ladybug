@@ -164,7 +164,11 @@ Runtime exception: GQL feature not supported: label expression operator (&, !, |
 Runtime exception: GQL feature not supported: multi-label insert on a typed graph
 
 
--CASE UnsupportedQuantifiedPathPattern
+# Interior node bindings are expanded as lists (see qpibind.test), but a list
+# has no properties: `a.v` on the quantified binding a is loud-rejected (this
+# CASE previously pinned "quantified path pattern" wholesale — its surviving
+# rejection is the property access, pinned exactly now).
+-CASE UnsupportedQuantifiedBindingPropertyAccess
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 ---- ok
@@ -173,10 +177,12 @@ Runtime exception: GQL feature not supported: multi-label insert on a typed grap
 ---- ok
 
 -STATEMENT CALL GQL("MATCH ((a:T)-[r]->(b:T)){2} RETURN a.v")
----- error(regex)
-Runtime exception: GQL feature not supported: quantified path pattern .+
+---- error
+Runtime exception: GQL feature not supported: quantified path pattern interior binding property access
 
 
+# The fixed-count form {2} is now expanded in place (moved to
+# multihop.test.MultiHopFixedCountParity); the unbounded form still rejects.
 -CASE UnsupportedQuantifiedMultiHop
 
 -STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
@@ -185,9 +191,9 @@ Runtime exception: GQL feature not supported: quantified path pattern .+
 -STATEMENT CREATE NODE TABLE T(v INT64, PRIMARY KEY(v))
 ---- ok
 
--STATEMENT CALL GQL("MATCH (()-[]->()-[]->()){2} RETURN count(*)")
+-STATEMENT CALL GQL("MATCH (()-[]->()-[]->()){2,} RETURN count(*)")
 ---- error
-Runtime exception: GQL feature not supported: quantified path pattern with multiple edges
+Runtime exception: GQL feature not supported: unbounded quantified path pattern over a multi-edge interior
 
 
 -CASE UnsupportedQuantifiedNodePattern
@@ -336,3 +342,46 @@ Runtime exception: GQL feature not supported: heterogeneous list literal
 -STATEMENT CALL GQL("RETURN [1, 2] AS xs")
 ---- 1
 [1,2]
+
+
+-CASE UnsupportedStarProjectionWithGeneratedBindings
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE GRAPH tmpg ANY
+---- ok
+
+-STATEMENT USE GRAPH tmpg
+---- ok
+
+-STATEMENT CALL GQL("INSERT (:A&B {v:1})")
+---- ok
+
+# An anonymous node carrying a compound label expression is translated under
+# a generated name (_gql_nl0); a bare star would leak it as a result column
+# where GQL declares no binding at all.
+-STATEMENT CALL GQL("MATCH (:A&B) RETURN *")
+---- error
+Runtime exception: GQL feature not supported: star projection with generated pattern bindings
+
+
+-CASE UnsupportedStarProjectionWithPathModeWrap
+
+-STATEMENT load extension "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
+---- ok
+
+-STATEMENT CREATE NODE TABLE Person(v INT64, PRIMARY KEY(v))
+---- ok
+
+-STATEMENT CREATE REL TABLE KNOWS(FROM Person TO Person)
+---- ok
+
+-STATEMENT CREATE (:Person {v:1})-[:KNOWS]->(:Person {v:2})-[:KNOWS]->(:Person {v:3})
+---- ok
+
+# Multi-hop TRAIL wraps the chain in a generated path variable (_gql_pp0) for
+# the IS_TRAIL predicate; a bare star would leak that path as a sixth column.
+-STATEMENT CALL GQL("MATCH TRAIL (a:Person)-[r1:KNOWS]->(b:Person)-[r2:KNOWS]->(c:Person) RETURN *")
+---- error
+Runtime exception: GQL feature not supported: star projection with generated pattern bindings

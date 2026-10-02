@@ -136,6 +136,15 @@ public:
     // Counter for auto-generated node variable names (`_gql_nl0`, ...) used by
     // compound label expressions on anonymous nodes.
     int autoLabelIdx = 0;
+    // Counter for auto-generated var-length slot names (`_gql_ve0`, ...) and
+    // per-repetition interior edge names (`_gql_ue0`, ...) in QPPI expansion.
+    // Reset per Transform call.
+    int autoVarLenIdx = 0;
+    // Set whenever a synthetic pattern binding name is generated (_gql_nl /
+    // _gql_pp / _gql_ve / _gql_ue / _gql_vn). A bare star projection would
+    // leak those names as extra result columns, so RETURN */SELECT * is
+    // rejected once this is set (red line: no silently wrong column sets).
+    bool sawGeneratedBinding = false;
     // Graph kind for label-expression translation (true = ANY graph, false =
     // typed/tabled graph), resolved at Transform entry. Nullopt = unresolvable
     // (compound label expressions are then rejected).
@@ -193,6 +202,9 @@ private:
     std::string translateProcedureSpecification(GQLParser::ProcedureSpecificationContext *ctx);
     std::string translateStatementBlock(GQLParser::StatementBlockContext *ctx);
     std::string translateStatement(GQLParser::StatementContext *ctx);
+    // Statement body dispatch (what translateStatement did before the QPPI
+    // multi-hop expansion driver wrapped it).
+    std::string translateStatementImpl(GQLParser::StatementContext *ctx);
     std::string translateCompositeQuery(GQLParser::CompositeQueryStatementContext *ctx);
     std::string translateLinearCatalog(GQLParser::LinearCatalogModifyingStatementContext *ctx);
     std::string translateLinearQuery(GQLParser::LinearQueryStatementContext *ctx);
@@ -233,16 +245,20 @@ private:
                                   const std::string &recType,
                                   int *edgeCountOut = nullptr);
     std::string translateEdgePattern(GQLParser::EdgePatternContext *ctx,
-                                     const std::string &recDetail);
+                                     const std::string &recDetail,
+                                     const std::string &renameVar = "");
     std::string translateNodePattern(GQLParser::NodePatternContext *ctx,
                                      std::vector<std::string> &wheres);
     // Splits a filler into the bracket head (variable + :labels) and the
     // trailing property map; an inline WHERE is pushed onto `wheres`.
     // `isNodePattern` enables compound label-expression translation (edge
-    // type expressions stay unsupported).
+    // type expressions stay unsupported). `renameVar`, when non-null and
+    // non-empty, replaces the declared element variable in the emitted head
+    // (QPPI: a quantified slot's edge binding becomes a synthetic name).
     void translateFiller(GQLParser::ElementPatternFillerContext *ctx,
                          std::vector<std::string> &wheres, std::string &head,
-                         std::string &props, bool isNodePattern = true);
+                         std::string &props, bool isNodePattern = true,
+                         const std::string *renameVar = nullptr);
     // GQL label expression (ISO GQL feature G074) → Cypher boolean over the
     // bound variable's labels. Simple names stay as pattern labels; compound
     // expressions become WHERE predicates whose form depends on the graph
@@ -257,6 +273,54 @@ private:
     // Path mode / search prefix -> iC_RecursiveType text ("", "TRAIL",
     // "ACYCLIC", "SHORTEST", "ALL SHORTEST"). Throws on unsearchable forms.
     std::string translatePathPatternPrefix(GQLParser::PathPatternPrefixContext *ctx);
+
+    // ---------- QPPI multi-hop expansion (unnamed interior, slice A) ----------
+    // One multi-edge quantified interior whose quantifier spans a range
+    // ({m,n}, n > m): the statement is re-translated once per expansion count
+    // and the branches are joined with UNION [ALL].
+    struct QppiUnrollFactor {
+        GQLParser::PfQuantifiedPathPrimaryContext *factor = nullptr;
+        int lo = 0;
+        int hi = 0;
+    };
+    // Prescan result for the statement currently being translated.
+    std::vector<QppiUnrollFactor> qppiUnrollFactors;
+    // Set by prescanQuantifiedPaths when any quantified/questioned factor
+    // would emit synthetic pattern names / WITH re-binds (edge renames,
+    // interior edge/node lists). Combined with a bare star projection
+    // (SELECT * / RETURN *) in translateStatement → loud rejection: the
+    // synthetic names would leak into the result as extra columns.
+    bool qppiSyntheticBinding = false;
+    // Element-variable declarations seen by prescanQuantifiedPaths:
+    // name -> {declarations under a quantified factor, total declarations
+    // in the statement}. A name with a quantified declaration and more than
+    // one total declaration is a binding reuse → loud rejection; the
+    // quantified subset also drives the property-access rejection (a
+    // quantified binding is a LIST, so `x.v` cannot be translated).
+    std::map<std::string, std::pair<int, int>> qppiBindingUse;
+    // Walks the statement rejecting `x.prop` property references whose base
+    // binding variable is declared under a quantified factor (B3: those
+    // bind lists — property access would be a silent wrong answer or an
+    // engine error with a misleading message).
+    void rejectQuantifiedBindingPropertyRefs(antlr4::tree::ParseTree *node);
+    // Active U-M branch: factor ctx -> chosen repetition count, consulted by
+    // translatePathTerm during one whole-statement re-translation.
+    std::map<antlr4::ParserRuleContext *, int> qppiUnrollCounts;
+    // WITH-suffix items accumulated for the MATCH being translated
+    // ("relationships(_gql_ve0) AS e", "[_gql_ue0_0, _gql_ue0_1] AS e");
+    // merged into a single trailing WITH by translateMatchStatement.
+    std::vector<std::string> qppiWithSuffixes;
+    // Walks the statement tree classifying quantified path factors; throws
+    // the Class X rejections (unbounded / lower bound 0 / range too wide) for
+    // expandable multi-edge interiors and records U-M factors.
+    void prescanQuantifiedPaths(antlr4::tree::ParseTree *node, bool inQuantifiedInterior);
+    void classifyQuantifiedFactor(GQLParser::PathPrimaryContext *primary,
+                                  GQLParser::GraphPatternQuantifierContext *quant,
+                                  bool questioned, antlr4::ParserRuleContext *factorCtx);
+    // Joins the per-count whole-statement translations (strips a shared
+    // "USE GRAPH ...;" prefix, then UNION [ALL] the bodies).
+    std::string mergeQuantifiedExpansions(const std::vector<std::string> &branches,
+                                          GQLParser::StatementContext *ctx);
 
     // ---------- write primitives ----------
     std::string translateInsertStatement(GQLParser::InsertStatementContext *ctx);

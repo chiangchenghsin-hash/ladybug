@@ -657,6 +657,11 @@ std::string GqlToCypherTransformer::Transform(GQLParser::GqlProgramContext &root
     createGraphName.clear();
     autoPathIdx = 0;
     autoLabelIdx = 0;
+    autoVarLenIdx = 0;
+    sawGeneratedBinding = false;
+    qppiUnrollFactors.clear();
+    qppiUnrollCounts.clear();
+    qppiWithSuffixes.clear();
     // The schema-combination rule fires before any other translation-time
     // rejection so its 42000 tag wins over generic NEXT / multi-catalog errors.
     checkSchemaStatementAlone(&root);
@@ -795,7 +800,636 @@ std::string GqlToCypherTransformer::translateStatementBlock(
     return translateStatement(ctx->statement());
 }
 
+// =============================================================================
+// QPPI multi-hop expansion (slice A): an unnamed multi-edge paren interior
+// with a bounded quantifier is expanded by repeating its flattened event
+// chain (fixed {n}/{m,m}) or by re-translating the whole statement once per
+// count and joining the branches with UNION [ALL] ({m,n}). Class X shapes
+// (unbounded / lower bound 0 / range too wide / branch explosion) reject
+// loudly; exact messages are pinned in multihop.test.
+// =============================================================================
+
+namespace {
+
+// True when any descendant is of type T.
+template <typename T>
+bool treeHasNode(antlr4::tree::ParseTree *node) {
+    if (!node) {
+        return false;
+    }
+    if (dynamic_cast<T *>(node)) {
+        return true;
+    }
+    for (auto *child : node->children) {
+        if (treeHasNode<T>(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// SELECT DISTINCT / RETURN DISTINCT anywhere in the statement → the union
+// merge dedups globally (bare UNION), not only within each branch.
+bool hasDistinctProjection(antlr4::tree::ParseTree *node) {
+    if (!node) {
+        return false;
+    }
+    if (auto *sel = dynamic_cast<GQLParser::SelectStatementContext *>(node)) {
+        if (auto *sq = sel->setQuantifier()) {
+            if (sq->DISTINCT()) {
+                return true;
+            }
+        }
+    }
+    if (auto *ret = dynamic_cast<GQLParser::ReturnStatementContext *>(node)) {
+        if (auto *body = ret->returnStatementBody()) {
+            if (auto *sq = body->setQuantifier()) {
+                if (sq->DISTINCT()) {
+                    return true;
+                }
+            }
+        }
+    }
+    for (auto *child : node->children) {
+        if (hasDistinctProjection(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Parses a quantifier bound; malformed or > 10000 yields -1, which the
+// callers reject as "range too wide" (bounds only ever drive expansions here,
+// never a var-length slot — those keep quantifierRange untouched).
+long parseQuantBound(const std::string &text) {
+    if (text.empty() || text.size() > 5) {
+        return -1;
+    }
+    long value = 0;
+    for (char c : text) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return -1;
+        }
+        value = value * 10 + (c - '0');
+    }
+    return value;
+}
+
+// Expansion plan for one quantifier over a multi-edge interior: `unroll`
+// means the count varies ({m,n}, n > m) and the statement driver supplies it
+// per UNION branch; otherwise `count` is the single fixed repetition.
+struct MultiHopCount {
+    bool unroll = false;
+    int count = 0;
+};
+
+// Single source of truth for the Class X quantifier rejections (shared by
+// the statement prescan and translatePathTerm, so both throw identically).
+MultiHopCount quantifyMultiHopCount(GQLParser::GraphPatternQuantifierContext *q,
+                                    bool questioned) {
+    constexpr const char *kUnbounded =
+        "unbounded quantified path pattern over a multi-edge interior";
+    constexpr const char *kLowerZero =
+        "quantified path pattern with lower bound 0 over a multi-edge interior";
+    constexpr const char *kTooWide = "quantified path pattern quantifier range too wide";
+    if (questioned) {
+        GqlToCypherTransformer::unsupported(kLowerZero);
+    }
+    if (q->ASTERISK() || q->PLUS_SIGN()) {
+        GqlToCypherTransformer::unsupported(kUnbounded);
+    }
+    if (auto *fixed = q->fixedQuantifier()) {
+        long n = parseQuantBound(fixed->unsignedInteger()->getText());
+        if (n == 0) {
+            GqlToCypherTransformer::unsupported(kLowerZero);
+        }
+        if (n < 0 || n > 1000) {
+            GqlToCypherTransformer::unsupported(kTooWide);
+        }
+        return {false, static_cast<int>(n)};
+    }
+    auto *gen = q->generalQuantifier();
+    long lo = gen->lowerBound() ? parseQuantBound(gen->lowerBound()->getText()) : 0;
+    if (lo < 0) {
+        GqlToCypherTransformer::unsupported(kTooWide);
+    }
+    if (!gen->upperBound()) {
+        GqlToCypherTransformer::unsupported(kUnbounded); // {m,} and {,}
+    }
+    long hi = parseQuantBound(gen->upperBound()->getText());
+    if (hi < 0 || hi < lo) {
+        GqlToCypherTransformer::unsupported(kTooWide);
+    }
+    if (lo == 0) {
+        GqlToCypherTransformer::unsupported(kLowerZero);
+    }
+    if (hi - lo > 4) {
+        GqlToCypherTransformer::unsupported(kTooWide);
+    }
+    if (lo > 1000) {
+        GqlToCypherTransformer::unsupported(kTooWide);
+    }
+    if (lo == hi) {
+        return {false, static_cast<int>(lo)}; // {m,m}
+    }
+    return {true, 0}; // {m,n} with 1 <= n-m <= 4
+}
+
+enum class EdgeDir { Left, Right, Both };
+
+struct EdgeShape {
+    EdgeDir dir = EdgeDir::Both;
+    GQLParser::ElementPatternFillerContext *filler = nullptr;
+};
+
+EdgeShape edgeShape(GQLParser::EdgePatternContext *e) {
+    EdgeShape s;
+    if (auto *full = e->fullEdgePattern()) {
+        if (auto *x = full->fullEdgePointingLeft()) {
+            s.dir = EdgeDir::Left;
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgePointingRight()) {
+            s.dir = EdgeDir::Right;
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeUndirected()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeLeftOrUndirected()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeUndirectedOrRight()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeLeftOrRight()) {
+            s.filler = x->elementPatternFiller();
+        } else if (auto *x = full->fullEdgeAnyDirection()) {
+            s.filler = x->elementPatternFiller();
+        }
+        return s;
+    }
+    // Abbreviated forms carry no filler. GQL's undirected / mixed-direction
+    // spellings collapse to LadybugDB's ANY-direction `--` (a directed property
+    // graph has no undirected edges to distinguish).
+    auto *ab = e->abbreviatedEdgePattern();
+    if (ab->LEFT_ARROW()) {
+        s.dir = EdgeDir::Left;
+    }
+    return s;
+}
+
+// Static twin of flatten's interior validation: false means the interior
+// holds something the pipeline rejects before expansion (nested quantifier,
+// inline element WHERE, subpath/mode/WHERE paren, simplified pattern) —
+// leave that loud error to prescan/flatten. Otherwise `edges` is the
+// interior's edge count and `nodeFillers` records whether any interior node
+// carries a declaration/label/property filler (B3: such an interior must be
+// expanded per repetition — a native var-length collapse cannot re-bind the
+// nodes or re-check their labels per repetition).
+bool qppiInteriorExpandable(GQLParser::ParenthesizedPathPatternExpressionContext *ppe,
+                            int &edges, bool &nodeFillers) {
+    edges = 0;
+    nodeFillers = false;
+    if (!ppe) {
+        return false;
+    }
+    if (ppe->subpathVariableDeclaration() || ppe->pathModePrefix() ||
+        ppe->parenthesizedPathPatternWhereClause()) {
+        return false;
+    }
+    auto *expr = dynamic_cast<GQLParser::PpePathTermContext *>(ppe->pathPatternExpression());
+    if (!expr) {
+        return false; // union / multiset alternation
+    }
+    std::function<bool(GQLParser::PathTermContext *)> walk =
+        [&](GQLParser::PathTermContext *term) {
+            for (auto *f : term->pathFactor()) {
+                GQLParser::PathPrimaryContext *primary = nullptr;
+                bool quantified = false;
+                if (auto *p = dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(f)) {
+                    primary = p->pathPrimary();
+                    quantified = true;
+                } else if (auto *p =
+                               dynamic_cast<GQLParser::PfQuestionedPathPrimaryContext *>(f)) {
+                    primary = p->pathPrimary();
+                    quantified = true;
+                } else {
+                    primary =
+                        dynamic_cast<GQLParser::PfPathPrimaryContext *>(f)->pathPrimary();
+                }
+                if (quantified) {
+                    return false; // nested quantified factor → flatten rejects
+                }
+                if (auto *el = dynamic_cast<GQLParser::PpElementPatternContext *>(primary)) {
+                    if (el->elementPattern()->edgePattern()) {
+                        ++edges;
+                        continue;
+                    }
+                    auto *node = el->elementPattern()->nodePattern();
+                    auto *filler = node ? node->elementPatternFiller() : nullptr;
+                    if (filler && filler->elementPatternPredicate() &&
+                        filler->elementPatternPredicate()->elementPatternWhereClause()) {
+                        return false; // inline WHERE → prescan rejects loudly
+                    }
+                    if (filler && (filler->elementVariableDeclaration() ||
+                                   filler->isLabelExpression() ||
+                                   filler->elementPatternPredicate())) {
+                        nodeFillers = true;
+                    }
+                    continue;
+                }
+                if (auto *paren =
+                        dynamic_cast<GQLParser::PpParenthesizedPathPatternExpressionContext *>(
+                            primary)) {
+                    int sub = 0;
+                    bool subFillers = false;
+                    if (!qppiInteriorExpandable(paren->parenthesizedPathPatternExpression(), sub,
+                                                subFillers)) {
+                        return false;
+                    }
+                    edges += sub;
+                    nodeFillers = nodeFillers || subFillers;
+                    continue;
+                }
+                return false; // simplified path pattern
+            }
+            return true;
+        };
+    return walk(expr->pathTerm());
+}
+
+// True when the statement projects the bare asterisk: SELECT * / RETURN *
+// (the projection clause's own ASTERISK — an aggregate's count(*) does not
+// match: its star belongs to the function, not the clause).
+bool statementHasStarProjection(antlr4::tree::ParseTree *node) {
+    if (!node) {
+        return false;
+    }
+    if (auto *sel = dynamic_cast<GQLParser::SelectStatementContext *>(node)) {
+        if (sel->ASTERISK()) {
+            return true;
+        }
+    }
+    if (auto *ret = dynamic_cast<GQLParser::ReturnStatementContext *>(node)) {
+        if (auto *body = ret->returnStatementBody()) {
+            if (body->ASTERISK()) {
+                return true;
+            }
+        }
+    }
+    for (auto *child : node->children) {
+        if (statementHasStarProjection(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when translating this quantified/questioned path primary introduces
+// synthetic pattern names or WITH re-binds that a bare star projection would
+// leak into the result columns (the B1 red line): a direct quantified edge
+// slot with a declared element variable (renamed _gql_veN under B2), or a
+// paren interior whose elements declare variables (Class V edge rename,
+// per-repetition _gql_ueN edge lists, B3 interior node lists) or carry a
+// compound label expression on an anonymous node (translates to a generated
+// _gql_nlN binding).
+bool qppiFactorSynthesizesBinding(GQLParser::PathPrimaryContext *primary) {
+    if (auto *el = dynamic_cast<GQLParser::PpElementPatternContext *>(primary)) {
+        auto *edge = el->elementPattern() ? el->elementPattern()->edgePattern() : nullptr;
+        if (!edge) {
+            return false; // quantified node pattern rejects elsewhere
+        }
+        auto *filler = edgeShape(edge).filler;
+        return filler && filler->elementVariableDeclaration();
+    }
+    auto *paren =
+        dynamic_cast<GQLParser::PpParenthesizedPathPatternExpressionContext *>(primary);
+    if (!paren) {
+        return false;
+    }
+    auto *expr = dynamic_cast<GQLParser::PpePathTermContext *>(
+        paren->parenthesizedPathPatternExpression()->pathPatternExpression());
+    if (!expr) {
+        return false;
+    }
+    bool found = false;
+    std::function<void(GQLParser::PathTermContext *)> walk =
+        [&](GQLParser::PathTermContext *term) {
+            if (found) {
+                return;
+            }
+            for (auto *f : term->pathFactor()) {
+                GQLParser::PathPrimaryContext *inner = nullptr;
+                if (auto *q = dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(f)) {
+                    inner = q->pathPrimary();
+                } else if (auto *q =
+                               dynamic_cast<GQLParser::PfQuestionedPathPrimaryContext *>(f)) {
+                    inner = q->pathPrimary();
+                } else {
+                    inner = dynamic_cast<GQLParser::PfPathPrimaryContext *>(f)->pathPrimary();
+                }
+                if (auto *el = dynamic_cast<GQLParser::PpElementPatternContext *>(inner)) {
+                    GQLParser::ElementPatternFillerContext *filler = nullptr;
+                    if (auto *node = el->elementPattern()->nodePattern()) {
+                        filler = node->elementPatternFiller();
+                        if (filler && filler->elementVariableDeclaration()) {
+                            found = true;
+                            return;
+                        }
+                        // Anonymous node with a compound label expression
+                        // translates to a generated _gql_nlN binding.
+                        if (filler && !filler->elementVariableDeclaration() &&
+                            filler->isLabelExpression() &&
+                            !dynamic_cast<GQLParser::LabelExpressionNameContext *>(
+                                filler->isLabelExpression()->labelExpression())) {
+                            found = true;
+                            return;
+                        }
+                    } else if (auto *edge = el->elementPattern()->edgePattern()) {
+                        filler = edgeShape(edge).filler;
+                        if (filler && filler->elementVariableDeclaration()) {
+                            found = true;
+                            return;
+                        }
+                    }
+                    continue;
+                }
+                if (auto *sub =
+                        dynamic_cast<GQLParser::PpParenthesizedPathPatternExpressionContext *>(
+                            inner)) {
+                    auto *subExpr = dynamic_cast<GQLParser::PpePathTermContext *>(
+                        sub->parenthesizedPathPatternExpression()->pathPatternExpression());
+                    if (subExpr) {
+                        walk(subExpr->pathTerm());
+                    }
+                    if (found) {
+                        return;
+                    }
+                    continue;
+                }
+                // simplified path pattern: no element bindings to leak
+            }
+        };
+    walk(expr->pathTerm());
+    return found;
+}
+
+} // namespace
+
+// Classifies one quantified/questioned factor NOT nested inside another
+// quantified factor. Only expandable multi-edge paren interiors with a
+// varying bounded count are recorded (U-M); single-edge (Class V), fixed
+// counts ({n}/{m,m} read again in translatePathTerm) and every shape flatten
+// rejects itself return without recording.
+void GqlToCypherTransformer::classifyQuantifiedFactor(
+    GQLParser::PathPrimaryContext *primary, GQLParser::GraphPatternQuantifierContext *quant,
+    bool questioned, antlr4::ParserRuleContext *factorCtx) {
+    auto *paren =
+        dynamic_cast<GQLParser::PpParenthesizedPathPatternExpressionContext *>(primary);
+    if (!paren) {
+        return;
+    }
+    int edges = 0;
+    bool nodeFillers = false;
+    if (!qppiInteriorExpandable(paren->parenthesizedPathPatternExpression(), edges,
+                                nodeFillers)) {
+        return;
+    }
+    // Expansion is needed for a multi-edge interior, or — B3 — for a
+    // single-edge interior whose nodes carry fillers (bindings/labels/props
+    // must be re-bound per repetition). A bare single-edge interior collapses
+    // to a native var-length slot (any bounds, no union branches).
+    if (edges == 0 || (edges == 1 && !nodeFillers)) {
+        return;
+    }
+    MultiHopCount plan = quantifyMultiHopCount(quant, questioned);
+    if (!plan.unroll) {
+        return;
+    }
+    // Recover lo/hi for the cartesian product (bounds already validated above).
+    int lo = 0;
+    int hi = 0;
+    if (auto *gen = quant->generalQuantifier()) {
+        lo = gen->lowerBound() ? static_cast<int>(parseQuantBound(gen->lowerBound()->getText()))
+                               : 0;
+        hi = static_cast<int>(parseQuantBound(gen->upperBound()->getText()));
+    }
+    auto *factor = dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(factorCtx);
+    qppiUnrollFactors.push_back({factor, lo, hi});
+}
+
+void GqlToCypherTransformer::prescanQuantifiedPaths(antlr4::tree::ParseTree *node,
+                                                    bool inQuantifiedInterior) {
+    if (!node) {
+        return;
+    }
+    // B3: element fillers carry the reuse census (declared variable names,
+    // with the quantified-interior subset) and the inline-WHERE rejection.
+    // The latter fires here — before any expression walk — so
+    // `((x WHERE x.v > 1)-[e]->(y)){2}` reports the WHERE message, not the
+    // property-access one (whose check runs after prescan).
+    if (auto *filler = dynamic_cast<GQLParser::ElementPatternFillerContext *>(node)) {
+        if (auto *pred = filler->elementPatternPredicate()) {
+            if (pred->elementPatternWhereClause() && inQuantifiedInterior) {
+                unsupported("inline WHERE in a quantified interior");
+            }
+        }
+        if (auto *decl = filler->elementVariableDeclaration()) {
+            auto &counts = qppiBindingUse[sourceText(decl)];
+            counts.second++;
+            if (inQuantifiedInterior) {
+                counts.first++;
+            }
+        }
+    }
+    if (auto *p = dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(node)) {
+        if (!inQuantifiedInterior) {
+            if (qppiFactorSynthesizesBinding(p->pathPrimary())) {
+                qppiSyntheticBinding = true;
+            }
+            classifyQuantifiedFactor(p->pathPrimary(), p->graphPatternQuantifier(), false, p);
+        }
+        // Everything under a quantified factor is its interior — nested
+        // quantifiers there are flatten's "nested quantified" rejection.
+        for (auto *child : p->children) {
+            prescanQuantifiedPaths(child, true);
+        }
+        return;
+    }
+    if (auto *p = dynamic_cast<GQLParser::PfQuestionedPathPrimaryContext *>(node)) {
+        if (!inQuantifiedInterior) {
+            if (qppiFactorSynthesizesBinding(p->pathPrimary())) {
+                qppiSyntheticBinding = true;
+            }
+            classifyQuantifiedFactor(p->pathPrimary(), nullptr, true, p);
+        }
+        for (auto *child : p->children) {
+            prescanQuantifiedPaths(child, true);
+        }
+        return;
+    }
+    for (auto *child : node->children) {
+        prescanQuantifiedPaths(child, inQuantifiedInterior);
+    }
+}
+
+// B3: `x.prop` where x is declared under a quantified factor — x binds the
+// LIST of its per-repetition nodes/edges, so property access has no valid
+// translation (and the binder error would carry no GQL feature message).
+// Walks both property-reference spellings (valueExpressionPrimary and its
+// non-parenthesized twin) and resolves the access chain's leftmost binding.
+void GqlToCypherTransformer::rejectQuantifiedBindingPropertyRefs(
+    antlr4::tree::ParseTree *node) {
+    if (!node) {
+        return;
+    }
+    auto checkBase = [&](antlr4::tree::ParseTree *chain) {
+        auto *base = dynamic_cast<GQLParser::ValueExpressionPrimaryContext *>(chain);
+        while (base && base->valueExpressionPrimary()) {
+            base = base->valueExpressionPrimary();
+        }
+        if (!base || !base->bindingVariableReference()) {
+            return;
+        }
+        auto it = qppiBindingUse.find(sourceText(base->bindingVariableReference()));
+        if (it != qppiBindingUse.end() && it->second.first > 0) {
+            unsupported("quantified path pattern interior binding property access");
+        }
+    };
+    if (auto *v = dynamic_cast<GQLParser::ValueExpressionPrimaryContext *>(node)) {
+        if (v->PERIOD() && v->valueExpressionPrimary()) {
+            checkBase(v->valueExpressionPrimary());
+        }
+    }
+    if (auto *v = dynamic_cast<GQLParser::NonParenthesizedValueExpressionPrimarySpecialCaseContext *>(
+            node)) {
+        if (v->PERIOD() && v->valueExpressionPrimary()) {
+            checkBase(v->valueExpressionPrimary());
+        }
+    }
+    for (auto *child : node->children) {
+        rejectQuantifiedBindingPropertyRefs(child);
+    }
+}
+
+std::string GqlToCypherTransformer::mergeQuantifiedExpansions(
+    const std::vector<std::string> &branches, GQLParser::StatementContext *ctx) {
+    constexpr const char *kMultiFocus =
+        "multiple USE GRAPH segments with quantified path pattern expansion";
+    std::string prefix;
+    bool havePrefix = false;
+    std::vector<std::string> bodies;
+    bodies.reserve(branches.size());
+    for (const auto &text : branches) {
+        size_t semi = text.find(';');
+        std::string pfx;
+        if (semi != std::string::npos) {
+            if (text.find(';', semi + 1) != std::string::npos ||
+                text.compare(0, 9, "USE GRAPH") != 0) {
+                unsupported(kMultiFocus);
+            }
+            pfx = text.substr(0, semi + 1);
+        }
+        if (!havePrefix) {
+            prefix = pfx;
+            havePrefix = true;
+        } else if (pfx != prefix) {
+            unsupported("inconsistent graph focus with quantified path pattern expansion");
+        }
+        std::string body = semi == std::string::npos ? text : text.substr(semi + 1);
+        size_t first = body.find_first_not_of(" \t");
+        body = first == std::string::npos ? std::string() : body.substr(first);
+        bodies.push_back(std::move(body));
+    }
+    const char *sep = hasDistinctProjection(ctx) ? " UNION " : " UNION ALL ";
+    std::string out;
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        if (i) {
+            out += sep;
+        }
+        out += bodies[i];
+    }
+    if (!prefix.empty()) {
+        out = prefix + " " + out;
+    }
+    return out;
+}
+
 std::string GqlToCypherTransformer::translateStatement(GQLParser::StatementContext *ctx) {
+    if (!ctx) {
+        unsupported("statement");
+    }
+    // QPPI slice A driver: classify every quantified factor, then — when a
+    // U-M range factor exists — shape-check the statement, re-translate it
+    // once per count combination (qppiUnrollCounts feeds translatePathTerm)
+    // and merge the branches into one UNION query.
+    qppiUnrollFactors.clear();
+    qppiSyntheticBinding = false;
+    qppiBindingUse.clear();
+    prescanQuantifiedPaths(ctx, false);
+    // B3 reuse red line: a variable declared under a quantified factor (it
+    // binds a LIST) must be declared exactly once in the whole statement —
+    // repeating it inside, or re-declaring it as a pattern variable
+    // elsewhere, would silently split or join bindings.
+    for (auto &[name, counts] : qppiBindingUse) {
+        if (counts.first > 0 && counts.second > 1) {
+            unsupported("quantified interior binding reused as a pattern variable");
+        }
+    }
+    // B3: property access on a quantified binding (`x.v` where x is a list)
+    // must not reach the Cypher binder.
+    rejectQuantifiedBindingPropertyRefs(ctx);
+    // B1 red line: synthetic pattern names / WITH re-binds (Class V edge
+    // rename, per-repetition interior edge names, interior node lists) leak
+    // into a bare star projection as extra columns — reject instead.
+    if (qppiSyntheticBinding && statementHasStarProjection(ctx)) {
+        unsupported("star projection with generated pattern bindings");
+    }
+    if (qppiUnrollFactors.empty()) {
+        return translateStatementImpl(ctx);
+    }
+    if (ctx->linearDataModifyingStatement()) {
+        unsupported("quantified path pattern expansion in a data-modifying statement");
+    }
+    if (treeHasNode<GQLParser::OptionalMatchStatementContext>(ctx)) {
+        unsupported("quantified path pattern expansion with OPTIONAL MATCH");
+    }
+    if (containsAggregate(ctx) || treeHasNode<GQLParser::GroupByClauseContext>(ctx) ||
+        treeHasNode<GQLParser::HavingClauseContext>(ctx)) {
+        unsupported("quantified path pattern expansion with aggregation / GROUP BY / HAVING");
+    }
+    if (treeHasNode<GQLParser::OrderByAndPageStatementContext>(ctx) ||
+        treeHasNode<GQLParser::OrderByClauseContext>(ctx) ||
+        treeHasNode<GQLParser::OffsetClauseContext>(ctx) ||
+        treeHasNode<GQLParser::LimitClauseContext>(ctx)) {
+        unsupported("quantified path pattern expansion with ORDER BY / SKIP / LIMIT");
+    }
+    long branchCount = 1;
+    for (auto &f : qppiUnrollFactors) {
+        branchCount *= (f.hi - f.lo + 1);
+    }
+    if (branchCount > 8) {
+        unsupported("too many quantified path pattern expansion branches");
+    }
+    std::vector<std::string> branches;
+    std::vector<int> picks(qppiUnrollFactors.size(), 0);
+    std::function<void(size_t)> expand = [&](size_t i) {
+        if (i == qppiUnrollFactors.size()) {
+            qppiUnrollCounts.clear();
+            for (size_t j = 0; j < qppiUnrollFactors.size(); ++j) {
+                qppiUnrollCounts[qppiUnrollFactors[j].factor] = picks[j];
+            }
+            branches.push_back(translateStatementImpl(ctx));
+            return;
+        }
+        for (int k = qppiUnrollFactors[i].lo; k <= qppiUnrollFactors[i].hi; ++k) {
+            picks[i] = k;
+            expand(i + 1);
+        }
+    };
+    expand(0);
+    qppiUnrollCounts.clear();
+    return mergeQuantifiedExpansions(branches, ctx);
+}
+
+std::string GqlToCypherTransformer::translateStatementImpl(
+    GQLParser::StatementContext *ctx) {
     if (!ctx) {
         unsupported("statement");
     }
@@ -1144,7 +1778,23 @@ std::string GqlToCypherTransformer::translateMatchStatement(
     if (bindingTable->graphPatternYieldClause()) {
         unsupported("MATCH ... YIELD");
     }
-    return keyword + translateGraphPattern(bindingTable->graphPattern(), wheres);
+    qppiWithSuffixes.clear(); // refilled by translatePathTerm (Class V slots /
+                              // interior edge lists), consumed right here
+    std::string out = keyword + translateGraphPattern(bindingTable->graphPattern(), wheres);
+    if (!qppiWithSuffixes.empty()) {
+        if (keyword != "MATCH ") {
+            // The caller appends WHERE after this suffix, which would turn an
+            // OPTIONAL MATCH predicate into a post-WITH filter (dropping the
+            // null-extended rows) — reject rather than shift semantics.
+            unsupported("quantified path pattern edge binding inside OPTIONAL MATCH");
+        }
+        out += " WITH *";
+        for (const auto &item : qppiWithSuffixes) {
+            out += ", " + item;
+        }
+        qppiWithSuffixes.clear();
+    }
+    return out;
 }
 
 std::string GqlToCypherTransformer::translateFilterStatement(
@@ -1269,52 +1919,26 @@ std::string quantifierRange(GQLParser::GraphPatternQuantifierContext *q) {
     return lo + ".." + gen->upperBound()->getText();
 }
 
-enum class EdgeDir { Left, Right, Both };
-
-struct EdgeShape {
-    EdgeDir dir = EdgeDir::Both;
-    GQLParser::ElementPatternFillerContext *filler = nullptr;
-};
-
-EdgeShape edgeShape(GQLParser::EdgePatternContext *e) {
-    EdgeShape s;
-    if (auto *full = e->fullEdgePattern()) {
-        if (auto *x = full->fullEdgePointingLeft()) {
-            s.dir = EdgeDir::Left;
-            s.filler = x->elementPatternFiller();
-        } else if (auto *x = full->fullEdgePointingRight()) {
-            s.dir = EdgeDir::Right;
-            s.filler = x->elementPatternFiller();
-        } else if (auto *x = full->fullEdgeUndirected()) {
-            s.filler = x->elementPatternFiller();
-        } else if (auto *x = full->fullEdgeLeftOrUndirected()) {
-            s.filler = x->elementPatternFiller();
-        } else if (auto *x = full->fullEdgeUndirectedOrRight()) {
-            s.filler = x->elementPatternFiller();
-        } else if (auto *x = full->fullEdgeLeftOrRight()) {
-            s.filler = x->elementPatternFiller();
-        } else if (auto *x = full->fullEdgeAnyDirection()) {
-            s.filler = x->elementPatternFiller();
-        }
-        return s;
-    }
-    // Abbreviated forms carry no filler. GQL's undirected / mixed-direction
-    // spellings collapse to LadybugDB's ANY-direction `--` (a directed property
-    // graph has no undirected edges to distinguish).
-    auto *ab = e->abbreviatedEdgePattern();
-    if (ab->LEFT_ARROW()) {
-        s.dir = EdgeDir::Left;
-    }
-    return s;
-}
-
 // A pattern factor ready to be flattened into node/edge events.
+//
+// Node events stay STRUCTURED until chain emission: the junction merge that
+// follows flatten decides the final name/filler per juxtaposition seam, and
+// only then is the filler translated (under that final name). Edge events
+// keep their parse context and are translated at emission as before.
 struct FlatEvent {
     bool isEdge = false;
-    std::string nodeBinding;                   // for node events (may be "")
-    GQLParser::EdgePatternContext *edge = nullptr; // for edge events
-    std::string range;                         // edge: "" = fixed single hop
-    std::string innerStart, innerEnd;          // paren unit end nodes ("" = none)
+    // Node event fields:
+    GQLParser::ElementPatternFillerContext *nodeFiller = nullptr; // null = bare "()"
+    std::string nodeDeclared;   // declared element variable ("" = anonymous)
+    std::string nodeName;       // current pattern name (declared/synthetic/"")
+    bool nodeSynth = false;     // nodeName is a QPPI-generated name (not user's)
+    bool nodeInterior = false;  // event originated inside a quantified interior
+    // Edge event fields:
+    GQLParser::EdgePatternContext *edge = nullptr;
+    std::string range;          // "" = fixed single hop
+    // QPPI expansion: synthetic pattern name for this edge's binding
+    // (per-repetition interior edge vars); "" = keep the declared name.
+    std::string renameTo;
 };
 
 } // namespace
@@ -1358,7 +1982,7 @@ std::string GqlToCypherTransformer::translatePathPatternPrefix(
 
 void GqlToCypherTransformer::translateFiller(
     GQLParser::ElementPatternFillerContext *ctx, std::vector<std::string> &wheres,
-    std::string &head, std::string &props, bool isNodePattern) {
+    std::string &head, std::string &props, bool isNodePattern, const std::string *renameVar) {
     head.clear();
     props.clear();
     if (!ctx) {
@@ -1368,7 +1992,15 @@ void GqlToCypherTransformer::translateFiller(
     // keep rejecting them (edge types are not label sets).
     checkPatternSupported(ctx, /*allowLabelExpr=*/isNodePattern);
     std::string var;
-    if (ctx->elementVariableDeclaration()) {
+    // QPPI rename: a quantified element emits under a synthetic name (edge
+    // slot renames, per-repetition interior names); the user-facing name is
+    // re-bound by the MATCH's trailing WITH suffix. Applies even to an
+    // anonymous filler — a junction merge may hand the anonymous side the
+    // other side's name — and drives the compound-label WHERE below.
+    if (renameVar && !renameVar->empty()) {
+        var = *renameVar;
+        head += var;
+    } else if (ctx->elementVariableDeclaration()) {
         var = sourceText(ctx->elementVariableDeclaration());
         head += var;
     }
@@ -1386,6 +2018,7 @@ void GqlToCypherTransformer::translateFiller(
             }
             if (var.empty()) {
                 var = "_gql_nl" + std::to_string(autoLabelIdx++);
+                sawGeneratedBinding = true;
                 head += var;
             }
             wheres.push_back(translateLabelExpression(expr, var));
@@ -1409,12 +2042,13 @@ std::string GqlToCypherTransformer::translateNodePattern(
 }
 
 std::string GqlToCypherTransformer::translateEdgePattern(
-    GQLParser::EdgePatternContext *ctx, const std::string &recDetail) {
+    GQLParser::EdgePatternContext *ctx, const std::string &recDetail,
+    const std::string &renameVar) {
     EdgeShape shape = edgeShape(ctx);
     std::string head, props;
     if (shape.filler) {
         std::vector<std::string> unused;
-        translateFiller(shape.filler, unused, head, props, /*isNodePattern=*/false);
+        translateFiller(shape.filler, unused, head, props, /*isNodePattern=*/false, &renameVar);
         // An inline WHERE on an edge filler cannot be hoisted from here (this
         // helper has no where sink); reject rather than drop it.
         if (shape.filler->elementPatternPredicate() &&
@@ -1504,6 +2138,7 @@ std::string GqlToCypherTransformer::translatePathPattern(
     if (needTrailFilter || needAcyclicFilter || needSimpleFilter) {
         if (varName.empty()) {
             varName = "_gql_pp" + std::to_string(autoPathIdx++);
+            sawGeneratedBinding = true;
         }
         const char *pred = needSimpleFilter ? "_gql_is_simple(" :
                            needTrailFilter   ? "IS_TRAIL("
@@ -1525,6 +2160,10 @@ std::string GqlToCypherTransformer::translatePathTerm(
     // node bindings merge into one node and an edge always sits between two
     // node slots (implicit `()` when no neighbour provides one).
     std::vector<FlatEvent> events;
+    // Per-repetition synthetic names of interior node bindings, keyed by the
+    // user-declared name; the WITH list suffixes are built AFTER the junction
+    // merge resolves seam aliases (outer names win, left synthetic wins).
+    std::map<std::string, std::vector<std::string>> interiorNodeReps;
 
     std::function<void(GQLParser::PathTermContext *, bool)> flatten;
     flatten = [&](GQLParser::PathTermContext *termCtx, bool quantifiedOuter) {
@@ -1534,15 +2173,21 @@ std::string GqlToCypherTransformer::translatePathTerm(
             GQLParser::PathPrimaryContext *primary = nullptr;
             std::string range;
             bool quantified = false;
+            GQLParser::PfQuantifiedPathPrimaryContext *quantFactor = nullptr;
+            GQLParser::GraphPatternQuantifierContext *quantCtx = nullptr;
+            bool quantQuestioned = false;
             if (auto *p = dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(f)) {
                 primary = p->pathPrimary();
-                range = quantifierRange(p->graphPatternQuantifier());
+                quantCtx = p->graphPatternQuantifier();
+                range = quantifierRange(quantCtx);
                 quantified = true;
+                quantFactor = p;
             } else if (auto *p =
                            dynamic_cast<GQLParser::PfQuestionedPathPrimaryContext *>(f)) {
                 primary = p->pathPrimary();
                 range = "0..1";
                 quantified = true;
+                quantQuestioned = true;
             } else {
                 primary = dynamic_cast<GQLParser::PfPathPrimaryContext *>(f)->pathPrimary();
             }
@@ -1551,11 +2196,17 @@ std::string GqlToCypherTransformer::translatePathTerm(
                     if (quantified) {
                         unsupported("quantified path pattern over a node pattern");
                     }
+                    // Structured node event: translation is deferred to chain
+                    // emission so the junction merge can decide the final
+                    // name/filler first (B3).
                     FlatEvent ev;
-                    std::string head, props;
-                    translateFiller(el->elementPattern()->nodePattern()->elementPatternFiller(),
-                                    wheres, head, props);
-                    ev.nodeBinding = "(" + head + props + ")";
+                    ev.nodeFiller =
+                        el->elementPattern()->nodePattern()->elementPatternFiller();
+                    if (ev.nodeFiller && ev.nodeFiller->elementVariableDeclaration()) {
+                        ev.nodeDeclared = sourceText(ev.nodeFiller->elementVariableDeclaration());
+                        ev.nodeName = ev.nodeDeclared;
+                    }
+                    ev.nodeInterior = quantifiedOuter;
                     events.push_back(std::move(ev));
                 } else {
                     FlatEvent ev;
@@ -1564,6 +2215,22 @@ std::string GqlToCypherTransformer::translatePathTerm(
                     ev.range = range;
                     if (quantifiedOuter && quantified) {
                         unsupported("nested quantified path pattern");
+                    }
+                    // B2 shape unification: a direct quantified slot with a
+                    // declared element variable binds GQL's edge *list*, not
+                    // the engine's RECURSIVE_REL struct. Same correction as
+                    // the Class V paren collapse — rename the slot to a
+                    // synthetic name and re-bind the user name through
+                    // relationships(...) in the MATCH's trailing WITH.
+                    if (quantified) {
+                        auto *filler = edgeShape(ev.edge).filler;
+                        if (filler && filler->elementVariableDeclaration()) {
+                            ev.renameTo = "_gql_ve" + std::to_string(autoVarLenIdx++);
+                            sawGeneratedBinding = true;
+                            qppiWithSuffixes.push_back(
+                                "relationships(" + ev.renameTo + ") AS " +
+                                sourceText(filler->elementVariableDeclaration()));
+                        }
                     }
                     events.push_back(std::move(ev));
                 }
@@ -1582,44 +2249,170 @@ std::string GqlToCypherTransformer::translatePathTerm(
                 if (ppe->parenthesizedPathPatternWhereClause()) {
                     unsupported("WHERE inside parenthesized path pattern");
                 }
+                if (quantified && quantifiedOuter) {
+                    unsupported("nested quantified path pattern");
+                }
                 size_t before = events.size();
                 auto *innerExpr = dynamic_cast<GQLParser::PpePathTermContext *>(
                     ppe->pathPatternExpression());
                 if (!innerExpr) {
                     unsupported("path pattern union/multiset alternation");
                 }
-                flatten(innerExpr->pathTerm(), quantified);
+                // Propagate "inside a quantified interior" through nested
+                // plain parens so element WHERE / nested-quantifier checks
+                // keep seeing the true context.
+                flatten(innerExpr->pathTerm(), quantified || quantifiedOuter);
                 if (quantified) {
-                    // QPPI: the interior must be exactly one edge between two
-                    // empty anonymous nodes — interior bindings would be lists
-                    // in GQL and have no Cypher var-length counterpart.
+                    // QPPI over the flattened interior (B3):
+                    //  - exactly one edge with BARE interior nodes collapses
+                    //    to the var-length slot (Class V; edge binding renamed
+                    //    at emission);
+                    //  - any interior node filler (declaration/label/props),
+                    //    or >= 2 edges, expand by repeating the flattened
+                    //    chain — each repetition re-translates its nodes with
+                    //    fresh synthetic names so the per-repetition bindings
+                    //    join only at the seam nodes (fixed {n}/{m,m} locally;
+                    //    {m,n} takes its count from qppiUnrollCounts).
                     std::vector<FlatEvent> inner(events.begin() + before, events.end());
                     events.resize(before);
                     int innerEdges = 0;
-                    FlatEvent edge;
+                    bool nodeFillers = false;
+                    bool nestedRange = false;
+                    auto labelKeyOf = [&](GQLParser::ElementPatternFillerContext *f) {
+                        if (f && f->isLabelExpression()) {
+                            return sourceText(f->isLabelExpression()->labelExpression());
+                        }
+                        return std::string();
+                    };
+                    auto propsKeyOf = [&](GQLParser::ElementPatternFillerContext *f) {
+                        if (f && f->elementPatternPredicate() &&
+                            f->elementPatternPredicate()->elementPropertySpecification()) {
+                            return sourceText(
+                                f->elementPatternPredicate()->elementPropertySpecification());
+                        }
+                        return std::string();
+                    };
                     for (auto &e : inner) {
                         if (e.isEdge) {
                             innerEdges++;
-                            edge = e;
-                        } else if (e.nodeBinding != "()") {
-                            unsupported(
-                                "quantified path pattern with interior node bindings");
+                            if (!e.range.empty()) {
+                                nestedRange = true;
+                            }
+                        } else if (!e.nodeDeclared.empty() || !labelKeyOf(e.nodeFiller).empty() ||
+                                   !propsKeyOf(e.nodeFiller).empty()) {
+                            nodeFillers = true;
                         }
                     }
-                    if (innerEdges != 1) {
-                        unsupported("quantified path pattern with multiple edges");
-                    }
-                    if (!edge.range.empty()) {
+                    if (nestedRange) {
                         unsupported("nested quantified path pattern");
                     }
-                    edge.range = range; // outer quantifier supplies the bounds
-                    FlatEvent startNode;
-                    startNode.nodeBinding = "()";
-                    FlatEvent endNode;
-                    endNode.nodeBinding = "()";
-                    events.push_back(startNode);
-                    events.push_back(edge);
-                    events.push_back(endNode);
+                    if (innerEdges == 0) {
+                        unsupported("quantified path pattern with multiple edges");
+                    }
+                    if (innerEdges == 1 && !nodeFillers) {
+                        FlatEvent edge;
+                        for (auto &e : inner) {
+                            if (e.isEdge) {
+                                edge = e;
+                            }
+                        }
+                        edge.range = range; // outer quantifier supplies the bounds
+                        // Class V correction: the collapsed slot's edge
+                        // binding would otherwise bind the engine's
+                        // RECURSIVE_REL struct, but GQL binds it as the list
+                        // of the repeated edges. Rename the pattern slot to a
+                        // synthetic name and re-bind the user name through
+                        // relationships(...) in the MATCH's trailing WITH.
+                        auto *filler = edgeShape(edge.edge).filler;
+                        if (filler && filler->elementVariableDeclaration()) {
+                            edge.renameTo = "_gql_ve" + std::to_string(autoVarLenIdx++);
+                            sawGeneratedBinding = true;
+                            qppiWithSuffixes.push_back(
+                                "relationships(" + edge.renameTo + ") AS " +
+                                sourceText(filler->elementVariableDeclaration()));
+                        }
+                        FlatEvent startNode;
+                        startNode.nodeInterior = true;
+                        FlatEvent endNode;
+                        endNode.nodeInterior = true;
+                        events.push_back(startNode);
+                        events.push_back(edge);
+                        events.push_back(endNode);
+                        continue;
+                    }
+                    // Expansion. Shared with the prescan, so the Class X
+                    // quantifier rejections fire identically here.
+                    int repeats;
+                    MultiHopCount plan = quantifyMultiHopCount(quantCtx, quantQuestioned);
+                    if (plan.unroll) {
+                        auto it = qppiUnrollCounts.find(quantFactor);
+                        if (it == qppiUnrollCounts.end() || it->second < 1) {
+                            unsupported("quantified path pattern expansion count unavailable");
+                        }
+                        repeats = it->second;
+                    } else {
+                        repeats = plan.count;
+                    }
+                    // Interior element variables bind the LIST of their
+                    // per-repetition occurrences. Each repetition gets fresh
+                    // pattern names; the user-facing name is re-bound by a
+                    // WITH list suffix AFTER the junction merge has resolved
+                    // seam names (interiorNodeReps, suffix built below).
+                    std::vector<std::string> interiorVars;
+                    for (auto &e : inner) {
+                        if (!e.isEdge) {
+                            continue;
+                        }
+                        std::string v;
+                        auto *filler = edgeShape(e.edge).filler;
+                        if (filler && filler->elementVariableDeclaration()) {
+                            v = sourceText(filler->elementVariableDeclaration());
+                        }
+                        interiorVars.push_back(v);
+                    }
+                    std::map<std::string, std::vector<std::string>> repNames;
+                    auto nameFor = [&](const std::string &orig, int rep) -> std::string {
+                        auto &vec = repNames[orig];
+                        while (static_cast<int>(vec.size()) <= rep) {
+                            vec.push_back("_gql_ue" + std::to_string(autoVarLenIdx++));
+                            sawGeneratedBinding = true;
+                        }
+                        return vec[rep];
+                    };
+                    for (int rep = 0; rep < repeats; ++rep) {
+                        size_t ei = 0;
+                        for (auto &e : inner) {
+                            FlatEvent copy = e;
+                            if (e.isEdge) {
+                                if (ei < interiorVars.size() && !interiorVars[ei].empty()) {
+                                    copy.renameTo = nameFor(interiorVars[ei], rep);
+                                }
+                                ++ei;
+                            } else if (!e.nodeDeclared.empty()) {
+                                // Per-repetition synthetic node name; the
+                                // junction merge may alias it to a seam name.
+                                copy.nodeSynth = true;
+                                copy.nodeName = "_gql_vn" + std::to_string(autoVarLenIdx++);
+                                sawGeneratedBinding = true;
+                                interiorNodeReps[e.nodeDeclared].push_back(copy.nodeName);
+                            }
+                            copy.nodeInterior = true;
+                            events.push_back(std::move(copy));
+                        }
+                    }
+                    // Edge lists carry no seam aliasing (edges never merge);
+                    // they can be re-bound immediately.
+                    for (auto &[orig, names] : repNames) {
+                        std::string list = "[";
+                        for (size_t n = 0; n < names.size(); ++n) {
+                            if (n) {
+                                list += ", ";
+                            }
+                            list += names[n];
+                        }
+                        list += "]";
+                        qppiWithSuffixes.push_back(list + " AS " + orig);
+                    }
                 }
                 continue;
             }
@@ -1629,36 +2422,116 @@ std::string GqlToCypherTransformer::translatePathTerm(
 
     flatten(ctx, false);
 
-    // Build the chain: consecutive node bindings merge (juxtaposition); each
-    // edge is emitted between two node slots.
-    std::string out;
-    std::string pendingNode;
-    bool haveNode = false;
-    int edgeCount = 0;
-    FlatEvent *soleEdge = nullptr;
-
-    auto bindNode = [&](const std::string &b) {
-        std::string text = b.empty() ? "()" : b;
-        if (!haveNode) {
-            pendingNode = text;
-            haveNode = true;
-            return;
+    // Junction merge (B3): adjacent node events are juxtaposed — by GQL
+    // semantics they are ONE node (outer/interior seams and interior
+    // repetition seams alike). Slice A's text comparison generalizes into a
+    // structured name/filler merge; discarded synthetic names are aliased so
+    // the interior node lists can resolve seam entries afterwards.
+    std::map<std::string, std::string> nodeAlias; // discarded name → final name
+    auto resolveName = [&](std::string n) {
+        while (true) {
+            auto it = nodeAlias.find(n);
+            if (it == nodeAlias.end() || it->second == n) {
+                break;
+            }
+            n = it->second;
         }
-        // Merge with the pending boundary node.
-        if (pendingNode == "()") {
-            pendingNode = text;
-        } else if (text != "()" && text != pendingNode) {
+        return n;
+    };
+    auto labelKeyOf = [&](GQLParser::ElementPatternFillerContext *f) {
+        if (f && f->isLabelExpression()) {
+            return sourceText(f->isLabelExpression()->labelExpression());
+        }
+        return std::string();
+    };
+    auto propsKeyOf = [&](GQLParser::ElementPatternFillerContext *f) {
+        if (f && f->elementPatternPredicate() &&
+            f->elementPatternPredicate()->elementPropertySpecification()) {
+            return sourceText(f->elementPatternPredicate()->elementPropertySpecification());
+        }
+        return std::string();
+    };
+    auto mergeNode = [&](FlatEvent &acc, FlatEvent &&b) {
+        // Name: anonymous yields to named; an outer user name beats an
+        // interior synthetic one; two synthetics keep the left; two distinct
+        // user names are the classic juxtaposition error.
+        const std::string &nL = acc.nodeName;
+        const std::string &nR = b.nodeName;
+        std::string winner;
+        bool winnerSynth = false;
+        if (nL == nR) {
+            winner = nL;
+            winnerSynth = acc.nodeSynth;
+        } else if (nL.empty()) {
+            winner = nR;
+            winnerSynth = b.nodeSynth;
+        } else if (nR.empty()) {
+            winner = nL;
+            winnerSynth = acc.nodeSynth;
+        } else if (acc.nodeSynth && !b.nodeSynth) {
+            winner = nR; // outer user pattern name wins
+            nodeAlias[nL] = nR;
+        } else if (!acc.nodeSynth && b.nodeSynth) {
+            winner = nL;
+            nodeAlias[nR] = nL;
+        } else if (acc.nodeSynth && b.nodeSynth) {
+            winner = nL; // same-QPPI seam: left repetition wins
+            nodeAlias[nR] = nL;
+        } else {
             unsupported("juxtaposed node patterns (distinct variables)");
         }
+        // Filler (labels/props, name excluded): identical keeps the left; an
+        // empty side yields to the other; anything else is a conflict (the
+        // interior message when either side came from a quantified interior).
+        std::string lLab = labelKeyOf(acc.nodeFiller);
+        std::string rLab = labelKeyOf(b.nodeFiller);
+        std::string lPrp = propsKeyOf(acc.nodeFiller);
+        std::string rPrp = propsKeyOf(b.nodeFiller);
+        if (lLab == rLab && lPrp == rPrp) {
+            // identical fillers — keep the left context
+        } else if (lLab.empty() && lPrp.empty()) {
+            acc.nodeFiller = b.nodeFiller;
+        } else if (rLab.empty() && rPrp.empty()) {
+            // keep the left filler
+        } else if (acc.nodeInterior || b.nodeInterior) {
+            unsupported("quantified interior junction with conflicting labels/properties");
+        } else {
+            unsupported("juxtaposed node patterns (distinct variables)");
+        }
+        acc.nodeName = winner;
+        acc.nodeSynth = winnerSynth;
+    };
+
+    // Chain emission: adjacent nodes were merged above, so each node flushes
+    // at the next edge (or at the end of the pattern); nodes render under
+    // their final merged names.
+    std::string out;
+    bool haveNode = false;
+    FlatEvent pending;
+    int edgeCount = 0;
+    FlatEvent *soleEdge = nullptr;
+    auto renderNode = [&](const FlatEvent &n) -> std::string {
+        if (!n.nodeFiller) {
+            return n.nodeName.empty() ? std::string("()") : "(" + n.nodeName + ")";
+        }
+        std::string head, props;
+        std::string name = n.nodeName;
+        translateFiller(n.nodeFiller, wheres, head, props, true,
+                        name.empty() ? nullptr : &name);
+        return "(" + head + props + ")";
     };
     for (auto &ev : events) {
         if (!ev.isEdge) {
-            bindNode(ev.nodeBinding);
+            if (haveNode) {
+                mergeNode(pending, std::move(ev));
+            } else {
+                pending = std::move(ev);
+                haveNode = true;
+            }
             continue;
         }
-        if (!haveNode) {
-            bindNode("");
-        }
+        out += haveNode ? renderNode(pending) : std::string("()");
+        haveNode = false;
         std::string recDetail;
         if (!ev.range.empty()) {
             // Per-slot recursive type: exact for whole-pattern TRAIL on a
@@ -1673,13 +2546,30 @@ std::string GqlToCypherTransformer::translatePathTerm(
             }
             recDetail = "*" + (slotType.empty() ? std::string() : slotType + " ") + ev.range;
         }
-        out += pendingNode + translateEdgePattern(ev.edge, recDetail);
-        haveNode = false;
+        // ev.renameTo is set by QPPI expansion: the paren single-edge
+        // collapse (Class V, edge binding → relationships(...) list), the
+        // per-repetition names of multi-edge interiors, and direct
+        // quantified slots (B2).
+        out += translateEdgePattern(ev.edge, recDetail, ev.renameTo);
         edgeCount++;
         soleEdge = &ev;
     }
     if (haveNode) {
-        out += pendingNode;
+        out += renderNode(pending);
+    }
+    // Interior node lists: resolve seam aliases (an outer name or the left
+    // synthetic survives each junction) so every entry names the emitted
+    // node — k entries, one per repetition.
+    for (auto &[orig, names] : interiorNodeReps) {
+        std::string list = "[";
+        for (size_t n = 0; n < names.size(); ++n) {
+            if (n) {
+                list += ", ";
+            }
+            list += resolveName(names[n]);
+        }
+        list += "]";
+        qppiWithSuffixes.push_back(list + " AS " + orig);
     }
     if (edgeCountOut) {
         *edgeCountOut = edgeCount;
@@ -1750,6 +2640,10 @@ std::string GqlToCypherTransformer::translateSelectStatement(
     }
 
     const bool star = ctx->ASTERISK() != nullptr;
+    if (star && sawGeneratedBinding) {
+        // A synthetic pattern name would leak into the bare star column set.
+        unsupported("star projection with generated pattern bindings");
+    }
     std::vector<SelectItemInfo> items;
     if (!star) {
         auto *list = ctx->selectItemList();
@@ -2107,6 +3001,10 @@ std::string GqlToCypherTransformer::translateReturnStatement(
 
     std::string proj;
     if (body->ASTERISK()) {
+        // A synthetic pattern name would leak into the bare star column set.
+        if (sawGeneratedBinding) {
+            unsupported("star projection with generated pattern bindings");
+        }
         proj = "*";
     } else {
         std::vector<std::string> parts;
