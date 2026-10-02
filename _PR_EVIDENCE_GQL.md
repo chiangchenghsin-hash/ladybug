@@ -25,9 +25,12 @@
 httplib 无 SSL 编译,https 下载在发请求前即被拒。装 OpenSSL 3 可让这 3 例
 走真下载路径(可选,非门禁项)。旧口径「需外网必挂」是错归因,已更正。
 
-构建产物时间戳:`libgql.lbug_extension` 2026-10-02 17:47;`e2e_test.exe` 19:18 **强制重链**
-(首轮 `_build_gql.bat` 并行多目标时 MSBuild 增量判断漏链——lbug.lib 已新、exe 仍旧;
-删产物单目标重建消除疑点。教训:并行多目标构建后**核对产物时间戳**不晚于依赖库)。
+构建产物(最后一次验证跑):`lbug.lib` 21:01:24 → `libgql.lbug_extension` 21:01:31 →
+`e2e_test.exe` 21:01:48,`ARTIFACT_GATE_OK`。**首轮发现的 MSBuild 并行多目标漏链
+已修**(`82e5107`):假 `proj -> exe` 完成消息、exe 旧于 lib——现在 `_build_gql.bat`
+预删产物强制真链接 + 顺序构建(e2e_test 最后)+ 产物门(stale exe 响亮拒绝),
+该失效模式无法再冒充新构建。(修复中另抓到一次产物门误报:librarian 重归档会抬
+lbug.lib 的 mtime,故门只严查 exe、DLL 存在即可——坑记于 bat 注释。)
 
 ### 自测分套件计数(与 `_HANDOVER_GQL.md` 记录咬合)
 
@@ -83,14 +86,15 @@ GQL 使能 4 组合计 ≲54 行。全部以门禁 4(全量回归)护航。
   建议 WSL/docker 过一遍 Linux 构建 + 自测;做不到则 PR description 如实写明测试平台。
 - **CI sanity「generated grammar files up to date」**:对 vendored ANTLR 生成物
   (锁 4.13.1)是否放行未实测。
-- **run_tck.py 输出非确定性(已知坑)**:REPORT.md 的 passed-with-note 清单顺序随
-  并行执行序洗牌,每次重跑都脏工作区——已核实排序后多重集逐行一致、数字全同,
-  本次把重排还原不入历史。要根治可在 REPORT 写出前对清单排序(harness 一行级小改,未做)。
+- ~~run_tck.py 输出非确定性~~ **已修**(`82e5107`):报告四个写出循环(values-only /
+  passed-with-note / skipped / unchecked)补排序;两连跑验证 **REPORT 字节一致**,
+  70/120/9/7 不变。重跑幂等,reviewer 复跑不再看到洗牌 diff。
 
 ## 五、英文可粘贴段(PR description「Testing」节)
 
 ```text
-Testing (all on Windows 11 / MSVC 18 BuildTools, 2026-10-02, commit 5f28079):
+Testing (all on Windows 11 / MSVC 18 BuildTools, 2026-10-02; source tree at
+5f28079 — later commits are test-harness/docs only):
 
 - Build: Release build of `e2e_test` + `libgql.lbug_extension` — clean (no errors).
 - GQL dual-run parity suite: 161/161 passed (18 suites; each case runs the GQL
@@ -102,7 +106,9 @@ Testing (all on Windows 11 / MSVC 18 BuildTools, 2026-10-02, commit 5f28079):
   statements, `CREATE GRAPH ... AS COPY OF` grammar ambiguity) + 5 explicit
   design rejections (multi-label node types, `LIKE`/`AS COPY OF` graph
   copying). Wrong-GQLSTATUS count: 0. Scenario-level detail and corpus-integrity
-  footnotes: `extension/gql/test/tck/REPORT.md`.
+  footnotes: `extension/gql/test/tck/REPORT.md`. Report generation is
+  deterministic (listings sorted; verified byte-stable across consecutive
+  reruns).
 - Full engine regression (covers the engine-side changes below): 1972/1975
   passed. The 3 failures are pre-existing extension-registry INSTALL cases in
   this build configuration (LoadNotInstalledExtension / ForceInstallExtension /
