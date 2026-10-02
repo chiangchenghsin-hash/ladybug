@@ -58,8 +58,8 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 |---|---|---|---|
 | G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✓ (single-hop) | quantified single edges and single-hop QPPIs `( ()-[]->() ){m,n}` → Cypher var-length `[e*m..n]`; multi-hop / node-quantified QPPIs ✗ |
 | G005/G015–G020 | Path search prefixes (ANY SHORTEST / ALL SHORTEST) | ✓ (single-hop) | → `[e*SHORTEST ...]` / `[e*ALL SHORTEST ...]`; counted `SHORTEST k`, `SHORTEST GROUP(S)`, `ALL/ANY PATHS` ✗ |
-| G010–G013 | Path modes (WALK/TRAIL/ACYCLIC) | ✓ | single var-length slot → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; multi-hop patterns (and every ACYCLIC pattern) additionally bind a path variable and filter with `IS_TRAIL`/`IS_ACYCLIC` over the whole path — exact ISO semantics (see difference 7); WALK = engine default; SIMPLE ✗ (no engine counterpart) |
-| G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✓ (node patterns) | `:A&B`/`:A\|B`/`:!A`/parens → WHERE predicates over `labels(v)` (graph-kind-aware, see difference 13); simple `:Label` unchanged (table pruning); INSERT label sets `:A&B` → `CREATE (n:A:B ...)` on ANY graphs; `%` wildcard, edge label expressions, `IS LABELED` predicates ✗ |
+| G010–G013 | Path modes (WALK/TRAIL/ACYCLIC/SIMPLE) | ✓ | single var-length slot → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; multi-hop patterns (and every ACYCLIC/SIMPLE pattern) additionally bind a path variable and filter with `IS_TRAIL`/`IS_ACYCLIC`/`_gql_is_simple` over the whole path — exact ISO semantics (see difference 7); WALK = engine default. SIMPLE is *not* bare engine `*ACYCLIC` (that only keeps intermediate nodes distinct — an endpoint may equal an intermediate); SIMPLE = `_gql_is_simple(p)` (nodes distinct except first=last may coincide), with `*ACYCLIC` as a cheap superset prefilter |
+| G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✓ (node patterns) | `:A&B`/`:A\|B`/`:!A`/parens → WHERE predicates over `labels(v)` (graph-kind-aware, see difference 13); simple `:Label` unchanged (table pruning); INSERT label sets `:A&B` → `CREATE (n:A:B ...)` on ANY graphs; `%` wildcard → true on table graphs / `size(labels(v)) > 0` on ANY; `IS [NOT] LABELED <expr>` predicates share the same predicate outlet (`IS NOT` negates the whole predicate); edge label expressions ✗ |
 | G100 | ELEMENT_ID | ✓ | → `internal_id()` |
 | G115 | PROPERTY_EXISTS | ✓ | → `(v.prop IS NOT NULL)` (fixed-schema model of "property present", consistent with difference 1) |
 | GA05 | Cast specification | ✓ | `CAST` shared syntax |
@@ -68,8 +68,13 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 Quantifier bounds follow the GQL/Neo4j semantics — note that GQL `*` is
 **zero**-or-more (`[e*0..]` in Cypher; Cypher's bare `*` is one-or-more), `+`
 is one-or-more, `?` is `{0,1}`. Lower bound 0 binds start = end with an empty
-edge list. `DIFFERENT EDGES` match mode is rejected; `REPEATABLE ELEMENTS` is
-dropped (LadybugDB MATCH already allows edge repetition).
+edge list. `DIFFERENT EDGES` over a **single** path pattern maps to the TRAIL
+machinery (whole-path edge distinctness); over multiple patterns it is
+rejected (cross-pattern edge disjointness is deliberately out of scope).
+`REPEATABLE ELEMENTS` is dropped (LadybugDB MATCH already allows edge
+repetition). Multi-hop QPPIs stay rejected (deferred: bounded `{m,n}` UNION
+expansion is the only feasible Cypher-side subset; unbounded multi-hop
+repetition is a translator expressiveness ceiling).
 
 ### Function-name mapping
 
@@ -209,8 +214,18 @@ engine's native operators byte-for-byte.
     20). Everywhere else untyped literals whose element classes disagree (INT
     vs DOUBLE count as different classes; `null` ignored) are still rejected
     with `GQL feature not supported: heterogeneous list literal`, as is a mixed
-    list nested inside a wrapped `FOR` element; non-literal elements cannot be
-    judged statically and may still homogenize at runtime. **Map/record
+    list nested inside a wrapped `FOR` element. **Non-literal elements on
+    typed graphs** (Q5-3, 2026-10-02) are now covered at *bind* time: a list
+    literal containing at least one non-literal element is rewritten to
+    `_gql_list_checked(e1, …)`, whose bindFunc sees each argument's
+    engine-derived type **before** list homogenization and raises `GQL feature
+    not supported: heterogeneous list element types` when the classes differ —
+    the runtime residual is closed for this shape. Known residuals (loud or
+    structural, none silent on the covered shapes): lists inside **aggregate
+    arguments** are not rewritten (the rewriter stops at aggregate boundaries);
+    ANY graphs are exempt (JSON dynamic columns — `FOR` sources keep the
+    `_gql_to_json` wrapping instead); ORDER BY keys and SET/CREATE property
+    values still emit source text. **Map/record
     values** (`{}`, `{k: v}`) in expressions are rejected too (`... map value`)
     — LadybugDB expressions have no map type.
 18. **`FILTER` maps to `WITH * WHERE`** so it composes after `FOR`/`MATCH`;
@@ -279,8 +294,14 @@ engine's native operators byte-for-byte.
     stay untagged, and a wrong tag is worse than none — the TCK harness
     fails a scenario whose expected code differs from an emitted one.
     Known edges: the registry is not WAL-persisted (like the graph-type
-    registry, difference 10 — restart loses schemas, DDL is re-runnable);
-    relative qualified names (`dir.name`) stay unsupported. Selecting a
+    registry, difference 10 — restart loses schemas, DDL is re-runnable).
+    Relative qualified names (`dir.name`) are root-resolved (Q5-4,
+    2026-10-02): the session schema is invariantly root because `SESSION SET
+    SCHEMA` is loud-rejected, so `dir.name` → `/dir/name` is exact under this
+    invariant (not an approximation) and shares the same mangling — `dir.g` and
+    `/dir/g` name one physical graph; an absolute reference with a dotted tail
+    (`/dir/x.g`) normalizes to `/dir/x/g` (spelling change vs earlier builds).
+    Selecting a
     qualified graph: GQL's `USE` is a **prefix clause of query/data-modifying
     statements** and takes no `GRAPH` keyword — `USE /foo/g MATCH (n) RETURN
     n` works (rewritten through the same path as `SESSION SET GRAPH`, which

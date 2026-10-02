@@ -63,7 +63,7 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 124/124 全绿**（2026-10-02 Phase 11 + Q4 收工）：
+**✅ 137/137 全绿**（2026-10-02 Phase 11 + Q4 + Q5 收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
 **orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
@@ -72,6 +72,9 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
 **schema 6**（CREATE GRAPH TYPE/typed CREATE GRAPH 双跑、注册表生命周期、TYPE 关键字宽容）/
 **schemapath 12**（Phase 11+Q4：CREATE/DROP SCHEMA+IF EXISTS、目录语义、九错条件 [42000]、限定名 roundtrip、
 组合拒、READ ONLY [25G03] vs 无码、`_gqlsch__` 保留前缀拒、`_gql_schemas()` 形态、USE 前缀从句双跑、层外图冲突）/
+**smallmodes 8**（Q5-2：SIMPLE 闭三角/红线钉 m0→m1→m0→m2=0 行+裸 `*ACYCLIC`=1 行、DIFFERENT EDGES 单/多模式、
+REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_list_checked` bind 拒/同型过/ANY 免检）/
+**relname 3**（Q5-4：`dir.g`↔`/dir/g` roundtrip、点分 graph type、SESSION SET SCHEMA 拒钉）/
 **unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
 **TCK 合规：206 场景 = 190 绿（70 过 + 120 pass-with-note）/ 9 挂 / 7 跳**（明细 `extension/gql/test/tck/REPORT.md`；
 三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
@@ -324,6 +327,27 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
 - **战果**：自测 **122→124**（USE 前缀从句、层外图冲突）；TCK **188→190 绿（70 过+120 note）/ 9 挂 / 7 跳**，
   wrong-GQLSTATUS=0。
 
+### Q5 轮（Q5-2/3/4 落地 + Q5-1 挂账）交付记录（2026-10-02，Q5 简报 + 回帖验证 + 2 subagent 串行 + 主会话集成）
+
+- **Q5-2① 证伪修正（头条）**：回帖称「SIMPLE=裸引擎 `*ACYCLIC` 零包装」，探机**证伪**——
+  `*ACYCLIC` 只保中间点两两互异（m0→m1→m0→m2 放行），ISO SIMPLE 禁止该行走；照抄=静默错答。
+  修正切片落地：`_gql_is_simple(ANY)→BOOL`（RECURSIVE_REL 取 nodeIDs，节点互异、仅首尾可重合）
+  + `*ACYCLIC` 超集预过滤 + WHERE wrap；红线钉 m0→m1→m0→m2=0 行、裸 `*ACYCLIC`=1 行（证明 wrap 必要）。
+- **Q5-2②③④**：DIFFERENT EDGES 单模式走 TRAIL 机器（forcedRecType）、多模式响亮拒；REPEATABLE
+  ELEMENTS 本就 no-op（零开发补钉）；IS [NOT] LABELED 接标签谓词出口（IS NOT 整体取反）、
+  `%`=表图恒真/ANY `size(labels)>0`。
+- **Q5-3 bind 期守卫（红线账清零）**：`_gql_list_checked(ANY...)→LIST` 变长标量，bindFunc 在
+  **隐式 cast 之前**逐实参查引擎推导型（类不一致响亮抛 `heterogeneous list element types`）；
+  typed 图含 ≥1 非字面量元素的列表字面量才改写，ANY/nullopt 免检、FOR 源不动（Phase 8 覆盖）。
+  残余（非静默）：聚合实参内列表不包、ORDER BY/SET 属性值走 sourceText。做完永久关账。
+- **Q5-4 相对限定名**：`dir.name` 根解析（SESSION SET SCHEMA 已拒=会话 schema 恒 root ⇒ 精确非近似），
+  点分段 ANTLR 子树拼 `/seg1/seg2` 走现有 mangling，7 处接线；旧措辞
+  `qualified graph name (schemas are not mapped)` 消除；`/dir/x.g` 归一 `/dir/x/g`（拼写变化）。
+- **Q5-1 多跳 QPPI 挂账**：无界=表达力天花板永拒；有界 `{m,n}` UNION 展开子集备好（n-m≤4），
+  触发条件=首个真实需求；SurrealDB gql 模块 **BSL 1.1 不可抄**。
+- **战果**：自测 **124→137**（smallmodes 8 + listguard 3 + relname 3，净 +13）；TCK **190 绿不变**
+  /9 挂/7 跳（语料压力 0），wrong-GQLSTATUS=0。2 subagent 串行（同触 gql_transformer.cpp 不并行）。
+
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
   `GraphTypeSpec`（节点类型 = 名字+属性类型；边类型 = 名字+端点对+属性类型，别名剥除——
@@ -396,33 +420,39 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
   ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。Neo4j GQL 合规附录（网页）是语义
   差异清单的权威参考。
 
-## 五、未完成待办（截至 2026-10-02 Q4 收工时点）
+## 五、未完成待办（截至 2026-10-02 Q5 收工时点）
 
-> Phase 0–11 + Q4 已交付面见上面各阶段记录。下面只列**尚未做**的账。
+> Phase 0–11 + Q4 + Q5 已交付面见上面各阶段记录。下面只列**尚未做**的账。
 > 已交付勿再列：多跳 TRAIL/ACYCLIC（P7）、标签表达式（P7）、跨类型全序 min/max（P8）、
 > 聚合桥 sum/avg（P9）、比较/排序全序桥（P10）、GQLSTATUS 窄贴码+三档断言（P11）、
-> SCHEMA 命名空间注册表（P11）、USE 前缀从句/层外图冲突/模板替换（Q4）。
+> SCHEMA 命名空间注册表（P11）、USE 前缀从句/层外图冲突/模板替换（Q4）、
+> SIMPLE/DIFFERENT EDGES/REPEATABLE/IS LABELED/`%`（Q5-2）、bind 期异构列表守卫（Q5-3）、
+> 相对限定名根解析（Q5-4）。
 
-### 可做未做（按需排期，全部今天响亮拒绝）
+### 可做未做（按需排期，今天响亮拒绝）
 
-1. **相对限定名（`dir.name` 不带前导 `/`）**：绝对限定名 `/a/b` 已通（P11 改写）；相对形式
-   未实现，响亮拒。等真实需求或语法层澄清再做。
-2. **多跳 QPPI**（`( ()-[]->()-[]->() ){m,n}`）、**DIFFERENT EDGES** match mode、
-   **SIMPLE** 路径模式、WHERE 的 **`IS LABELED`** 谓词、**`%`** 标签通配——显式
-   `GQL feature not supported`，按需排期（多跳 QPPI 是其中最大一块）。
-3. **原生 GQL 执行 / 双向互通**：大工程（≈重写半个 planner），远期选项，维持评估结论。
+1. **多跳 QPPI**（`( ()-[]->()-[]->() ){m,n}`）：挂账等触发（触发条件=首个真实需求）。
+   设计备好：有界 `{m,n}` UNION 展开是唯一可行 Cypher 侧子集（爆炸控制 n-m≤4、
+   内部绑定展开后显式列表构造）；**无界 `{m,}`/`*` 多跳=表达力天花板，永久拒**。
+   SurrealDB gql 模块是 **BSL 1.1 不可抄**；Neo4j front-end（Apache-2.0）QPP desugar
+   只抄语义。
+2. **原生 GQL 执行 / 双向互通**：大工程（≈重写半个 planner），远期选项，维持评估结论。
 
 ### 暂缓 / 挂账（有意不做，勿重复评估）
 
 - **图类型 / schema 注册表 WAL 持久化**：暂缓——扩展加载本身不持久，前置依赖是
   「扩展附着持久化」引擎工程（P7 评估结论）。
-- **Q-D typed-graph 异构列表残余**：非字面量列表元素无法静态判别，运行时仍会被引擎
-  同构化（README #17 残余；字面量已静态拒）。静默错红线边缘的已知边界，挂账。
+- **Q-D typed-graph 异构列表残余：已由 Q5-3 关闭**（bind 期守卫，静默→响亮）。残余边界
+  全非静默：聚合实参内列表不包（rewriter 在聚合边界止步）、ANY 图免检（Phase 8 路线）、
+  ORDER BY/SET 属性值走 sourceText。
 - **Q-E1 引擎错误文本映射 / Q-E2 AS COPY OF 贴码**：Q4 已决关闭——E1 不做（引擎错误
   文本照原样透传）、E2 维持无码（G2000 脚枪规避，见 P11 记录）。**勿重开**。
 - **graph-types [6] 等问题语料**（4 例：Aggregation3 [1]、Create1 [7]、graph-types [6]、
   catalog-1 fixture）：语料 vendored 冻结不改，走 harness 例外 + REPORT 脚注披露（先例
   判定标准见第六节经验 3）。语料修复只能靠上游，本仓不改。
+- **Q5-2 已知边界（未测/透传面）**：WHERE 中边变量 IS LABELED 无符号表可辨、行为取决于
+  引擎 labels() 对关系的处理（未测）；CASE WHEN 的 whenOperand 直挂 labeledPredicatePart2
+  仍透传到 Cypher 响亮失败。均为响亮面，不静默。
 
 ## 六、目标执行过程与问题处理经验（方法论沉淀，勿退行）
 
@@ -452,3 +482,8 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
    cast-erase、JSON 文本序比较都是线下抓的静默错）；宁响亮拒绝，不静默错答。
 6. **subagent 纪律**——任务书钉死：单次 Write ≤400 行、报告 ≤40 行、**禁止粘贴全量测试
    输出**（32k output 上限两次击杀都是这个原因）；MSVC gtest 失败标记是 `(228): error:`。
+7. **外部语义正确 ≠ 引擎映射正确**（Q5-2①）——回帖的 ISO SIMPLE 定义对、推理对（无需
+   TRAIL 包装），但「引擎 `*ACYCLIC` = ISO SIMPLE」错：引擎只保中间点两两互异，端点可撞
+   中间点，照抄会放出非 SIMPLE 行走=静默错答。四源互证管不到我方引擎侧；**引擎原语的
+   精确语义必须本地探机**（本例 6 行探针拦下一个静默错答类，修正为
+   `*ACYCLIC` 预过滤 + `_gql_is_simple` 谓词）。
