@@ -56,7 +56,7 @@ parity tests; ✗ = explicitly rejected with `GQL feature not supported`.
 
 | G-feature | Feature | Status | Notes |
 |---|---|---|---|
-| G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✓ (single-hop) | quantified single edges and single-hop QPPIs `( ()-[]->() ){m,n}` → Cypher var-length `[e*m..n]`; multi-hop / node-quantified QPPIs ✗ |
+| G035/G036/G037 | Quantified path patterns (`{m,n}`, `*`, `+`, `?`) | ✓ | quantified single edges and single-hop QPPIs `( ()-[]->() ){m,n}` → Cypher var-length `[e*m..n]`; multi-hop / bound interiors `( ()-[]->()-[]->() ){m,n}` expand by repetition (fixed `{n}` unrolls inline; ranged `{m,n}` with `1 ≤ n-m ≤ 4` re-translates the statement per count and joins with `UNION ALL`); interior element variables bind to **lists** (one entry per repetition, seam nodes shared); unbounded multi-hop, lower-bound-0 multi-hop, and node-quantified patterns ✗ (see difference 23) |
 | G005/G015–G020 | Path search prefixes (ANY SHORTEST / ALL SHORTEST) | ✓ (single-hop) | → `[e*SHORTEST ...]` / `[e*ALL SHORTEST ...]`; counted `SHORTEST k`, `SHORTEST GROUP(S)`, `ALL/ANY PATHS` ✗ |
 | G010–G013 | Path modes (WALK/TRAIL/ACYCLIC/SIMPLE) | ✓ | single var-length slot → `[e*TRAIL ...]` / `[e*ACYCLIC ...]`; multi-hop patterns (and every ACYCLIC/SIMPLE pattern) additionally bind a path variable and filter with `IS_TRAIL`/`IS_ACYCLIC`/`_gql_is_simple` over the whole path — exact ISO semantics (see difference 7); WALK = engine default. SIMPLE is *not* bare engine `*ACYCLIC` (that only keeps intermediate nodes distinct — an endpoint may equal an intermediate); SIMPLE = `_gql_is_simple(p)` (nodes distinct except first=last may coincide), with `*ACYCLIC` as a cheap superset prefilter |
 | G074 etc. | Label expressions (`&`, `!`, `|`, `%`) | ✓ (node patterns) | `:A&B`/`:A\|B`/`:!A`/parens → WHERE predicates over `labels(v)` (graph-kind-aware, see difference 13); simple `:Label` unchanged (table pruning); INSERT label sets `:A&B` → `CREATE (n:A:B ...)` on ANY graphs; `%` wildcard → true on table graphs / `size(labels(v)) > 0` on ANY; `IS [NOT] LABELED <expr>` predicates share the same predicate outlet (`IS NOT` negates the whole predicate); edge label expressions ✗ |
@@ -72,9 +72,10 @@ edge list. `DIFFERENT EDGES` over a **single** path pattern maps to the TRAIL
 machinery (whole-path edge distinctness); over multiple patterns it is
 rejected (cross-pattern edge disjointness is deliberately out of scope).
 `REPEATABLE ELEMENTS` is dropped (LadybugDB MATCH already allows edge
-repetition). Multi-hop QPPIs stay rejected (deferred: bounded `{m,n}` UNION
-expansion is the only feasible Cypher-side subset; unbounded multi-hop
-repetition is a translator expressiveness ceiling).
+repetition). Multi-hop QPPIs with **bounded** quantifiers are expanded by
+repetition (see difference 23 for the ranged-representation restrictions);
+unbounded multi-hop repetition is a translator expressiveness ceiling and is
+rejected loudly.
 
 ### Function-name mapping
 
@@ -89,7 +90,7 @@ see `THIRD_PARTY_NOTICES.md`):
 | `PERCENTILE_DISC` / `PERCENTILE_CONT` | `PERCENTILEDISC` / `PERCENTILECONT` |
 | `CHAR_LENGTH` / `CHARACTER_LENGTH` | `SIZE` |
 | `LOCAL_DATETIME` / `ZONED_DATETIME` | `TIMESTAMP` |
-| `PATH_LENGTH` | `LENGTH` |
+| `PATH_LENGTH` | `LENGTH` (path values; quantified element bindings are lists — use `SIZE`) |
 | `ELEMENT_ID` | `internal_id` |
 | `LOCAL_TIME` / `ZONED_TIME` | ✗ (no TIME type in LadybugDB) |
 | `STDDEV_SAMP` / `STDDEV_POP` | ✗ (no such aggregate in LadybugDB) |
@@ -314,6 +315,46 @@ engine's native operators byte-for-byte.
     `CALL GQL` are caught; label-set cardinality rejections carry the corpus
     GQLSTATUS pins (`[22G0N]` anonymous = 0 labels < min 1, `[22G0P]`
     multi-label > max 1).
+
+23. **Multi-hop quantified path patterns expand by repetition** (2026-10-02).
+    A bounded quantifier over a multi-edge or otherwise non-collapsible
+    interior `( ()-[]->()-[]->() ){m,n}` is translated by unrolling the
+    interior: `{n}`/`{m,m}` unrolls inline inside the single query (no
+    restrictions — aggregates, `ORDER BY`, writes, `OPTIONAL MATCH` all fine);
+    a true range `{m,n}` (1 ≤ n-m ≤ 4, lower bound ≥ 1) re-translates the
+    **whole statement** once per count and joins the branches with `UNION ALL`
+    (`UNION` when the projection is DISTINCT, giving the global dedup GQL
+    asks for). Because a Cypher union is top-level only (no wrapper clause),
+    the ranged form is loud-rejected with aggregation/`GROUP BY`/`HAVING`,
+    `ORDER BY`/`SKIP`/`LIMIT`, `OPTIONAL MATCH` (where a post-WITH predicate
+    would drop null-extended rows) and data-modifying statements; at most 8
+    branch combinations (cartesian product over ranged factors) are expanded.
+    Unbounded multi-hop (`*`, `+`, `{m,}`) and lower-bound-0 multi-hop (`?`,
+    `{0,n}` — zero repetitions identify the two seam nodes, which needs node
+    equality the expansion deliberately avoids) stay rejected, as do
+    node-quantified patterns `(n){q}` and nested quantifiers.
+    **Quantified element variables bind to lists** (one entry per repetition,
+    as ISO GQL requires): a single-edge interior's edge variable is re-bound
+    through `relationships(e)`; multi-edge interiors bind per-repetition
+    names and construct the list explicitly (seam nodes are one node shared
+    by the adjacent entries; a seam's outer pattern name wins, so `RETURN a`
+    still sees `a` while `x`'s first entry *is* `a`). Junction labels /
+    properties must be identical or empty on one side — a conflict is
+    loud-rejected. `PATH_LENGTH` maps to `LENGTH`, which only accepts path
+    values: use `size(e)` on a quantified element binding (a list) and
+    `PATH_LENGTH(p)` on a path variable. Quantified bindings are lists and
+    have no properties — `x.prop` is loud-rejected. Finally, a **bare star
+    projection with any generated pattern binding** (quantified slot renames,
+    per-repetition names, compound-label `_gql_nlN`, path-mode wrap
+    `_gql_ppN`) is rejected: those synthetic names would leak into `*` as
+    columns the GQL source never declared (a silently wrong column set).
+    Known residuals: an inline element `WHERE` inside a quantified interior
+    is rejected (per-repetition expression renaming is deferred); two
+    juxtaposed *user* variables (`(a)(b)`) remain rejected as before;
+    interior bindings must not be re-declared elsewhere as pattern variables
+    (loud). Engine-side note: `bindGraphPattern` now carries the path
+    variable's alias (like node/rel variables) so `MATCH p = ... WITH *`
+    star expansion accepts it — a naming fix, not a semantics change.
 
 ### Graph type → schema mapping
 

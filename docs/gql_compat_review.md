@@ -15,11 +15,11 @@
 **GQL→Cypher 翻译层本身就是本项目的贡献**。
 
 验收口径（计划与交接文档一致）：**"GQL 语句翻译成等价 Cypher 执行、双跑对照结果一致"**。
-**已达成（在已映射子集内）**：自测 **137/137** 双跑全绿（Phase 11 + Q4 + Q5 起，schemapath 12 +
-smallmodes 8 + listguard 3 + relname 3）；
+**已达成（在已映射子集内）**：自测 **161/161** 双跑全绿（Phase 11 + Q4 + Q5 + 多跳 QPPI 轮起，
+schemapath 12 + smallmodes 8 + listguard 3 + relname 3 + multihop 14 + qpibind 8）；
 opengql/tck **190 绿（70 过 + 120 pass-with-note）/ 9 挂 / 7 跳（206 场景）**，9 个失败全部响亮
 （三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
-**未达成且不声称**：ISO GQL 全量合规——21 条语义差异与响亮拒绝面见第 3 节。
+**未达成且不声称**：ISO GQL 全量合规——23 条语义差异与响亮拒绝面见第 3 节。
 
 ## 2. 成果
 
@@ -43,14 +43,15 @@ opengql/tck **190 绿（70 过 + 120 pass-with-note）/ 9 挂 / 7 跳（206 场�
 | 聚合/过滤/迭代 | GROUP BY/HAVING（含隐式分组）→`WITH keys, aggs WHERE…RETURN`；FILTER→`WITH * WHERE`（#18）；FOR→UNWIND | README 16.15/14.6/14.8 |
 | 写入 | INSERT→CREATE（结构性发射，字面量 `'INSERT ME'` 安全）；SET 含无序赋值快照（#2）；REMOVE 属性→`SET n.prop=NULL` 近似（△，#1）；DELETE / DETACH DELETE | README 13.2–13.5 |
 | 目录/会话/事务 | CREATE/DROP GRAPH；`CREATE GRAPH TYPE`→`CREATE NODE/REL TABLE` DDL（合成主键 `_gql_id SERIAL PRIMARY KEY`，#11）；SESSION SET GRAPH→USE GRAPH（会话粘滞，#3）；START TRANSACTION/COMMIT/ROLLBACK | README 12.4–12.7、7、8 |
-| 路径 | 量词 `*`→`[e*0..]`（GQL `*`=**0** 起，裸 Cypher `*`=1 起）、`+`/`{m,n}`/`?`；单跳 QPPI；ANY/ALL SHORTEST；**路径模式精确**——TRAIL 多跳 + 每个 ACYCLIC 模式绑路径变量加 `IS_TRAIL`/`IS_ACYCLIC` 全路径谓词（引擎 `*ACYCLIC` 单用只约束中间节点，闭合走 1→2→1 会漏入，翻译层补齐） | README G035/G005/G010 行、#7 |
+| 路径 | 量词 `*`→`[e*0..]`（GQL `*`=**0** 起，裸 Cypher `*`=1 起）、`+`/`{m,n}`/`?`；单跳 QPPI→var-length；**多跳 QPPI 有界展开**（`{n}` 就地展开、`{m,n}` 整句按计数重译 + `UNION ALL`，量词内元素变量绑定为列表）；ANY/ALL SHORTEST；**路径模式精确**——TRAIL 多跳 + 每个 ACYCLIC 模式绑路径变量加 `IS_TRAIL`/`IS_ACYCLIC` 全路径谓词（引擎 `*ACYCLIC` 单用只约束中间节点，闭合走 1→2→1 会漏入，翻译层补齐） | README G035/G005/G010 行、#7/#23 |
 | 标签表达式（G074） | `:A&B`/`:A\|B`/`:!A` 按**图型分流**：ANY 图→`list_contains(labels(v),'X')`（合取），表图→`labels(v)='X'`；`:` 拼写绝不复用于复合表达式——`:A:B` 在 ANY 图是 AND、表图是 OR（表并集），同拼写反语义（输入侧 `:A:B` 即 GQL 语法错，三方分叉全在目标方言侧，见 README #13） | README #13；`gql_transformer.cpp` 标签段 |
 | 函数 | 别名表 `COLLECT_LIST`→`COLLECT`、`CHAR_LENGTH`→`SIZE`、`PATH_LENGTH`→`LENGTH`、`ELEMENT_ID`→`internal_id`、`\|\|`→`+` 等 | README "Function-name mapping" |
 | 宽容归一化 | `FROM GRAPH x`、`CREATE GRAPH g TYPE t` 预解析归一；`AS COPY OF` 文法歧义重解释 | README #14；`gql_function.cpp` normalize* |
 
 自测分布（`_HANDOVER_GQL.md`，与 .test 文件 CASE 计数逐一相符）：basic 11 / select 7 / groupby 4 /
 write 7 / routing 4 / path 18 / labels 3 / orderability 5 / jsonagg 9 / comparebridge 11 /
-schema 6 / schemapath 10 / unsupported 27 = **122/122**。
+schema 6 / schemapath 12 / smallmodes 8 / listguard 3 / relname 3 / multihop 14 / qpibind 8 /
+unsupported 28 = **161/161**。
 
 ### ③ 诚实性工程
 
@@ -175,7 +176,8 @@ schema DDL），在 LadybugDB 上要**经双跑验证、错了会喊**的场景�
 | 4 | 原生 GQL 执行 / 双向互通 | **大工程**，≈重写半个 planner；维持远期选项 |
 
 （不在表内的账：图类型/schema 注册表 WAL 持久化=有意暂缓（前置依赖"扩展附着持久化"引擎工程，
-勿重复评估）；多跳 QPPI=挂账等触发（无界=表达力天花板永拒）；原生执行=表内第 4 项。
-Q5 已清：SIMPLE/DIFFERENT EDGES/IS LABELED/`%`、bind 期异构列表守卫（Q-D 关闭）、相对限定名。
-Q-E1/Q-E2=已决关闭勿重开。完整清单与判定理由见
+勿重复评估）；多跳 QPPI **已交付**（有界展开+量词绑定列表，2026-10-02），残余=下界 0 多跳/
+区间形+聚合与 ORDER BY/内腔内联 WHERE/OPTIONAL+wrap（全响亮拒，等触发）；无界多跳=表达力
+天花板永拒。原生执行=表内第 4 项。Q5 已清：SIMPLE/DIFFERENT EDGES/IS LABELED/`%`、
+bind 期异构列表守卫（Q-D 关闭）、相对限定名。Q-E1/Q-E2=已决关闭勿重开。完整清单与判定理由见
 `_HANDOVER_GQL.md` 第五节「未完成待办」；每轮执行闭环与问题处理经验见其第六节。）

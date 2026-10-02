@@ -63,7 +63,7 @@ E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gte
 
 ## 三、当前测试战果
 
-**✅ 137/137 全绿**（2026-10-02 Phase 11 + Q4 + Q5 收工）：
+**✅ 161/161 全绿**（2026-10-02 Phase 11 + Q4 + Q5 + 多跳 QPPI 轮收工）：
 basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7 / routing 4 / **path 18**（+多跳 TRAIL/ACYCLIC 双跑）/
 **labels 3**（G074 双跑 + `:A:B` 拒绝钉子）/
 **orderability 5**（Q1 全序聚合双跑：混合数值/列表值/混合值/原生显示/DISTINCT）/
@@ -75,7 +75,11 @@ basic 11（回归）/ select 7（+PROPERTY_EXISTS 双跑）/ groupby 4 / write 7
 **smallmodes 8**（Q5-2：SIMPLE 闭三角/红线钉 m0→m1→m0→m2=0 行+裸 `*ACYCLIC`=1 行、DIFFERENT EDGES 单/多模式、
 REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_list_checked` bind 拒/同型过/ANY 免检）/
 **relname 3**（Q5-4：`dir.g`↔`/dir/g` roundtrip、点分 graph type、SESSION SET SCHEMA 拒钉）/
-**unsupported 27**（+map 值/异构列表字面量拒绝，标签剩余拒绝面）。
+**multihop 14**（多跳 QPPI 轮：固定 {2} 转正、{2,3} UNION 展开双跑、路径模式 wrap、Class V 列表形状、
+星号红线拒、lower-bound-0/无界/ORDER BY/聚合/OPTIONAL/writes/过宽各拒钉）/
+**qpibind 8**（内腔节点绑定列表双跑、外接缝名胜、纯标签链、接缝冲突拒、直接槽 size 双跑、
+绑定复用/内腔 WHERE 拒）/
+**unsupported 28**（+map 值/异构列表字面量拒绝，标签剩余拒绝面，+星号合成名泄漏两类拒钉）。
 **TCK 合规：206 场景 = 190 绿（70 过 + 120 pass-with-note）/ 9 挂 / 7 跳**（明细 `extension/gql/test/tck/REPORT.md`；
 三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
 
@@ -348,6 +352,34 @@ REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_l
 - **战果**：自测 **124→137**（smallmodes 8 + listguard 3 + relname 3，净 +13）；TCK **190 绿不变**
   /9 挂/7 跳（语料压力 0），wrong-GQLSTATUS=0。2 subagent 串行（同触 gql_transformer.cpp 不并行）。
 
+### 多跳 QPPI 轮（Q5-1 触发开工）交付记录（2026-10-02，2 subagent 串行 + 主会话红线修复/门禁/文档）
+
+- **有界展开（头条）**：`( ()-[]->()-[]->() ){n}` / `{m,n}` 内腔按重复展开——固定 `{n}`/`{m,m}`
+  就地展开单句（聚合/ORDER BY/写入/OPTIONAL 全不受限）；真区间 `{m,n}`（1≤n-m≤4、下界≥1）
+  **整句按计数重译 + `UNION ALL` 合并**（DISTINCT 投影用裸 `UNION`=全局去重，探机证实
+  appendDistinct 语义正对 GQL）。UNION 在 Cypher.g4 只挂 RegularQuery 顶层、无整体 ORDER BY
+  ⇒ 区间形对聚合/GROUP BY/HAVING、ORDER BY/SKIP/LIMIT、OPTIONAL MATCH（WHERE 落 WITH 后
+  会吃掉 null 填充行）、写语句一律响亮拒；分支组合≤8（笛卡尔积）。共同 `USE GRAPH ...;` 前缀
+  剥出置顶一次（重解析切句后非末条 internal=只末条结果可见，现有管线即此）。
+  无界多跳/下界 0 多跳（`?`/`{0,n}`——0 次重复把两侧接缝节点认同，需要展开刻意回避的节点等值）
+  维持永拒；节点量词/嵌套量词维持拒。
+- **量词内元素变量=列表（ISO 形状统一）**：单边塌缩槽与直接 `-[e]->{q}` 槽统一改名 `_gql_veN`
+  + `WITH *, relationships(_gql_veN) AS e`（此前直接槽保持 RECURSIVE_REL 形状=拼写分裂，
+  探机证实 `LENGTH` 不吃列表，PATH_LENGTH 只留路径变量，列表用 `size()`；path.test 两处
+  `PATH_LENGTH(e)`→`size(e)` 语句改写、期望值零变化）。多跳内腔按重复改名 `_gql_ueN`/`_gql_vnN`
+  + 显式列表构造；接缝节点=相邻重复共享的一个节点（列表条目共享名），外接缝**外层用户名胜**
+  （`RETURN a` 见 a、x 首条目即 a）；接缝两侧标签/属性相同或一侧全空才合并，冲突响亮拒。
+- **红线修复：星号投影合成名泄漏（切片 A 引入 + 两类存量）**：探机坐实 `RETURN *` 会把
+  合成名列当结果列给出——切片 A 的 `_gql_veN` wrap（1 行 2 列/应 1 列）、存量 `_gql_nlN`
+  （匿名复合标签）、存量 `_gql_ppN`（TRAIL/ACYCLIC/SIMPLE 路径 wrap，6 列/应 5 列）。
+  统一响亮拒 `star projection with generated pattern bindings`（sawGeneratedBinding 粘性旗 +
+  结果期星号检查 + prescan 早拒），钉 2 拒 + 2 无绑定放行。
+- **引擎侧第 4 处最小必要改动**：`bind_graph_pattern.cpp` 路径变量补 `setAlias`（与节点/边
+  变量对齐，`MATCH p=... WITH *` 星展开原先拒 empty alias）——命名修复非语义改动；全量引擎
+  回归门禁护航。
+- **战果**：自测 **137→161**（multihop 14 + qpibind 8 + unsupported +2，净 +24）；TCK **190 绿不变**
+  /9 挂/7 跳（语料压力 0），wrong-GQLSTATUS=0。残余见第五节。
+
 ### Phase 4（schema 桥）交付记录（2026-10-01）
 - **CREATE GRAPH TYPE → node/rel table DDL**：图类型规范化为
   `GraphTypeSpec`（节点类型 = 名字+属性类型；边类型 = 名字+端点对+属性类型，别名剥除——
@@ -420,22 +452,26 @@ REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_l
   ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。Neo4j GQL 合规附录（网页）是语义
   差异清单的权威参考。
 
-## 五、未完成待办（截至 2026-10-02 Q5 收工时点）
+## 五、未完成待办（截至 2026-10-02 多跳 QPPI 轮收工时点）
 
-> Phase 0–11 + Q4 + Q5 已交付面见上面各阶段记录。下面只列**尚未做**的账。
+> Phase 0–11 + Q4 + Q5 + 多跳 QPPI 轮已交付面见上面各阶段记录。下面只列**尚未做**的账。
 > 已交付勿再列：多跳 TRAIL/ACYCLIC（P7）、标签表达式（P7）、跨类型全序 min/max（P8）、
 > 聚合桥 sum/avg（P9）、比较/排序全序桥（P10）、GQLSTATUS 窄贴码+三档断言（P11）、
 > SCHEMA 命名空间注册表（P11）、USE 前缀从句/层外图冲突/模板替换（Q4）、
 > SIMPLE/DIFFERENT EDGES/REPEATABLE/IS LABELED/`%`（Q5-2）、bind 期异构列表守卫（Q5-3）、
-> 相对限定名根解析（Q5-4）。
+> 相对限定名根解析（Q5-4）、**多跳 QPPI 有界展开+量词绑定列表（本轮）**。
 
 ### 可做未做（按需排期，今天响亮拒绝）
 
-1. **多跳 QPPI**（`( ()-[]->()-[]->() ){m,n}`）：挂账等触发（触发条件=首个真实需求）。
-   设计备好：有界 `{m,n}` UNION 展开是唯一可行 Cypher 侧子集（爆炸控制 n-m≤4、
-   内部绑定展开后显式列表构造）；**无界 `{m,}`/`*` 多跳=表达力天花板，永久拒**。
-   SurrealDB gql 模块是 **BSL 1.1 不可抄**；Neo4j front-end（Apache-2.0）QPP desugar
-   只抄语义。
+1. **多跳 QPPI 的挂账残余**（触发=真实需求再现）：
+   - **下界 0 多跳**（`?`/`{0,n}`）：0 次重复把两侧接缝节点认同，需要节点等值发射
+     （`MATCH (a),(b) WHERE a=b` 式）——有意回避，等触发再评估；
+   - **区间形 + 聚合/ORDER BY**：Cypher union 无整体包装从句（grammar 天花板），
+     等引擎支持 union 后包装（CALL 子查询等）再解；
+   - **内腔内联 WHERE 的按重复改名**（表达式级标识符改写）；
+   - **OPTIONAL MATCH + 量词绑定 wrap**：wrap 后 WHERE 会吃掉 null 填充行，保守拒
+     （可按"谓词不引用绑定时 wrap 后置"细化，等触发）。
+   **无界多跳（`*`/`+`/`{m,}`）=表达力天花板，永久拒**。SurrealDB gql 模块是 **BSL 1.1 不可抄**。
 2. **原生 GQL 执行 / 双向互通**：大工程（≈重写半个 planner），远期选项，维持评估结论。
 
 ### 暂缓 / 挂账（有意不做，勿重复评估）
@@ -456,7 +492,7 @@ REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_l
 
 ## 六、目标执行过程与问题处理经验（方法论沉淀，勿退行）
 
-### 执行闭环（每轮照此，Q1→Q4 四轮验证有效）
+### 执行闭环（每轮照此，Q1→多跳 QPPI 轮六轮验证有效）
 
 简报（问题清单+可核事实）→ 外部 AI 回帖 → **独立验证再采纳**（探机复现 + 语料/源码交叉
 核对，先纠错后采纳）→ 修正落地序 → 分片实现（subagent 小步写 + 主会话集成）→ 门禁
@@ -487,3 +523,10 @@ REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_l
    中间点，照抄会放出非 SIMPLE 行走=静默错答。四源互证管不到我方引擎侧；**引擎原语的
    精确语义必须本地探机**（本例 6 行探针拦下一个静默错答类，修正为
    `*ACYCLIC` 预过滤 + `_gql_is_simple` 谓词）。
+8. **合成名泄漏是列集静默错的固定出口**（多跳 QPPI 轮）——翻译层给匿名模式/包装谓词生成
+   的名字（`_gql_nlN` 复合标签、`_gql_ppN` 路径 wrap、`_gql_veN`/`_gql_ueN` QPPI 槽/列表）
+   都会从 `RETURN *`/`SELECT *` 泄漏成用户没声明的结果列。切片 A 的 wrap 引入此错类后
+   探机坐实，顺藤摸出两类存量（P7 起就在）。**新合成名必查星号投影**：凡生成绑定名，
+   要么星号重写为显式列集，要么响亮拒（本轮统一拒 `star projection with generated pattern
+   bindings`）。凡"改绑定值形状"的修正（如 e: RECURSIVE_REL→列表），必查**两种拼写**是否
+   分裂（paren 内腔 vs 直接槽曾一个包列表一个不包=同语义双形状）。
