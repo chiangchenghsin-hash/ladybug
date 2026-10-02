@@ -16,126 +16,126 @@ Values-only scenarios (result values verified, column names NOT checked): the ve
 - `expressions_aggregation_Aggregation3` :: [1] Sum only non-null values — values-only: corpus expected headers drifted (n.name|sum(n.num) vs query p.name, sum(p.age))
 
 Passed-with-note scenarios (120): an error IS raised but carries no bracketed GQLSTATUS code, so the code assertion cannot pass yet — counted as passed, listed for visibility:
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression true has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(false) has data type STRING[] but expected BOOL. Implicit cast is not support
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
 - `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type STRING[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression  has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {bool: true} (line 1:12 no viable alternative at input '{bool')
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {true: true} (line 1:12 no viable alternative at input '{true')
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1.000000,2.100000) has data type DOUBLE[] but expected BOOL. Implicit cast is
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(0.000000) has data type DOUBLE[] but expected BOOL. Implicit cast is not supp
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1.000000) has data type DOUBLE[] but expected BOOL. Implicit cast is not supp
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 1 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 0 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
 - `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True,False) has data type BOOL[] but expected BOOL. Implicit cast is not supp
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(,) has data type STRING[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(a,b) has data type STRING[] but expected BOOL. Implicit cast is not supported
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {false: false} (line 1:12 no viable alternative at input '{fals
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression false has data type STRING but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(true) has data type STRING[] but expected BOOL. Implicit cast is not supporte
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1) has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1,2,3) has data type INT64[] but expected BOOL. Implicit cast is not supporte
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {bool: false} (line 1:12 no viable alternative at input '{bool'
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
 - `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
 - `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression  has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 0 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 1 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type STRING[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(,) has data type STRING[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(0) has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(0.000000) has data type DOUBLE[] but expected BOOL. Implicit cast is not supp
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1) has data type INT64[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1,2,3) has data type INT64[] but expected BOOL. Implicit cast is not supporte
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1.000000) has data type DOUBLE[] but expected BOOL. Implicit cast is not supp
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(1.000000,2.100000) has data type DOUBLE[] but expected BOOL. Implicit cast is
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False,True) has data type BOOL[] but expected BOOL. Implicit cast is not supp
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True,False) has data type BOOL[] but expected BOOL. Implicit cast is not supp
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(a,b) has data type STRING[] but expected BOOL. Implicit cast is not supported
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(false) has data type STRING[] but expected BOOL. Implicit cast is not support
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(true) has data type STRING[] but expected BOOL. Implicit cast is not supporte
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression false has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression true has data type STRING but expected BOOL. Implicit cast is not supported.
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {bool: false} (line 1:12 no viable alternative at input '{bool'
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {bool: true} (line 1:12 no viable alternative at input '{bool')
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {false: false} (line 1:12 no viable alternative at input '{fals
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: Failed to parse GQL query: RETURN NOT {true: true} (line 1:12 no viable alternative at input '{true')
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
+- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
 - `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
 - `statements_catalog_modifying_create_graph_types_Create1` :: [6] Creating a single node type with duplicate property names fails — expected 42000, got 22G0P: Runtime exception: [22G0P] GQL feature not supported: multi-label label set (LadybugDB nodes have a single label)
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False,True) has data type BOOL[] but expected BOOL. Implicit cast is not supp
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Runtime exception: GQL feature not supported: map value
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(0) has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123.400000 has data type DOUBLE but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(False) has data type BOOL[] but expected BOOL. Implicit cast is not supported
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean4` :: [4] Fail when using NOT on a non-boolean literal — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
 - `statements_catalog_modifying_create_graphs_Create2` :: [7] Creating a closed graph, by copying an existing closed graph with different type, fails — error raised but code G2000 not emitted: Runtime exception: GQL feature not supported: CREATE GRAPH ... AS COPY OF <graph>
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean2` :: [8] Fail on disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean3` :: [8] Fail on exclusive disjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression 123 has data type INT64 but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression foo has data type STRING but expected BOOL. Implicit cast is not supported.
-- `expressions_boolean_Boolean1` :: [8] Fail on conjunction of at least one non-booleans — error raised but code 42000 not emitted: Binder exception: Expression LIST_CREATION(True) has data type BOOL[] but expected BOOL. Implicit cast is not supported.
 
 ## Per feature
 
@@ -184,6 +184,12 @@ Failure classes: parse-error=4, rejected-by-layer=5
 
 - `expressions_aggregation_Aggregation1_1_Count_only_non_null_values`: no side effects (unchecked: preloaded graph)
 - `expressions_aggregation_Aggregation1_2_Counting_loop_relationships`: no side effects (unchecked: preloaded graph)
+- `expressions_aggregation_Aggregation2_10_min_over_list_values`: home graph omitted
+- `expressions_aggregation_Aggregation2_10_min_over_list_values`: no side effects (unchecked: preloaded graph)
+- `expressions_aggregation_Aggregation2_11_max_over_mixed_values`: home graph omitted
+- `expressions_aggregation_Aggregation2_11_max_over_mixed_values`: no side effects (unchecked: preloaded graph)
+- `expressions_aggregation_Aggregation2_12_min_over_mixed_values`: home graph omitted
+- `expressions_aggregation_Aggregation2_12_min_over_mixed_values`: no side effects (unchecked: preloaded graph)
 - `expressions_aggregation_Aggregation2_1_max_over_integers`: home graph omitted
 - `expressions_aggregation_Aggregation2_1_max_over_integers`: no side effects (unchecked: preloaded graph)
 - `expressions_aggregation_Aggregation2_2_min_over_integers`: home graph omitted
@@ -202,12 +208,6 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_aggregation_Aggregation2_8_min_over_strings`: no side effects (unchecked: preloaded graph)
 - `expressions_aggregation_Aggregation2_9_max_over_list_values`: home graph omitted
 - `expressions_aggregation_Aggregation2_9_max_over_list_values`: no side effects (unchecked: preloaded graph)
-- `expressions_aggregation_Aggregation2_10_min_over_list_values`: home graph omitted
-- `expressions_aggregation_Aggregation2_10_min_over_list_values`: no side effects (unchecked: preloaded graph)
-- `expressions_aggregation_Aggregation2_11_max_over_mixed_values`: home graph omitted
-- `expressions_aggregation_Aggregation2_11_max_over_mixed_values`: no side effects (unchecked: preloaded graph)
-- `expressions_aggregation_Aggregation2_12_min_over_mixed_values`: home graph omitted
-- `expressions_aggregation_Aggregation2_12_min_over_mixed_values`: no side effects (unchecked: preloaded graph)
 - `expressions_aggregation_Aggregation3_1_Sum_only_non_null_values`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean1_1_Conjunction_of_two_truth_values`: home graph omitted
 - `expressions_boolean_Boolean1_1_Conjunction_of_two_truth_values`: no side effects (unchecked: preloaded graph)
@@ -225,14 +225,6 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean1_7_Conjunction_is_associative_on_null`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_1`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_2`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_3`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_4`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_5`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_6`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_7`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_8`: home graph omitted
-- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_9`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_10`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_11`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_12`: home graph omitted
@@ -243,9 +235,17 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_17`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_18`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_19`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_2`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_20`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_21`: home graph omitted
 - `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_22`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_3`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_4`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_5`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_6`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_7`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_8`: home graph omitted
+- `expressions_boolean_Boolean1_8_Fail_on_conjunction_of_at_least_one_non_booleans_9`: home graph omitted
 - `expressions_boolean_Boolean2_1_Disjunction_of_two_truth_values`: home graph omitted
 - `expressions_boolean_Boolean2_1_Disjunction_of_two_truth_values`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean2_2_Disjunction_of_three_truth_values`: home graph omitted
@@ -262,14 +262,6 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean2_7_Disjunction_is_associative_on_null`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_1`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_2`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_3`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_4`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_5`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_6`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_7`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_8`: home graph omitted
-- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_9`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_10`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_11`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_12`: home graph omitted
@@ -280,9 +272,17 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_17`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_18`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_19`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_2`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_20`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_21`: home graph omitted
 - `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_22`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_3`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_4`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_5`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_6`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_7`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_8`: home graph omitted
+- `expressions_boolean_Boolean2_8_Fail_on_disjunction_of_at_least_one_non_booleans_9`: home graph omitted
 - `expressions_boolean_Boolean3_1_Exclusive_disjunction_of_two_truth_values`: home graph omitted
 - `expressions_boolean_Boolean3_1_Exclusive_disjunction_of_two_truth_values`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean3_2_Exclusive_disjunction_of_three_truth_values`: home graph omitted
@@ -299,14 +299,6 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean3_7_Exclusive_disjunction_is_associative_on_null`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_1`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_2`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_3`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_4`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_5`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_6`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_7`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_8`: home graph omitted
-- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_9`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_10`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_11`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_12`: home graph omitted
@@ -317,23 +309,23 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_17`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_18`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_19`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_2`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_20`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_21`: home graph omitted
 - `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_22`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_3`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_4`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_5`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_6`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_7`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_8`: home graph omitted
+- `expressions_boolean_Boolean3_8_Fail_on_exclusive_disjunction_of_at_least_one_non_booleans_9`: home graph omitted
 - `expressions_boolean_Boolean4_1_Logical_negation_of_truth_values`: home graph omitted
 - `expressions_boolean_Boolean4_1_Logical_negation_of_truth_values`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean4_2_Double_logical_negation_of_truth_values`: home graph omitted
 - `expressions_boolean_Boolean4_2_Double_logical_negation_of_truth_values`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_1`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_2`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_3`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_4`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_5`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_6`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_7`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_8`: home graph omitted
-- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_9`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_10`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_11`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_12`: home graph omitted
@@ -344,6 +336,7 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_17`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_18`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_19`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_2`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_20`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_21`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_22`: home graph omitted
@@ -354,6 +347,7 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_27`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_28`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_29`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_3`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_30`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_31`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_32`: home graph omitted
@@ -364,6 +358,7 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_37`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_38`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_39`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_4`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_40`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_41`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_42`: home graph omitted
@@ -373,6 +368,11 @@ Failure classes: parse-error=4, rejected-by-layer=5
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_46`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_47`: home graph omitted
 - `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_48`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_5`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_6`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_7`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_8`: home graph omitted
+- `expressions_boolean_Boolean4_4_Fail_when_using_NOT_on_a_non_boolean_literal_9`: home graph omitted
 - `expressions_boolean_Boolean5_1_Disjunction_is_distributive_over_conjunction_on_non_null`: home graph omitted
 - `expressions_boolean_Boolean5_1_Disjunction_is_distributive_over_conjunction_on_non_null`: no side effects (unchecked: preloaded graph)
 - `expressions_boolean_Boolean5_2_Disjunction_is_distributive_over_conjunction_on_null`: home graph omitted

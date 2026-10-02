@@ -1241,7 +1241,10 @@ def main() -> int:
                      "-CHECK_COLUMN_NAMES on them; values are checked as-is, the "
                      ".feature files are left unmodified, and a values match counts "
                      "the scenario as passed:")
-        for feat, name, reason in values_only_cases:
+        # Sorted: scenario completion order is nondeterministic (parallel run),
+        # and an unsorted listing makes every rerun dirty REPORT.md with a pure
+        # reorder. Report output must be a deterministic function of results.
+        for feat, name, reason in sorted(values_only_cases):
             lines.append(f"- `{feat}` :: {name} — {reason}")
         lines.append("")
     if pass_with_note:
@@ -1249,7 +1252,8 @@ def main() -> int:
                      "but carries no bracketed GQLSTATUS code, so the code "
                      "assertion cannot pass yet — counted as passed, listed for "
                      "visibility:")
-        for case, feat, name, detail in pass_with_note:
+        for case, feat, name, detail in sorted(pass_with_note,
+                                               key=lambda r: (r[1], r[2], r[3])):
             lines.append(f"- `{feat}` :: {name} — {detail}")
         lines.append("")
 
@@ -1273,7 +1277,7 @@ def main() -> int:
     if skipped:
         lines.append("## Skipped scenarios")
         lines.append("")
-        for feat, name, why in skipped:
+        for feat, name, why in sorted(skipped):
             lines.append(f"- `{feat}` :: {name} — {why}")
         lines.append("")
 
@@ -1318,7 +1322,7 @@ def main() -> int:
     if unchecked_notes:
         lines.append("## Unchecked assertions (best-effort)")
         lines.append("")
-        for case, notes in unchecked_notes:
+        for case, notes in sorted(unchecked_notes, key=lambda x: x[0]):
             for n in notes:
                 lines.append(f"- `{case}`: {n}")
         lines.append("")
