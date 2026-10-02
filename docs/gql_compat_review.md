@@ -88,9 +88,11 @@ unsupported 28 = **161/161**。
 
 ### ⑥ 知识沉淀
 
-README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`（逐阶段交付、引擎实证事实、
+README（分级矩阵 + 23 条差异 + 图型映射表）、`_HANDOVER_GQL.md`（逐阶段交付、引擎实证事实、
 "勿重复调研"备忘）、`test/tck/REPORT.md`（逐场景分类 + methodology + unchecked 全列）、
-`docs/gql_compat_plan.md`（目标与决策）——四份文档互引，数字互相咬合。
+`docs/gql_compat_plan.md`（目标与决策）、**`docs/gql_semantic_map.md`（硬事实权威表，每行
+指向钉住它的 .test 用例）与 `docs/gql_methodology.md`（方法学手册 + 教训案例索引，2026-10-02
+沉淀）**——文档互引，数字互相咬合；语义地图是可执行规格的索引，新事实须同提交带测试回写。
 
 ## 3. 缺点（按痛感/严重度排序）
 

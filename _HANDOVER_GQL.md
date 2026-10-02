@@ -1,10 +1,13 @@
-# GQL ↔ openCypher 衔接补全 — 交接文档（持续更新至 2026-10-02 Q4 轮收工）
+# GQL ↔ openCypher 衔接补全 — 交接文档（持续更新至 2026-10-02 多跳 QPPI 轮收工）
 
 > 会话目标：把 `extension/gql` 从"薄翻译+整段透传"补成诚实可用的 ISO GQL 兼容层——
 > **GQL 语句翻译成等价 Cypher 在引擎执行，结果与等价 Cypher 一致**（双跑对照验收）。
 > 策略定调（用户）：抄写优先于自研（Neo4j Cypher front-end 范例，Apache-2.0 署名），
 > 够用即可、不过度设计。LadybugDB 是 Cypher 方言引擎，**GQL→Cypher 翻译层是我们的贡献**。
 > 完整计划：`docs/gql_compat_plan.md`（调研+规划全文）。
+> **沉淀权威件（2026-10-02 整理）**：`docs/gql_semantic_map.md`（硬事实权威表，每条带可执行
+> 测试引用）+ `docs/gql_methodology.md`（方法学手册，教训案例索引）——本文档是历史与待办，
+> "是什么"以语义地图为准、"怎么做事"以方法学手册为准。
 
 ## 一、已完成（代码在工作树，已编译通过）
 
@@ -451,6 +454,15 @@ REPEATABLE no-op、IS LABELED/`%` 双图型）/ **listguard 3**（Q5-3：`_gql_l
   （函数别名表/标签表达式归一/PROPERTY_EXISTS）、`GraphTypeCanonicalizer.scala`、
   ISO `ISO_IEC_39075.bnf.txt`、`Cypher25Parser.g4`。Neo4j GQL 合规附录（网页）是语义
   差异清单的权威参考。
+- **扩展 API 面（勿重复调研，双 subagent 核验）**：扩展**可注册聚合**——
+  `extension::addFunc` 公开模板（extension.h）+ `AGGREGATE_FUNCTION_ENTRY=20`，binder 按
+  entry type 分派；ABI=AggregateFunction 10 参构造+5 回调（模板抄 min_max.h/collect.cpp）；
+  聚合路径**无隐式 cast**（JSON 实参原样到达）。坑：isDistinct 双重载必配、参数**精确匹配**
+  （JSON 参数不吃 STRING→用 ANY+bindFunc 或加过载）、state 须平凡析构（memcpy 驻留 FT）；
+  注册点是 `gql_extension.cpp` 的 addFunc（不是 gql_function.cpp）；`ExtensionUtils` 便捷
+  封装只有 scalar/table/export；`extension/json` 全套 JSON 标量；CAST FROM JSON 存在
+  （string-cast 路径）。聚合状态/类型细节见 P8/P9 交付记录；引擎行为硬事实统一见
+  `docs/gql_semantic_map.md` 附录 A。
 
 ## 五、未完成待办（截至 2026-10-02 多跳 QPPI 轮收工时点）
 
