@@ -1,9 +1,9 @@
 # GQL→Cypher 翻译层评估（成果 / 缺点）
 
-> 数据截至 2026-10-01（Phase 7 收工 + 本评估当日修正）。证据来源：`extension/gql/README.md`（分级兼容矩阵 +
-> 19 条已知语义差异，下称 README #n）、`_HANDOVER_GQL.md`（分阶段交付记录）、
-> `extension/gql/test/tck/REPORT.md`（TCK 逐场景明细）、`docs/gql_compat_plan.md`（原始目标）。
-> 所有数字均可回溯到上述文件；不引入其外的统计。
+> 数据截至 2026-10-02（Phase 0–11 + Q4 轮收工）。证据来源：`extension/gql/README.md`（分级兼容矩阵 +
+> 已知语义差异，下称 README #n）、`_HANDOVER_GQL.md`（分阶段交付记录 + 第五节未完成待办 +
+> 第六节执行过程与问题处理经验）、`extension/gql/test/tck/REPORT.md`（TCK 逐场景明细）、
+> `docs/gql_compat_plan.md`（原始目标）。所有数字均可回溯到上述文件；不引入其外的统计。
 
 ## 1. 一句话定位
 
@@ -15,8 +15,8 @@
 **GQL→Cypher 翻译层本身就是本项目的贡献**。
 
 验收口径（计划与交接文档一致）：**"GQL 语句翻译成等价 Cypher 执行、双跑对照结果一致"**。
-**已达成（在已映射子集内）**：自测 **122/122** 双跑全绿（Phase 11 起，+schemapath 10）；
-opengql/tck **188 绿（68 过 + 120 pass-with-note）/ 9 挂 / 9 跳（206 场景）**，9 个失败全部响亮
+**已达成（在已映射子集内）**：自测 **124/124** 双跑全绿（Phase 11 + Q4 起，schemapath 12）；
+opengql/tck **190 绿（70 过 + 120 pass-with-note）/ 9 挂 / 7 跳（206 场景）**，9 个失败全部响亮
 （三档 GQLSTATUS 码断言已启用，wrong-GQLSTATUS=0）。
 **未达成且不声称**：ISO GQL 全量合规——21 条语义差异与响亮拒绝面见第 3 节。
 
@@ -25,7 +25,7 @@ opengql/tck **188 绿（68 过 + 120 pass-with-note）/ 9 挂 / 9 跳（206 场�
 ### ① 验收口径本身是成果
 
 - **双跑对照方法学**：每条 GQL 用例旁挂等价 Cypher、断言同一期望结果
-  （README "Tests"；`extension/gql/test/test_files/*.test` 9 个文件，`grep -c '^-CASE'` 合计 86）。
+  （README "Tests"；`extension/gql/test/test_files/*.test` 13 个文件，`grep -c '^-CASE'` 合计 124）。
   这把"翻译对不对"变成可执行命题，而不是评审口径。
 - **TCK 跑批方法学留痕**：`run_tck.py` 头部自述 "Methodology notes (kept honest on purpose)"——
   期望值统一转 `Value::toString` 形式；异常场景只断言"抛错"（GQLSTATUS 未实现，明说）；
@@ -156,7 +156,7 @@ README（分级矩阵 + 19 条差异 + 图型映射表）、`_HANDOVER_GQL.md`�
 
 **适合**：AI/工具按标准 GQL 生成的常见查询与写入（MATCH/SELECT/GROUP BY/路径模式/标签表达式/
 schema DDL），在 LadybugDB 上要**经双跑验证、错了会喊**的场景。它把"支持 GQL"从错觉变成
-可度量的承诺——122/122 双跑 + 188/206 TCK 绿 + 失败全响亮，是当前最诚实的口径。
+可度量的承诺——124/124 双跑 + 190/206 TCK 绿 + 失败全响亮，是当前最诚实的口径。
 
 **绝不可声称**：
 - **ISO GQL 合规认证**——165/206 ≠ 通过认证，19 条语义差异与第 3 节拒绝面客观存在；
@@ -173,5 +173,7 @@ schema DDL），在 LadybugDB 上要**经双跑验证、错了会喊**的场景�
 | ~~3~~ | ~~SCHEMA 命名空间模拟~~ **✅ 已交付（Phase 11，注册表模拟）** | — |
 | 4 | 原生 GQL 执行 / 双向互通 | **大工程**，≈重写半个 planner；维持远期选项 |
 
-（图类型注册表 WAL 持久化不在表内：已评估并有意推迟，前置依赖是"扩展附着持久化"引擎工程，
-见 `_HANDOVER_GQL.md` Phase 7 记录。）
+（不在表内的账：图类型/schema 注册表 WAL 持久化=有意暂缓（前置依赖"扩展附着持久化"引擎工程，
+勿重复评估）；相对限定名 dir.name、多跳 QPPI/DIFFERENT EDGES/SIMPLE/IS LABELED/%=响亮拒、按需
+排期；Q-D typed-graph 异构列表残余=挂账；Q-E1/Q-E2=已决关闭勿重开。完整清单与判定理由见
+`_HANDOVER_GQL.md` 第五节「未完成待办」；每轮执行闭环与问题处理经验见其第六节。）
