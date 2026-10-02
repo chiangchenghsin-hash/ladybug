@@ -13,11 +13,17 @@
 | 1 | 构建 | `_build_gql.bat`(configure + target `e2e_test` `lbug_gql_extension`) | ✅ 零编译/链接错误(LNK4217/LNK4006 为本仓已知链接噪音) | `build_gql_build.log` |
 | 2 | 自测双跑 | `E2E_TEST_FILES_DIRECTORY=extension ./build_v0211t/src/Release/e2e_test.exe --gtest_filter="gql~test~test_files~*"` | ✅ **161/161**(18 套件,14.7s,exit 0) | `_gate_selftest.log` |
 | 3 | TCK | `python extension/gql/test/tck/run_tck.py` | ✅ 口径不降:**190 绿(70 过 + 120 note)/ 9 挂 / 7 跳**(206 场景);wrong-GQLSTATUS=**0** | `_gate_tck.log` + `extension/gql/test/tck/REPORT.md` |
-| 4 | 全量引擎回归 | `E2E_TEST_FILES_DIRECTORY=test ./build_v0211t/src/Release/e2e_test.exe --gtest_filter="*"` | ✅ **1972/1975**(487 套件,746.8s);3 挂=已知离线 INSTALL 网络例(过执行核对:`INSTALL HTTPFS;`/`INSTALL neo4j;`),与离线基线一致 | `_gate_engine.log` |
+| 4 | 全量引擎回归 | `E2E_TEST_FILES_DIRECTORY=test ./build_v0211t/src/Release/e2e_test.exe --gtest_filter="*"` | ✅ **1972/1975**(487 套件,746.8s);3 挂=已知 INSTALL 例(构建配置所致,见下),与基线一致 | `_gate_engine.log` |
 
-门禁 4 的 3 挂(全数过 log 核对,死在 `INSTALL HTTPFS;`/`INSTALL neo4j;`,离线必挂):
+门禁 4 的 3 挂(全数过 log + 源码 + configure log 核对,机制已钉死):
 `test_files~extension~extension.LoadNotInstalledExtension` /
-`ForceInstallExtension` / `UninstallExtensionError`。
+`ForceInstallExtension` / `UninstallExtensionError`,死在 `INSTALL HTTPFS;`/
+`INSTALL neo4j;` → `'https' scheme is not supported.`(`third_party/httplib/httplib.h:8890`)。
+**与网络无关**(机器 DNS/网络正常,有网照挂):本构建 configure 时
+`find_package(OpenSSL 3 QUIET)` 未命中(`build_gql_configure.log`:
+"OpenSSL not found; building without HTTPS extension download support"),
+httplib 无 SSL 编译,https 下载在发请求前即被拒。装 OpenSSL 3 可让这 3 例
+走真下载路径(可选,非门禁项)。旧口径「需外网必挂」是错归因,已更正。
 
 构建产物时间戳:`libgql.lbug_extension` 2026-10-02 17:47;`e2e_test.exe` 19:18 **强制重链**
 (首轮 `_build_gql.bat` 并行多目标时 MSBuild 增量判断漏链——lbug.lib 已新、exe 仍旧;
@@ -98,10 +104,13 @@ Testing (all on Windows 11 / MSVC 18 BuildTools, 2026-10-02, commit 5f28079):
   copying). Wrong-GQLSTATUS count: 0. Scenario-level detail and corpus-integrity
   footnotes: `extension/gql/test/tck/REPORT.md`.
 - Full engine regression (covers the engine-side changes below): 1972/1975
-  passed. The 3 failures are the offline INSTALL network cases
-  (LoadNotInstalledExtension / ForceInstallExtension / UninstallExtensionError —
-  `INSTALL HTTPFS`/`INSTALL neo4j` need internet access; pre-existing on
-  offline machines).
+  passed. The 3 failures are pre-existing extension-registry INSTALL cases in
+  this build configuration (LoadNotInstalledExtension / ForceInstallExtension /
+  UninstallExtensionError): CMake's optional `find_package(OpenSSL 3)` is not
+  satisfied on this build machine, so the bundled cpp-httplib is compiled
+  without SSL and cannot download over https (rejected before any network I/O
+  with `'https' scheme is not supported`). Deterministic in this build config
+  and unrelated to this PR's changes.
 
 Engine-side minimal changes (each a few lines, backed by the full regression):
 - `standalone_call_rewriter.cpp`: fix multi-statement batch contamination

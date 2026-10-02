@@ -121,7 +121,8 @@ error 用例;探机脚本用完即删,结论落测试。
 4. 修正落地序;5. 分片实现(subagent 小步写+主会话集成,原则 8);6. **门禁**:
    `_build_gql.bat` + 自测全绿 + TCK 不降(190 绿/9 挂/7 跳)+ wrong-GQLSTATUS=0 +
    引擎侧改动额外跑全量引擎回归(`E2E_TEST_FILES_DIRECTORY=test … --gtest_filter="*"`,
-   离线基线=1972/1975,3 例 INSTALL 需外网必挂);7. 文档真相同步(README / 语义地图 /
+   基线=1972/1975,3 例 INSTALL 必挂——**与网络无关**:本构建 configure 未找到 OpenSSL,
+   httplib 无 SSL,https 下载被拒(`'https' scheme is not supported`;机器有网照挂));7. 文档真相同步(README / 语义地图 /
    `_HANDOVER_GQL.md` / REPORT 脚注 / memory 只留指针);8. **git 本地提交,绝不 push**。
 
 ## 10. 教训案例索引
@@ -131,6 +132,7 @@ error 用例;探机脚本用完即删,结论落测试。
 | G115 PROPERTY_EXISTS 虚标 | 矩阵 ✓ 未经执行验证 | 1、5 |
 | 「布尔不校验」翻案 | harness bug 冒充引擎语义差 | 5 |
 | USE 归因双错 | 我方与回帖各错一层,探机定音 | 3、5 |
+| INSTALL 3 例「需外网」 | 旧口径归因"无外网";真因=构建无 OpenSSL→httplib 拒 https(有网照挂) | 5 |
 | G2000 脚枪 | 无差别贴码会砸绿场景 | 2 |
 | graph-types [6] 现行犯 | 三档断言抓到语料题文不符 | 2、4 |
 | Q3 简报事实 #3 自错 | 自家简报也会记错语料事实 | 3 |
