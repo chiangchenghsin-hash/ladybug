@@ -68,10 +68,11 @@ jobs:
           export EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DBUILD_EXTENSIONS=gql -DBUILD_EXTENSION_TESTS=TRUE -DBUILD_TESTS=TRUE"
           make relwithdebinfo
 
-      - name: Generate datasets
-        run: |
-          bash scripts/generate_binary_demo.sh --lbug-shell-mode relwithdebinfo
-          uv run --with pyarrow python3 scripts/generate-dictionary-bug-fixture.py
+      # No Generate datasets step: this fork has no benchmark/ tree (the
+      # serializer that builds binary-demo is absent — binary-demo is only
+      # needed for shell-test, which these gates do not run), and the
+      # dictionary-bug fixtures are already tracked in the tree. The Windows
+      # baseline (1972/1975) was measured without running either generator.
 
       - name: GQL dual-run self-test (expect 161/161)
         run: |
