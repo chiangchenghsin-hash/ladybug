@@ -1,0 +1,99 @@
+name: GQL gates (Linux)
+# Pre-PR gate run for the GQL extension: same checks we run locally, on Linux.
+# Mirrors ci-workflow.yml's Linux recipe (Ninja, ccache, OpenSSL probe, dataset
+# generation, WERROR=1) and adds the GQL-specific gates: dual-run self-test,
+# opengql/tck conformance, and the full engine regression.
+on:
+  push:
+    branches: ['ci/**']
+  workflow_dispatch:
+
+jobs:
+  gql-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GEN: Ninja
+      TEST_JOBS: 4
+      NUM_THREADS: 4
+      WERROR: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout dataset and benchmarks
+        run: git submodule update --init dataset benchmark
+
+      - name: Sanity checks (ci-workflow parity)
+        run: |
+          ./scripts/check-include-guards.sh src/include
+          ./scripts/check-include-guards.sh test/include
+          for dir in extension/*/src/include ;do
+            ./scripts/check-include-guards.sh "$dir"
+          done
+          ./scripts/check-no-std-assert.sh src
+          ./scripts/check-no-std-assert.sh extension
+          python3 scripts/antlr4/hash.py src/antlr4/keywords.txt src/antlr4/Cypher.g4 > tmphashfile
+          cmp tmphashfile scripts/antlr4/hash.md5
+          rm tmphashfile
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: gql-gates-${{ runner.os }}-${{ github.ref }}
+          max-size: 2G
+          restore-keys: |
+            gql-gates-${{ runner.os }}-refs/heads/main
+            gql-gates-${{ runner.os }}-
+
+      - name: Install uv
+        run: pip3 install uv
+
+      - name: Build (gql extension only, WERROR=1)
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        shell: bash
+        run: |
+          # OpenSSL probe — same as ci-workflow.yml so https/INSTALL is exercised.
+          LIBSSL_PATH=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            LIBSSL_PATH=$(ldconfig -p | awk '/libssl.so.3/ {print $4; exit}')
+          fi
+          if [ -n "$LIBSSL_PATH" ]; then
+            LIBCRYPTO_PATH=$(dirname "$LIBSSL_PATH")/libcrypto.so.3
+            echo "Found OpenSSL libssl at $LIBSSL_PATH"
+            export EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DOPENSSL_ROOT_DIR=/usr -DOPENSSL_INCLUDE_DIR=/usr/include -DOPENSSL_CRYPTO_LIBRARY=$LIBCRYPTO_PATH -DOPENSSL_SSL_LIBRARY=$LIBSSL_PATH"
+          fi
+          export EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DBUILD_EXTENSIONS=gql -DBUILD_EXTENSION_TESTS=TRUE -DBUILD_TESTS=TRUE"
+          make relwithdebinfo
+
+      - name: Generate datasets
+        run: |
+          bash scripts/generate_binary_demo.sh --lbug-shell-mode relwithdebinfo
+          uv run --with pyarrow python3 scripts/generate-dictionary-bug-fixture.py
+
+      - name: GQL dual-run self-test (expect 161/161)
+        run: |
+          E2E=$(find build -name e2e_test -type f -print -quit)
+          echo "E2E=$E2E"
+          test -n "$E2E"
+          E2E_TEST_FILES_DIRECTORY=extension "$E2E" --gtest_filter="gql~test~test_files~*"
+
+      - name: TCK conformance (expect 190 green / 9 loud-fail / 7 skip)
+        run: |
+          E2E=$(find build -name e2e_test -type f -print -quit)
+          test -n "$E2E"
+          E2E_BIN="$E2E" python3 extension/gql/test/tck/run_tck.py
+
+      - name: Full engine regression
+        run: |
+          E2E=$(find build -name e2e_test -type f -print -quit)
+          E2E_TEST_FILES_DIRECTORY=test "$E2E" --gtest_filter="*"
+
+      - name: Upload TCK report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tck-report
+          path: extension/gql/test/tck/REPORT.md
+          if-no-files-found: ignore

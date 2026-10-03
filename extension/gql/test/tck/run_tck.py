@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -55,7 +56,25 @@ import unicodedata
 
 TCK_ROOT = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = TCK_ROOT.parents[3]
-E2E_BIN = REPO_ROOT / "build_v0211t" / "src" / "Release" / "e2e_test.exe"
+
+
+def _find_e2e_bin() -> pathlib.Path:
+    """E2E_BIN env override, else first existing candidate (Windows MSVC
+    layout from _build_gql.bat, then Ninja single-config layout on Linux)."""
+    env = os.environ.get("E2E_BIN")
+    if env:
+        return pathlib.Path(env)
+    for cand in (
+        REPO_ROOT / "build_v0211t" / "src" / "Release" / "e2e_test.exe",
+        REPO_ROOT / "build" / "test" / "runner" / "e2e_test",
+        REPO_ROOT / "build" / "test" / "runner" / "e2e_test.exe",
+    ):
+        if cand.exists():
+            return cand
+    return REPO_ROOT / "build_v0211t" / "src" / "Release" / "e2e_test.exe"
+
+
+E2E_BIN = _find_e2e_bin()
 GEN_DIR = REPO_ROOT / "_tck_gen"
 EXT_PATH = "${LBUG_ROOT_DIRECTORY}/extension/gql/build/libgql.lbug_extension"
 DEFAULT_REPORT = TCK_ROOT / "REPORT.md"
@@ -1023,7 +1042,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not E2E_BIN.exists():
-        print(f"e2e_test binary not found: {E2E_BIN} (build with _build_gql.bat)", file=sys.stderr)
+        print(f"e2e_test binary not found: {E2E_BIN} (build with _build_gql.bat, or set E2E_BIN)", file=sys.stderr)
         return 2
 
     all_sc = collect_scenarios(args.filter)
