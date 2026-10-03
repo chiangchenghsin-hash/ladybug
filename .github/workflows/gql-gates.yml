@@ -20,8 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout dataset and benchmarks
-        run: git submodule update --init dataset benchmark
+      # No submodule init: this fork absorbed all former submodules (extension,
+      # dataset, benchmark, ...) as regular tree content; .gitmodules is stale.
 
       - name: Sanity checks (ci-workflow parity)
         run: |
