@@ -25,13 +25,14 @@ jobs:
 
       - name: Sanity checks (ci-workflow parity)
         run: |
-          ./scripts/check-include-guards.sh src/include
-          ./scripts/check-include-guards.sh test/include
+          # bash (not ./) — this tree's snapshot flattened exec bits (644 .sh)
+          bash scripts/check-include-guards.sh src/include
+          bash scripts/check-include-guards.sh test/include
           for dir in extension/*/src/include ;do
-            ./scripts/check-include-guards.sh "$dir"
+            bash scripts/check-include-guards.sh "$dir"
           done
-          ./scripts/check-no-std-assert.sh src
-          ./scripts/check-no-std-assert.sh extension
+          bash scripts/check-no-std-assert.sh src
+          bash scripts/check-no-std-assert.sh extension
           python3 scripts/antlr4/hash.py src/antlr4/keywords.txt src/antlr4/Cypher.g4 > tmphashfile
           cmp tmphashfile scripts/antlr4/hash.md5
           rm tmphashfile
