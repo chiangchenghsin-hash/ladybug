@@ -109,8 +109,10 @@ public:
     explicit GqlToCypherTransformer(const std::string &query_p, GraphTypeRegistry *registry_p,
                                     SchemaCatalog *schemaCatalog_p = nullptr,
                                     AnyGraphResolver anyGraphResolver_p = nullptr)
-        : query(query_p), registry(registry_p), schemaCatalog(schemaCatalog_p),
-          anyGraphResolver(std::move(anyGraphResolver_p)) {}
+        // Member-init order must follow declaration order (GCC -Wreorder):
+        // anyGraphResolver is declared well before query/registry/schemaCatalog.
+        : anyGraphResolver(std::move(anyGraphResolver_p)), query(query_p),
+          registry(registry_p), schemaCatalog(schemaCatalog_p) {}
 
     // Absolute source span in `query`, with the replacement text to use when
     // the span is rewritten (aggregate → alias etc.).
