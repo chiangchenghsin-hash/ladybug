@@ -68,11 +68,13 @@ jobs:
           export EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DBUILD_EXTENSIONS=gql -DBUILD_EXTENSION_TESTS=TRUE -DBUILD_TESTS=TRUE"
           make relwithdebinfo
 
-      # No Generate datasets step: this fork has no benchmark/ tree (the
-      # serializer that builds binary-demo is absent — binary-demo is only
-      # needed for shell-test, which these gates do not run), and the
-      # dictionary-bug fixtures are already tracked in the tree. The Windows
-      # baseline (1972/1975) was measured without running either generator.
+      # generate_binary_demo.sh is intentionally NOT run: this fork has no
+      # benchmark/ tree (its serializer is absent) and binary-demo is only
+      # needed for shell-test, which these gates do not run. The dictionary-bug
+      # parquet fixtures ARE generated below — only their .zlib payloads are
+      # tracked; A/B/A_TO_B.parquet are build products the e2e COPYs need.
+      - name: Generate dictionary-bug fixtures
+        run: uv run --with pyarrow python3 scripts/generate-dictionary-bug-fixture.py
 
       - name: GQL dual-run self-test (expect 161/161)
         run: |
@@ -102,6 +104,7 @@ jobs:
           E2E_TEST_FILES_DIRECTORY=test "$E2E" --gtest_filter="*" > engine_regress.log 2>&1
           set -e
           tail -12 engine_regress.log
+          grep -B25 -A2 "^\[  FAILED  \]" engine_regress.log | head -100 || true
           python3 - <<'PY'
           import re, sys
           out = open("engine_regress.log", encoding="utf-8", errors="replace").read()
